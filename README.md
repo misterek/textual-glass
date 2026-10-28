@@ -61,6 +61,7 @@ Name textual-glass even if you only use orbital. uv would find it on its own, th
 | Build a dashboard (a CI monitor, a homelab board...) | [`textual-orbital/AGENTS.md`](textual-orbital/AGENTS.md#build-a-dashboard): a walkthrough from an empty project to a tested app |
 | Know what orbital's records, sources, rules and widgets are | [`textual-orbital/README.md`](textual-orbital/README.md) |
 | Change either library, or test an app headlessly | [`AGENTS.md`](AGENTS.md): the rules that keep it working in Ghostty, the layers, the test harness |
+| See what changed in a release | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Developing
 

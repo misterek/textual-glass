@@ -4,7 +4,7 @@ uploads and playback.
 The synthetic tests always run. The art tests use real pictures from a folder
 of your own, and are skipped unless you point at one::
 
-    GLASS_TEST_ART=~/IdeaProjects/art uv run pytest tests/test_images.py
+    GLASS_TEST_ART=~/Pictures uv run pytest tests/test_images.py
 """
 
 from __future__ import annotations
