@@ -49,6 +49,23 @@ class KittyModel:
         self.edit_bytes = 0
         self.upload_bytes = 0
         self.payload_bytes = 0
+        #: Which screen the terminal shows, when the caller tracks it (``Replay`` does): None, "alt" or
+        #: "primary". Ghostty keeps one image store per screen; glass only ever draws on the alternate one.
+        self.screen: str | None = None
+
+    def alt_screen(self, on: bool) -> None:
+        """Mode 1049 switched. Entering the alternate screen clears it, which in Ghostty 1.4 runs the
+        same delete as ``a=d,d=A`` (``Terminal.zig`` ``eraseDisplay(.complete)``): visible placements and
+        unused images go, images behind placeholders (virtual placements) stay."""
+        self.screen = "alt" if on else "primary"
+        if on:
+            self._delete_visible(free=True)
+
+    def _delete_visible(self, free: bool) -> None:
+        self.placements = {key: p for key, p in self.placements.items() if p["virtual"]}
+        if free:
+            used = {iid for iid, _ in self.placements}
+            self.images = {iid: img for iid, img in self.images.items() if iid in used}
 
     def err(self, msg: str, keys: dict) -> None:
         if len(self.errors) < 200:
@@ -112,6 +129,8 @@ class KittyModel:
         if a == "q":
             self.queries += 1
             return
+        if self.screen == "primary":
+            self.err("graphics on the primary screen (after leaving the alternate screen)", k)
         iid = gi("i")
         pixels = None
         if payload and a in ("t", "T", "f"):
@@ -137,6 +156,16 @@ class KittyModel:
                 self.placements = {key: p for key, p in self.placements.items() if key[0] != iid}
                 if d == "I":
                     self.images.pop(iid, None)
+            elif d in ("a", "A"):  # Ghostty 1.4: visible placements only (graphics_storage.zig)
+                self._delete_visible(free=d == "A")
+            elif d in ("r", "R"):  # every placement of the ids in x..y, virtual ones included
+                first, last = gi("x"), gi("y")
+                if not 0 < first <= last:
+                    self.err("EINVAL bad id range", k)
+                    return
+                self.placements = {key: p for key, p in self.placements.items() if not first <= key[0] <= last}
+                if d == "R":
+                    self.images = {i: img for i, img in self.images.items() if not first <= i <= last}
             else:
                 self.err("unexpected delete mode", k)
             return
