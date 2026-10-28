@@ -576,16 +576,23 @@ async def test_every_toast_ends_in_alert_done_however_it_goes() -> None:
         assert app.finish_alert("snooze") and "b" in app.alert_queue.snoozed and app.alert_view is None
 
         app.raise_alert(Alert("c", "custom", "a popup", style="modal"))  # its own style wins
+        app.raise_alert(Alert("d", "custom", "another", style="modal"))  # before the popup has mounted
         await pilot.pause()
         popup = app.alert_view
-        assert isinstance(popup, AlertScreen) and app.screen is popup
+        assert isinstance(popup, AlertScreen) and app.screen is popup and popup.queued == 1
+        assert "1 more waiting" in str(popup.query_one("#alert-meta").render())
         app.push_screen(SourcesScreen(app.store.statuses()))
         await pilot.pause()
         assert app.finish_alert("dismiss") is False and isinstance(app.screen, SourcesScreen), "covered: left alone"
         await pilot.press("escape")
         await pilot.pause()
         assert app.finish_alert("dismiss") and not app.errors
-        await until(lambda: app.alert_view is None and len(app.screen_stack) == 1, what="the popup closing")
+        await until(lambda: isinstance(app.alert_view, AlertScreen) and app.alert_view.alert.key == "d",
+                    what="the next popup")
+        await pilot.pause()
+        assert app.finish_alert("dismiss")
+        await until(lambda: app.alert_view is None and len(app.screen_stack) == 1, what="the popups closing")
+        assert not app.errors
 
 
 def test_alert_styles_are_checked() -> None:

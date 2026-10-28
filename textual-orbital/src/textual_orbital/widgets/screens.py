@@ -169,7 +169,8 @@ class AlertScreen(OrbitalModal):
         """How many more alerts are waiting (``OrbitalApp`` keeps it current)."""
         if queued != self.queued:
             self.queued = queued
-            self._update_meta()
+            if self.is_mounted:  # else on_mount shows it
+                self._update_meta()
 
     def _update_meta(self) -> None:
         meta = Text(f"received {fmt_age(now() - self.raised)} ago", style=PALETTE["text_dim"])

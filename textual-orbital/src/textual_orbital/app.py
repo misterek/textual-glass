@@ -715,7 +715,7 @@ class OrbitalApp(Glass, App[None]):
 
     def _count_queued(self) -> None:
         """The alert on screen says how many more are waiting."""
-        if self._alert_view is not None and self._alert_view.is_attached:
+        if self._alert_view is not None:
             self._alert_view.set_queued(len(self.alert_queue))
 
     def _evaluate_alerts(self, snapshot: Snapshot) -> None:
