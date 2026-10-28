@@ -83,7 +83,9 @@ class Source(Protocol):
     A source may also have a ``timeout`` attribute: the fetch's deadline in
     seconds (by default ``max(2 * interval, 10)``, see :func:`fetch_timeout`).
     When a fetch passes it, the source turns red ("timed out after 20 s") and
-    is polled again later; the late result is ignored.
+    is polled again later; the late result is ignored. So the next fetch may
+    start while a hung one is still blocked: keep ``fetch()`` safe to run twice
+    at once (a cache it keeps is replaced in one assignment, or under a lock).
 
     Record keys must be unique across sources (attention and track ``key``,
     entity ``id``): prefix them with the source key (``"GH:412"``).
