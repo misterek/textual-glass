@@ -588,6 +588,36 @@ async def test_queue_rows_take_two_lines_when_every_row_fits() -> None:
         assert queue.row_lines == 2, "two_line=True always"
 
 
+class Leaves(Widgets):
+    """Records ``PriorityList.RowsLeft`` without subclassing the list."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.left: list[tuple[str, ...]] = []
+
+    def on_priority_list_rows_left(self, message: PriorityList.RowsLeft) -> None:
+        assert message.control is self.query_one(PriorityList)
+        self.left.append(tuple(item.key for item in message.items))
+
+
+async def test_queue_posts_the_rows_that_left() -> None:
+    items = [AttentionItem(f"k{i}", "XX", 5, "review", f"item {i}") for i in range(5)]
+    app = Leaves()
+    async with app.run_test(size=(80, 20)) as pilot:
+        queue = app.query_one(PriorityList)
+        queue.set_items(items[:3], items[3:])
+        await pilot.pause()
+        assert app.left == [], "nothing left an empty list"
+        queue.action_toggle_aware()  # folding the be-aware section is not leaving
+        queue.set_items([items[0], items[2]], items[3:4])  # k1 snoozed, k4 gone from its source
+        await pilot.pause()
+        assert app.left == [("k1", "k4")], "in their old order"
+        queue.set_items([items[1], items[0]], [items[2]])  # k1 back, k2 moved to be-aware: only k3 left
+        queue.set_items([items[1], items[0]], [items[2]])  # the same rows: no message
+        await pilot.pause()
+        assert app.left == [("k1", "k4"), ("k3",)]
+
+
 async def test_track_caption_keeps_the_name_and_cuts_the_tail() -> None:
     t = now()
     item = TrackItem("a", "XX", "storefront checkout", "v2.3.1", 1, TrackHealth.WARN, t,

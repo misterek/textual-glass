@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 from textual.binding import Binding, BindingType
+from textual.message import Message
 
 from textual_glass import PixelContext
 from textual_glass.items import Dot, Meter, Rule, Signal, Spine
@@ -65,7 +66,8 @@ class PriorityList(SelectList[Any]):
     """The needs-attention queue plus a foldable be-aware section.
 
     ``set_items(attention, aware)``; ``space`` (or ``a``) folds the be-aware
-    section. Posts ``Highlighted``/``Selected`` with the :class:`AttentionItem`.
+    section. Posts ``Highlighted``/``Selected`` with the :class:`AttentionItem`,
+    and :class:`PriorityList.RowsLeft` when items leave the list.
 
     Args:
         two_line: Two lines per row (the second shows where and the detail).
@@ -82,6 +84,22 @@ class PriorityList(SelectList[Any]):
 
     #: Shorter "why" labels for narrow queues (the source badge says the rest).
     SHORT_WHY: ClassVar[Mapping[str, str]] = {"claude waiting": "waiting", "claude error": "errored"}
+
+    class RowsLeft(Message):
+        """Posted after :meth:`PriorityList.set_items` when items left the list:
+        ``items`` are the ones whose key is in neither section any more (snoozed,
+        resolved, dropped by their source), in their old order. Folding the
+        be-aware section is not leaving. Handle it as ``on_priority_list_rows_left``
+        (an exit effect, a count of what cleared)."""
+
+        def __init__(self, priority_list: PriorityList, items: tuple[AttentionItem, ...]) -> None:
+            super().__init__()
+            self.priority_list = priority_list
+            self.items = items
+
+        @property
+        def control(self) -> PriorityList:
+            return self.priority_list
 
     def __init__(self, *, two_line: bool | None = None, id: str | None = None, classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
@@ -101,9 +119,15 @@ class PriorityList(SelectList[Any]):
 
     def set_items(self, attention: Sequence[AttentionItem], aware: Sequence[AttentionItem] = (),
                   at: datetime | None = None) -> None:
+        """Replace the rows; posts :class:`RowsLeft` for the items that are gone."""
+        before = [*self.attention, *self.aware]
         self.attention, self.aware = list(attention), list(aware)
         self.at = at or now()
         self._rebuild()
+        kept = {i.key for i in (*self.attention, *self.aware)}
+        left = tuple(i for i in before if i.key not in kept)
+        if left:
+            self.post_message(self.RowsLeft(self, left))
 
     def tick(self, at: datetime | None = None) -> None:
         self.at = at or now()

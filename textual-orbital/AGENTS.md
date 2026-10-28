@@ -674,6 +674,35 @@ Write one `Source` per system. A source is a plain object with `key`, `name`, `i
 4. Don't add attributes Textual already has (rule 14). Don't write anything for popups: glass dims the screen below.
 5. To add it to the library: put it in the right `widgets/` module, export it from `widgets/__init__.py` and `textual_orbital/__init__.py`, add it to `test_app_and_widgets_add_no_attribute_textual_has`, and test it in `tests/test_pilot.py` in both modes (see `test_widgets_take_any_stages_and_kinds`). If it shows a new kind of visual, add a row to `LEGEND` in `widgets/screens.py` and to the README.
 
+## An exit effect for rows that leave the queue
+
+`PriorityList.set_items` replaces its rows at once, so a row that is snoozed, resolved or dropped by its source just disappears. After each `set_items` the list posts `PriorityList.RowsLeft`, whose `items` are the ones that left (in neither section any more; folding the be-aware section doesn't count). Handle it in the page, no subclass needed. This one says what cleared in the panel's title for three seconds, in both modes, and costs two redraws (rule 9):
+
+```python
+from textual_glass import GlassPanel
+from textual_orbital import Page, PriorityList
+
+
+class OverviewPage(Page):
+    cleared = 0  # rows that left in the last three seconds
+
+    def on_priority_list_rows_left(self, message: PriorityList.RowsLeft) -> None:
+        count = len(message.items)
+        self.cleared += count
+        self.show_cleared()
+        self.set_timer(3.0, lambda: self.forget(count))
+
+    def forget(self, count: int) -> None:
+        self.cleared -= count
+        self.show_cleared()
+
+    def show_cleared(self) -> None:  # call it from update_snapshot too, where the title is set
+        self.query_one("#queue-panel", GlassPanel).set_title(
+            "NEEDS ATTENTION", (f"✓ {self.cleared} cleared" if self.cleared else "", "green"))
+```
+
+For a pixel effect, keep each item that left with the time it left, and have a `PixelWidget` over the list yield a fading item for it (a `Rule` with a falling `alpha`) for a fraction of a second: call `ctx.animating()` from `pixel_items` while anything fades, so the engine ticks until it is gone and then goes quiet again (rule 9).
+
 ## Adding a rule
 
 - **In an app**, write a class with `conditions(snapshot)` (step 3 above, or `examples/console/rules.py`) and pass it in `rules=(...)`. Include `WaitingRule()` if you have entities. The `Condition`'s key must change when the situation is "new again"; its `source` decides the startup baseline; add the kind to `startup_kinds` (`OrbitalApp.alert_rules.startup_kinds`) only if it should alert for conditions already true at startup.
