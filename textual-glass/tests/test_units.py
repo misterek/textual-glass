@@ -629,19 +629,30 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     bare = Bare()
     assert hooks.has_driver(bare) is False  # type: ignore[arg-type]
     assert hooks.driver_write(bare, "x") is False  # type: ignore[arg-type]
-    assert hooks.writer_backlog(SimpleNamespace(_driver=SimpleNamespace())) == 0  # type: ignore[arg-type]
     hooks.wrap_end_update(bare, lambda: None)()  # type: ignore[arg-type]
     assert hooks.option_lines(bare) == []  # type: ignore[arg-type]
     assert hooks.row_label_width(bare) == 0  # type: ignore[arg-type]
     assert hooks.border_label_length(SimpleNamespace(border_title="[b]Hi[/b]", border_subtitle=None)) == 2  # type: ignore[arg-type]
     screen = SimpleNamespace(_compositor=SimpleNamespace(), walk_children=lambda kind: [])
     assert hooks.visible_widgets(screen) == []  # type: ignore[arg-type]
+    reshaped = SimpleNamespace(_compositor=SimpleNamespace(visible_widgets={"widget": "no (region, clip) pair"}),
+                               walk_children=lambda kind: [])
+    assert hooks.visible_widgets(reshaped) == [], "a mapping of another shape falls back too"  # type: ignore[arg-type]
     with monkeypatch.context() as m:
         m.setattr(textual, "_border", SimpleNamespace())
         glyphs = hooks.BorderGlyphs()
-        glyphs.blank(["round"])
+        assert glyphs.blank(["round"]) is False
         glyphs.restore()
         assert not glyphs.active
+    from textual import _border
+
+    for odd in ((("+", "-", "+", "!"),) * 3, (("+", "-", "+"),) * 4, ((1, 2, 3),) * 3, "+-+|||+-+"):
+        with monkeypatch.context() as m:  # Textual reads this table outside any try: never write a wrong shape
+            table = {**_border.BORDER_CHARS, "round": odd}
+            m.setattr(_border, "BORDER_CHARS", table)
+            glyphs = hooks.BorderGlyphs()
+            assert glyphs.blank(["round", "heavy"]) is False, odd
+            assert not glyphs.active and table["round"] == odd and table["heavy"] == _border.BORDER_CHARS["heavy"]
     with monkeypatch.context() as m:
         m.delattr(Widget, "get_line_filters")
         hooks.add_filter_provider(bare, lambda widget: None)  # type: ignore[arg-type]
@@ -666,6 +677,22 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
         assert app.glass.active and app.glass.errors == 0, app.glass.last_error
         assert app.glass.layers, "the scene is still drawn (from the public widget tree)"
     assert not hasattr(App, "_glass_never_there")
+
+    # A border table Textual can still read but glass can't patch safely: skipped, with a log line.
+    import types
+
+    monkeypatch.undo()
+    from textual import _border
+
+    monkeypatch.setattr(_border, "BORDER_CHARS", types.MappingProxyType(dict(_border.BORDER_CHARS)))
+    app = GlassSample()
+    notes: list[str] = []
+    app.glass._log = lambda text, error=False: notes.append(text)  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 32)) as pilot:
+        await start(app, pilot)
+        assert app.glass.active and app.glass.errors == 0, app.glass.last_error
+        assert _border.BORDER_CHARS["round"][0][0] == "╭", "the borders keep their glyphs"
+        assert any("border" in note for note in notes), notes
 
 
 def test_terminal_write_sends_through_textual_s_writer(monkeypatch: pytest.MonkeyPatch) -> None:

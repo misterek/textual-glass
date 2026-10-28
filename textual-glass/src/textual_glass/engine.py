@@ -334,7 +334,8 @@ class GlassEngine:
         self._generation += 1
         self.active = True
         hooks.add_filter_provider(app, self.filter_for)
-        self._borders.blank(GLASS_EDGES)
+        if not self._borders.blank(GLASS_EDGES) and not self._borders.active:
+            self._log("Textual's border table is missing or has an unexpected shape; borders keep their glyphs")
         app.add_class("-textual-glass")
         self._unwrap = hooks.wrap_end_update(app, self.on_frame)
         if self._timer is None:
@@ -469,6 +470,10 @@ class GlassEngine:
         """Run the 60 Hz tick until animations finish."""
         if self._timer is not None:
             self._timer.resume()
+
+    def _log(self, text: str, error: bool = False) -> None:
+        log = self.app.log
+        (log.error if error else log.warning)(f"textual-glass: {text}")
 
     def _failed(self, error: BaseException) -> None:
         import traceback
