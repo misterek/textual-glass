@@ -17,7 +17,7 @@ class Page(Vertical):
 
     Subclass it, compose the page from the widgets, and fill them in
     :meth:`update_snapshot` (``OrbitalApp`` calls it on every page whenever the
-    data changes, and when items are snoozed or woken).
+    data changes, when items are snoozed or woken, and when the date changes).
     """
 
     #: The key hints for the key bar while this page shows.
@@ -35,7 +35,7 @@ class Page(Vertical):
         return found if isinstance(found, Mapping) else {}
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
-        """New data (or snoozing changed): fill the widgets."""
+        """New data (or snoozing changed, or a new day): fill the widgets."""
 
     def minute_tick(self, at: datetime) -> None:
         """A minute passed: every widget with ``tick(at)`` re-renders its ages."""

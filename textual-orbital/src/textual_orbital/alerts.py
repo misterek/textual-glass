@@ -134,6 +134,12 @@ class WaitingRule:
     """An entity entered ``WAITING``: kind ``"waiting"``, headline "NEEDS YOU",
     priority 100, amber. A new wait (a new ``since``) is a new alert.
 
+    **The entity's ``since`` must be stable**: when it *entered* ``WAITING``,
+    the same on every fetch while it waits. The alert's key is built from it,
+    so a source that sets ``since=now()`` makes every poll a new wait, and the
+    popup comes back on every fetch. Without an API timestamp, keep the first
+    time the source saw the wait, keyed by the entity's id.
+
     Args:
         source: The key of the source that reports the entities (its first
             fetch is the baseline when ``"waiting"`` is not a startup kind).

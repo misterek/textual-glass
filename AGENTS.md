@@ -30,12 +30,14 @@ textual-glass knows nothing about orbital. Orbital uses only glass's public name
 
 In an orbital app the data flows like this:
 
-1. Each `Source.fetch()` runs in a worker thread, at the source's own interval.
-2. The result comes back to the app thread (`OrbitalApp.call_from_worker`), and `Store.apply` (or `Store.fail`) merges it.
-3. If the merged content changed, `OrbitalApp.snapshot_changed(snapshot)` runs. By default it calls `update_snapshot(snapshot)` on every widget that has one (each `Page`). Health changes go to `set_statuses`, and the minute tick goes to `minute_tick`.
-4. After every fetch, whether it changed anything or failed, the alert rules run on a fresh snapshot taken at that fetch's time (not on the minute tick), and new alerts are queued and shown.
+1. Each `Source.fetch()` runs in a daemon thread of its own, with a deadline (`Source.timeout`). The next fetch is scheduled an interval after it ends, and later while the source fails (rule 21).
+2. The result comes back to the app thread (`OrbitalApp.call_from_worker`), and `Store.apply` (or `Store.fail`) merges it. `Store.apply` fails the source instead when its data has a naive datetime or a key another source uses (rule 23).
+3. Every fetch re-stamps `app.snapshot` with its time. If the merged content changed, `OrbitalApp.snapshot_changed(snapshot)` runs. By default it calls `update_snapshot(snapshot)` on every widget that has one (each `Page`). Health changes go to `set_statuses`, and the minute tick goes to `minute_tick`.
+4. After every fetch, whether it changed anything, failed or timed out, the alert rules run on that snapshot (not on the minute tick), and new alerts are queued and shown.
 5. The pages call setters on the widgets (`set_items`, `set_entities`...).
 6. Textual renders the text. At the end of that frame, glass's engine collects the pixel items, compares them with what the terminal holds, and sends only the changes.
+
+Each step on the app thread is guarded on its own: what raises goes to `OrbitalApp.report_error` and the other steps still run (rule 22).
 
 ## Where things live
 
@@ -75,7 +77,7 @@ pytest runs with `--import-mode=importlib`, because both packages have `tests/te
 
 ## Rules that must not be "simplified" away
 
-Rules 1 to 19 each have at least one test that guards them; rule 20 is enforced by the harness and the test fixtures. The first eight were learned building glass, the rest building the dashboard that became orbital.
+Rules 1 to 19 and 21 to 24 each have at least one test that guards them; rule 20 is enforced by the harness and the test fixtures. The first eight were learned building glass, the rest building the dashboard that became orbital.
 
 1. **Put `q=2` on every graphics command, and never query the terminal once Textual is running.** Textual's input parser doesn't understand kitty graphics replies, so they arrive as key presses. An `ENOENT ...` reply containing `j` or `k` moves the cursor. Detection queries only before the driver starts: `Glass.run_async` calls `app.glass.detect()` first.
 2. **Upload every frame of an animation, then start it** (`kitty.animation`). Ghostty 1.4 rejects a chunked `a=f` sent to an image whose animation is playing; it replies `ENOENT` and silently drops the frame, so every later frame shifts by one.
@@ -99,9 +101,13 @@ Rules 1 to 19 each have at least one test that guards them; rule 20 is enforced 
 20. **Tests must never open the user's real browser, or any GUI app.** A test that pressed `o` once opened made-up URLs in the user's browser. Three guards, all required:
     - `textual_glass.testing.harness.run_app` gives every child process `BROWSER=true`, so Python's `webbrowser` runs the no-op `true` command.
     - Test suites replace `webbrowser.open`, `open_new` and `open_new_tab` with a recorder in an autouse fixture (`no_browser` in `textual-orbital/tests/conftest.py`; copy it into any suite that drives an app with links).
-    - `OrbitalApp(open_urls=False)` is the default, so `o` only shows the link. A real dashboard passes `open_urls=True` in its `main()`, never in tests.
+    - `OrbitalApp(open_urls=False)` is the default, so `o` only shows the link. A real dashboard passes `open_urls=True` in its `main()`, never in tests. The one exception is the test of the opening path itself (`test_open_link_runs_off_the_ui_thread_and_honours_open_hosts`), which replaces `webbrowser.open` with a recorder in the test before it passes `open_urls=True`.
 
     The same goes for anything else that leaves the terminal: no `open`, `osascript`, new terminal windows or screenshots from tests or from an agent.
+21. **A fetch never stops its source, the other sources or quitting.** Each fetch runs in a daemon thread of its own, with a deadline: `Source.timeout`, by default `max(2 * interval, 10 s)` (`fetch_timeout`). Past it, the source turns red ("timed out after 20 s"), the fetch's token is dropped so its late result is ignored, and the source is fetched again with backoff. A thread can't be stopped, so a source with `OrbitalApp.HUNG_LIMIT` (2) hung fetches pauses until one returns, and says so in its error. With the old pool of four workers, one fetch with no timeout (a socket that died while the laptop slept) kept its source amber for good, four of them stopped every source, and Python joined the pool's threads at exit, so `q` left a frozen process. `fetch()` must still set its own network and subprocess timeouts. Tests: `test_a_hung_fetch_times_out_and_never_stops_the_other_sources` and `test_at_the_hung_limit_a_source_waits_for_a_fetch_to_return` in `textual-orbital/tests/test_app.py`, `test_quitting_never_waits_for_a_hung_fetch` in its `test_pty.py`.
+22. **Nothing raised on the app thread is silent, and one failing step never skips the others.** `loop.call_soon_threadsafe` hands a callback's exception to asyncio's handler, which logs it to stderr, and Textual captures stderr: a rule or a page that raised froze the dashboard without a word, every fetch. So `call_from_worker` guards its callback; `_publish` runs the snapshot hook, health, the alert rules and the badge as separate guarded steps; the default hooks guard each widget; the minute tick re-arms in a `finally`. All of it goes to `OrbitalApp.report_error(where, error)`: the `textual_orbital` logger with the traceback, `app.errors` (the health screen lists them with `SourcesScreen(..., errors=app.errors)`), and a toast at most every `ERROR_TOAST_SPACING` seconds. Tests: `test_a_failing_step_is_reported_and_the_others_still_run`, `test_errors_from_thread_callbacks_and_the_snapshot_are_reported` and `test_a_raising_minute_tick_still_arms_the_next_minute` in `test_app.py`; the console's pilot tests require `app.errors` to stay empty.
+23. **One source's bad data fails that source, never the merge.** `Store.apply` rejects a fetch with a naive `datetime` in any record ("naive datetime in AttentionItem.since": the attention sort compares every source's `since`, and one naive value raised there for all of them) or with a key that another source's current data already has ("duplicate key '412' (also from GH): prefix keys with the source": snoozes, `item()` and jumps use bare keys). The source turns red and keeps its last good data. Don't coerce timestamps or namespace keys in the store: keys stay bare and must be unique across sources. Tests: `test_store_fails_a_source_with_a_naive_datetime` and `test_store_rejects_keys_another_source_already_uses` in `test_units.py`.
+24. **Dismiss only the screen on top.** In Textual 8.2.8, `Screen.dismiss()` on a screen that is not on top runs that screen's callback and then pops whichever screen *is* on top. The alert popup used to be closed when its condition went away even with the source health screen open over it (that one closed instead), and a second publish before the dismiss callback had run closed it again. `OrbitalApp` forgets the popup the moment it closes it, and `AlertScreen.close_resolved()` dismisses it only while it is on top, or as soon as it is again. Tests: `test_a_resolved_alert_under_another_popup_closes_when_it_is_on_top_again` and `test_a_second_publish_never_closes_a_resolved_alert_twice` in `test_app.py`.
 
 ## Layers
 
@@ -243,5 +249,5 @@ Ask the user to run the app in Ghostty and describe it or send a screenshot. Nev
 ## Known gaps
 
 - Only tested headlessly. The tests check the byte stream against the protocol and against Ghostty's source, not real pixels.
-- Untested in kitty, tmux and screen. Under tmux or screen glass is off unless forced with `TEXTUAL_GLASS=on`, and it would need passthrough even then.
+- Untested in kitty, tmux and screen. Under tmux or screen glass is off unless forced with `TEXTUAL_GLASS=on`, and it would need passthrough even then. Orbital's notifications do go through tmux's passthrough (with `allow-passthrough on`); that is checked only in a recorded byte stream.
 - Private Textual API (rule 7) pins Textual to 8.x.

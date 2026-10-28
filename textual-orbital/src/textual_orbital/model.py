@@ -437,6 +437,10 @@ class Metrics(Mapping[str, float]):
 class Snapshot:
     """Everything the dashboard shows, merged from every source.
 
+    ``taken_at`` is when it was taken: the end of the fetch it was merged after,
+    or the moment items were snoozed or woken or the date changed. Widgets take
+    their "now" from it.
+
     ``metrics`` merges every source's metrics in source order (a later source's
     value wins for a name two sources share, so give them distinct names).
     """

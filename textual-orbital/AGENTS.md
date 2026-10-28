@@ -9,11 +9,11 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 | Module | What it does |
 | --- | --- |
 | `model.py` | The records: `Entity`, `AttentionItem`, `TrackItem`, `Event`, `Goal`, `Task`, `DoneTask`, `SourceStatus`, `Alert`, `Metrics`, `Snapshot`, `WeekStats`, `DayCount` and `week_stats`, `queue_load`. |
-| `provider.py` | **The data seam.** `Source`, `SourceData`, `Provider`, `StaticProvider`, the `Store` that merges per-source data into a `Snapshot`, `timed_fetch`. |
+| `provider.py` | **The data seam.** `Source`, `SourceData`, `Provider`, `StaticProvider`, the `Store` that merges per-source data into a `Snapshot` (and rejects naive datetimes and duplicate keys), `timed_fetch`, `fetch_timeout`, `poll_delay`. |
 | `alerts.py` | `AlertQueue` (priority, dedupe, snooze, resolve), `Rule`, `Condition`, `AlertRules` (snapshot transitions to alerts, with the startup baseline), `WaitingRule`, `alert_color`. |
 | `notify.py` | `Notifier`: OSC 777 / OSC 9 notifications, the OSC 2 title badge and the bell, with Ghostty 1.4's behaviour documented; `notification_mode`. |
 | `theme.py` | `ORBITAL` and `ORBITAL_NAVY` (Textual themes with glass's variables), `PALETTE`, the source and "why" colour tables, colour helpers, `fmt_age`, `fmt_interval`, `ellipsize`, `now`. |
-| `app.py` | `OrbitalApp(Glass, App)`: polling in a thread pool, publishing snapshots, health, the minute tick, alerts and their popups, notifications, the title badge, snoozing, breakpoints, `call_from_worker`. |
+| `app.py` | `OrbitalApp(Glass, App)`: polling (a daemon thread and a deadline per fetch, backoff), publishing snapshots in guarded steps, `report_error`, health, the minute tick, alerts and their popups, notifications, the title badge, snoozing, opening links, breakpoints, `call_from_worker`. |
 | `widgets/header.py` | `HeaderStrip`, `Brand`, `SourceHealth`, `Clock`, `KeyBar`. |
 | `widgets/beacons.py` | `BeaconRow`, `state_text`, `order_entities`, `STATE_COLORS`, `STATE_GLYPHS`. |
 | `widgets/lists.py` | `PriorityList`, `TaskBoard`, `EventLog`, `DoneList` (all `SelectList` subclasses), `Section`, `signal_glyphs`, `task_color`. |
@@ -29,7 +29,7 @@ Elsewhere in `textual-orbital/`:
 | `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint. |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`. |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world. Only for the demo and the tests; don't import it from real code. |
-| `tests/` | `test_units.py`, `test_pilot.py`, `test_pty.py`, `conftest.py` (the `output` and `no_browser` fixtures), `screenshots.py`. |
+| `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
 ## Build a dashboard
 
@@ -390,7 +390,7 @@ class CIBoard(OrbitalApp):
             self.snooze_item(row.key)  # hidden for an hour (ITEM_SNOOZE)
 
     def action_sources(self) -> None:
-        self.push_screen(SourcesScreen(self.store.statuses()))
+        self.push_screen(SourcesScreen(self.store.statuses(), errors=self.errors))  # and what the app caught
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen([("1 2", "pages"), ("j k", "move"), ("enter", "details"), ("o", "open"),
@@ -652,17 +652,18 @@ To watch both, put both sources in one provider: `StaticProvider([PipelineSource
 
 Write one `Source` per system. A source is a plain object with `key`, `name`, `interval` and `fetch() -> SourceData`; no base class is needed.
 
-- **Keys.** The source `key` is short ("GH", "CI") and unique; it is the badge in lists and the health dot. Queues and tables show two characters of it (`EventLog` three), so "GIT" shows as "GI". Record keys must be stable across fetches (`AttentionItem.key`, `TrackItem.key`, `Entity.id`, `Task.id`): selection, snooze, alert dedupe and diffing all depend on them. Prefix them with the source key so two sources can't collide.
+- **Keys.** The source `key` is short ("GH", "CI") and unique; it is the badge in lists and the health dot. Queues and tables show two characters of it (`EventLog` three), so "GIT" shows as "GI". Record keys must be stable across fetches (`AttentionItem.key`, `TrackItem.key`, `Entity.id`, `Task.id`): selection, snooze, alert dedupe and diffing all depend on them. They must also be unique across sources, because snoozes, `item()` and jumps use the bare key: prefix them with the source key (`"CI:web:deploy:main"`). A fetch whose attention key, track key or entity id another source already uses fails, as "duplicate key 'X' (also from GH): prefix keys with the source" (rule 23 in [`../AGENTS.md`](../AGENTS.md)).
 - **What to return.** Return a `SourceData`. Each field you set *replaces* that source's previous value for that field. `None` (the default) means "this source doesn't report this", and `[]` means "it reports none". So a source that owns the track must return `track=[]` when the track is empty, or the old items stay (and `metrics={}` when it has no numbers left). Sources never see each other's data; the store concatenates them.
 - **Errors.** Raise on failure; don't return partial or empty data. The first line of the exception becomes the red dot's reason (`h`), and the last good data stays on screen. `subprocess.run(..., check=True)` raises without the error output, so check `returncode` and raise with `stderr`.
-- **Timestamps.** Use timezone-aware datetimes (`textual_orbital.now()`, or `datetime.fromisoformat` on an ISO string with an offset), and put *when it started* in the record: `since`, `stage_since`, `opened_at`, `status_since`, `done_at`. Never an age, a count of minutes, or "updated just now". Ages are computed at render time through `fmt_age`, so time passing doesn't make the data "change", and a fetch that returns equal data costs nothing downstream (rule 9).
+- **Timestamps.** Use timezone-aware datetimes (`textual_orbital.now()`, or `datetime.fromisoformat` on an ISO string with an offset; a naive one fails the fetch, as "naive datetime in AttentionItem.since"), and put *when it started* in the record: `since`, `stage_since`, `opened_at`, `status_since`, `done_at`. Never an age, a count of minutes, or "updated just now". Ages are computed at render time through `fmt_age`, so time passing doesn't make the data "change", and a fetch that returns equal data costs nothing downstream (rule 9).
 - **`stage_since`** drives the trail and "stuck" on the `Track`. Use the API's "entered this stage at" if it has one. If not, keep a small cache in the source keyed by `(item key, stage)`, as `PipelineSource` does, and drop keys that are gone.
 - **Your own records in `data`.** Keep everything you know about an item in a frozen dataclass of your own and put it in `data` (`Entity`, `AttentionItem`, `TrackItem`, `Event`). It must be hashable: no lists or dicts in it (use tuples). Derive the generic fields (`stage`, `health`, `score`, `why`) from it in one function, and read it back in rules and detail views with `cast(MyRecord, item.data)`.
 - **Attention items.** `score` is 0-10 and orders the queue (9+ is red). `why` is a short verb ("review", "respond", "fix build"); add a colour for yours to `WHY_COLORS`. `section="aware"` puts an item in the be-aware list. `ref=("track", key)` or `("entity", id)` links an item to a record, so `enter` can show that record.
 - **Numbers.** For a gauge fed straight from a system (a disk's fill, a queue depth), return `metrics={"name": value}` and read `snapshot.metric("name")`. Round each value to what the screen shows (a fraction shown as a whole percent: `round(x, 2)`): every changed value is a content change and redraws (rule 9). Prefix the names with the source key (`"MD.disk"`) when two sources might use the same one: they merge in source order and the later one wins.
-- **Entities.** `EntityState.WAITING` means "needs you"; `since` is when it entered that state, so a new wait gets a new `since` and therefore a new alert from `WaitingRule`. Pass `WaitingRule(source="XX")` with your source key: its first fetch is the baseline. An entity doesn't need a `BeaconRow` to count: `WAITING` ones drive the title badge and `WaitingRule` either way.
+- **Entities.** `EntityState.WAITING` means "needs you"; `since` is when it entered that state, so a new wait gets a new `since` and therefore a new alert from `WaitingRule`. **Keep `since` stable while the wait lasts**: `since=now()` on every fetch is a new wait on every poll, and the popup comes back every few seconds. Without an API timestamp, remember the first time you saw the wait, as `PipelineSource` does for stages. Pass `WaitingRule(source="XX")` with your source key: its first fetch is the baseline. An entity doesn't need a `BeaconRow` to count: `WAITING` ones drive the title badge and `WaitingRule` either way.
 - **Events.** Emit one `Event` per thing that happened, for at least this week and last week; `Snapshot.week()` counts them by `kind`. There is no separate stats API.
-- **Intervals.** Claude Code sessions every 10 s, most APIs every 60 s. Fetches run in a pool of four threads; a source is not fetched again while its last fetch is still running.
+- **Intervals.** Claude Code sessions every 10 s, most APIs every 60 s. Each fetch runs in a daemon thread of its own, and the next one starts `interval` seconds after it ends, so a slow fetch is never re-run at once. A failing source waits twice as long after each failure in a row (timeouts included), up to 15 minutes, which spares rate-limited APIs; `r` (`app.poll_all()`) fetches now anyway.
+- **Timeouts.** Give every network call and subprocess in `fetch()` its own timeout (`subprocess.run(..., timeout=30)`, as `ActionsSource` does): a thread can't be stopped from outside. The app also gives each fetch a deadline, the source's `timeout` attribute or `max(2 * interval, 10)` seconds. Past it the source turns red, "timed out after 20 s", the late result is ignored, and after two such hung fetches the source pauses until one returns (rule 21 in [`../AGENTS.md`](../AGENTS.md)).
 - **Test a source without the UI:** `timed_fetch(source)` returns `(data, error, ms)`. For a source that calls a CLI or an API, test the mapping against canned output (monkeypatch `subprocess.run` or your HTTP call).
 
 ## Adding a widget
@@ -697,7 +698,7 @@ The tests import the console example's modules by name (`app`, `demo`, `pages`, 
 
 ## Known gaps
 
-- Untested in kitty and in tmux. Notifications were checked only against Ghostty's source; `--notify auto` picks OSC 9 for iTerm2, WezTerm and kitty untested.
+- Untested in kitty and in tmux. Notifications were checked only against Ghostty's source; `--notify auto` picks OSC 9 for iTerm2, WezTerm and kitty untested. Under tmux they go through DCS passthrough (`allow-passthrough on`), checked only in a recorded byte stream.
 - The window title is cleared on exit, not restored: Ghostty 1.4 has no title pop.
 - The widgets' text colours come from `PALETTE`, made for dark themes.
 - `OrbitalApp` has no key bindings; every app binds its own (see the console's and CI Board's `BINDINGS`).

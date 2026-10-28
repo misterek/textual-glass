@@ -119,7 +119,7 @@ This is what the `?` legend (`textual_orbital.widgets.LEGEND`) and the widgets e
 - **Header strip** (`HeaderStrip`):
   - the callsign and page tabs, the current one lit;
   - a `◉ N WAITING` badge while entities wait (the app sets it from `badge_changed`);
-  - **source health**, one dot per source: green fresh, amber stale (no good fetch for three intervals, at least 30 s), a red `✕` when the last fetch failed (`h` shows why), hollow until the first fetch;
+  - **source health**, one dot per source: green fresh, amber stale (no good fetch for three intervals, at least 30 s), a red `✕` when the last fetch failed or timed out (`h` shows why, and when it is tried next), hollow until the first fetch;
   - the clock, at minute resolution.
 - **Beacons** (`BeaconRow`), one per `Entity`, most urgent first. Idle ones fold into a "+N" slot when space runs out.
 
@@ -163,7 +163,8 @@ This is what the `?` legend (`textual_orbital.widgets.LEGEND`) and the widgets e
 | `Goal` | `id, name, owner="", progress=0.0, url=None, due=None` | `ProgressArc` (your page). |
 | `Task` | `id, title, assignee="", status="in progress", group="", status_since=None, url=None, goal_id=None` | `TaskBoard`. |
 | `DoneTask` | `id, title, done_at, status="done", url=None` | `DoneList`. |
-| `SourceStatus` | `key, name, interval, last_ok, last_attempt, error, items`; `health(now)` | `SourceHealth`, `SourcesScreen`. Kept by the store. |
+| `SourceStatus` | `key, name, interval, last_ok, last_attempt, error, items, failures=0, next_poll=None`; `health(now)` | `SourceHealth`, `SourcesScreen`. Kept by the store. `items` counts every record of the last good fetch, events included; `failures` is failed attempts in a row (timeouts included); `next_poll` is when the next fetch is due (None while a source is paused on hung fetches). |
+| `ErrorReport` | `at, where, message, count=1` | `SourcesScreen`. An exception the app caught and reported (`OrbitalApp.report_error`), kept in `app.errors`. |
 | `Alert` | see [Rules and alerts](#rules-and-alerts) | `AlertScreen`. |
 
 **Entities.** An `Entity` doesn't have to be shown by a `BeaconRow`: show it in a list or a card of your own, or not at all. Shown or not, entities in `WAITING` drive the `◉ N waiting` title badge (and `badge_changed`) and the shipped `WaitingRule`.
@@ -207,7 +208,7 @@ if __name__ == "__main__":
     DiskBoard(StaticProvider([Disk()])).run()
 ```
 
-`Snapshot` is everything merged from every source: `taken_at`; `entities, attention, track, events, goals, tasks, done, sources` (tuples; attention sorted by score, then age); and `metrics`. `taken_at` is the time of the fetch it was merged after; `app.snapshot`, which the pages get, keeps the `taken_at` of the last content change (see [The app](#the-app)). A snapshot has `needs_attention` and `be_aware`, lookups `entity(id)`, `track_item(key)`, `item(key)` and `metric(name, default=0.0)`, and `week()`: this week's `WeekStats`, counted from the events by `kind`:
+`Snapshot` is everything merged from every source: `taken_at`; `entities, attention, track, events, goals, tasks, done, sources` (tuples; attention sorted by score, then age); and `metrics`. `taken_at` is when it was taken: the end of the fetch it was merged after, or the moment items were snoozed or woken or the date changed (see [The app](#the-app)). Widgets take their "now" from it. A snapshot has `needs_attention` and `be_aware`, lookups `entity(id)`, `track_item(key)`, `item(key)` and `metric(name, default=0.0)`, and `week()`: this week's `WeekStats`, counted from the events by `kind`:
 
 - `start` is this week's Monday (a `date`). `days` (this week, from Monday) and `previous` (the same weekdays last week) are tuples of `DayCount(day, counts)`: the `date`, and a dict of event counts by kind.
 - `total(kind)`, `previous_total(kind)` (last week over the same weekdays so far), `delta(kind)`, `series(kind)` and `previous_series(kind)` (one count per day), `events` (this week's, newest first) and `elapsed` (days so far, today included).
@@ -231,11 +232,16 @@ class BuildAgents:
 provider = StaticProvider([BuildAgents()])
 ```
 
-- A **source** is any object with `key`, `name`, `interval` and `fetch() -> SourceData` (the `Source` protocol; no base class). `fetch` runs in a worker thread (four at most), so it may block on a subprocess or HTTP. The `key` is the source's badge: queues and tables show two characters of it (`EventLog` three), so `"GIT"` shows as `GI`.
+- A **source** is any object with `key`, `name`, `interval` and `fetch() -> SourceData` (the `Source` protocol; no base class). Each fetch runs in a daemon thread of its own, so it may block on a subprocess or HTTP. The `key` is the source's badge: queues and tables show two characters of it (`EventLog` three), so `"GIT"` shows as `GI`.
+- **`fetch()` must set its own timeouts** on every network call and subprocess (`timeout=` on `subprocess.run` and on HTTP requests). A thread can't be stopped: a call with no timeout whose socket died while the laptop slept keeps its thread for good.
+- **Deadline.** A source may have a `timeout` attribute in seconds; without one it is `max(2 * interval, 10)` (`fetch_timeout(source)`). A fetch past its deadline turns the source red ("timed out after 20 s"), and its late result is ignored. A source with `OrbitalApp.HUNG_LIMIT` (2) such fetches still running stops polling until one returns, and says so in its error.
+- **Schedule.** The next fetch starts `interval` seconds after the last one ended. While a source fails (timeouts included), the wait doubles with each failure in a row, up to 15 minutes (or `interval`, if longer), and a good fetch resets it: `poll_delay(interval, failures)`. `app.poll_all()` fetches every source now, whatever the wait. The status's `next_poll` says when.
 - **`SourceData(entities, attention, track, events, goals, tasks, done, metrics)`**: each field you set *replaces* that source's previous value for that field. `None` means "this source doesn't report this", and `[]` (`{}` for `metrics`) means "it reports none". Sources never see each other's data; the store concatenates them (and merges the metrics).
-- **Errors:** raise. The source turns red, the first line of the exception is the reason on `h`, and its last good data stays on screen.
+- **Errors:** raise. The source turns red, the first line of the exception is the reason on `h`, and its last good data stays on screen. Anything raised counts, `SystemExit` included (`"SystemExit: 2"`).
+- **Keys are unique across sources** (attention and track `key`, entity `id`): snoozes, `item()` and jumps use the bare key. Prefix them with the source key (`"GH:412"`). A fetch with a key that another source's current data already has fails, as "duplicate key '412' (also from GH): prefix keys with the source".
+- **Timestamps are timezone-aware.** A fetch with a naive `datetime` in any record fails, as "naive datetime in AttentionItem.since"; nothing is coerced. (Your own record in `data` is not checked.)
 - A **provider** is anything with `sources()`; `StaticProvider(sources)` is a list.
-- **`Store`** keeps each source's latest data and merges it into a `Snapshot`. Its `content_version` changes only when the merged content changes (a metric's value included), so a fetch that returns equal data costs nothing downstream.
+- **`Store`** keeps each source's latest data and merges it into a `Snapshot`. Its `content_version` changes only when the merged content changes (a metric's value included), so a fetch that returns equal data costs nothing downstream. `apply(key, data, at, fetch_ms)` returns False when it failed the source instead (a naive datetime or a duplicate key); `fail(key, error, at)`, `schedule(key, at)`, `status(key)` and `statuses()` keep the statuses.
 - **`timed_fetch(source)`** runs one fetch and returns `(data, error, milliseconds)`: test a source without the UI.
 
 The rules for writing real sources (stable keys, "since" timestamps, `stage_since`) are in [`AGENTS.md`](AGENTS.md#wiring-real-sources).
@@ -246,7 +252,7 @@ The rules for writing real sources (stable keys, "since" timestamps, `stage_sinc
 
 ```text
 OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, notify="auto", bell=True,
-           title_badge=True, open_urls=False, **kwargs)   # other keywords go to Glass and App (glass=False)
+           title_badge=True, open_urls=False, open_hosts=None, **kwargs)   # other keywords go to Glass and App
 ```
 
 | Argument | Meaning |
@@ -258,13 +264,14 @@ OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, 
 | `notify` | Desktop notifications: `"auto"`, `"osc777"`, `"osc9"` or `"off"`. |
 | `bell` | Ring the bell with each notified alert. |
 | `title_badge` | Put "◉ 2 waiting · Title" in the window title. |
-| `open_urls` | `open_link` opens the browser. The default `False` only shows the link: pass `True` in your real dashboard's `main()`, never in tests (rule 20 in [`../AGENTS.md`](../AGENTS.md)). |
+| `open_urls` | `open_link` opens the browser, in a thread (it shells out on macOS). The default `False` only shows the link: pass `True` in your real dashboard's `main()`, never in tests (rule 20 in [`../AGENTS.md`](../AGENTS.md)). |
+| `open_hosts` | With `open_urls`, the hosts `open_link` may open, e.g. `{"github.com"}` (exact names, any case); a link to another host is only shown. None (the default) means any http or https link. |
 
 It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It defines **no key bindings**: your app binds its own keys to its actions and to the methods below.
 
 | Hook (override) | Called | Default |
 | --- | --- | --- |
-| `snapshot_changed(snapshot)` | the merged content changed, or items were snoozed or woken | `update_snapshot(snapshot)` on every widget that has it (your `Page`s) |
+| `snapshot_changed(snapshot)` | the merged content changed; items were snoozed, woken or came back by themselves; or the date changed (on the minute tick, so `week()` rolls over on Monday). The last three pass the same content taken now. | `update_snapshot(snapshot)` on every widget that has it (your `Page`s); one that raises is reported and the others still get it |
 | `health_changed(statuses, at)` | a source went fresh, stale or failing | `set_statuses(statuses, at)` on every widget that has it (`SourceHealth`) |
 | `minute_tick(at)` | every minute boundary | `minute_tick(at)` on every widget that has it, on every screen: each `Page` (which ticks its own widgets) and the header's `Clock`. |
 | `badge_changed(text, waiting)` | the attention badge changed ("◉ 2 waiting", or None) | nothing (pass `text` to `Brand.set_badge` here) |
@@ -273,16 +280,18 @@ It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It d
 
 | Method or attribute | What it does |
 | --- | --- |
-| `snapshot`, `store` | `snapshot` is the `Snapshot` of the last content change (None until the first fetch): a fetch that changes nothing only updates its `sources`, so its `taken_at` stays the time of that change. `store` is the `Store` (`store.statuses()`). |
-| `poll_all()` | Fetch every source now. |
+| `snapshot`, `store` | `snapshot` is the latest `Snapshot` (None until the first fetch). Every fetch replaces it, taken at that fetch's end, even when the content is unchanged (then `snapshot_changed` doesn't run). `store` is the `Store` (`store.statuses()`). |
+| `poll_all()` | Fetch every source now, including those waiting out a backoff. |
+| `report_error(where, error)`, `errors` | Report an exception caught on the app thread: logged with its traceback (the `textual_orbital` logger), kept in `errors` (the last `ERRORS_KEPT`, 20, oldest first; the same error once, with a count) and shown in a toast at most every `ERROR_TOAST_SPACING` (30) seconds. The app reports what its hooks, rules, pages and thread callbacks raise; call it for your own. Show `errors` with `SourcesScreen(statuses, errors=app.errors)`. |
 | `snooze_item(key, duration=None)`, `wake_items()`, `snoozed`, `visible_items(items)` | Hide an attention item for `ITEM_SNOOZE` (an hour), bring them all back; `snoozed` maps keys to when they wake. Pages filter with `Page.snoozed()`. |
 | `raise_alert(alert)` | Queue a one-off alert (deduplicated by key). |
 | `jump_to(target)` | Find the record an `("entity", id)`, `("track", key)` or `("item", key)` target names and call `show_detail`. |
 | `open_link(url)` | Open in the browser (with `open_urls`), or show the link. |
-| `call_from_worker(callback, *args)` | Run a callback on the app thread, in the app's context, from any thread (rule 13). |
+| `call_from_worker(callback, *args)` | Run a callback on the app thread, in the app's context, from any thread (rule 13). What it raises goes to `report_error`. |
 | `alert_queue`, `alert_rules`, `notifier` | The `AlertQueue`, the `AlertRules`, the `Notifier`. |
 | `HORIZONTAL_BREAKPOINTS`, `VERTICAL_BREAKPOINTS` | Classes set on every screen: `-narrow` (under 80 columns), `-compact` (80-111), `-regular` (112-139), `-wide` (140+); `-short` (under 25 rows), `-mid` (25-37), `-tall` (38+). Write `Screen.-narrow #side { display: none; }` in your CSS. |
 | `ALERT_SNOOZE`, `ITEM_SNOOZE`, `ALERT_SCREEN` | 10 minutes, an hour, and the popup class. |
+| `HUNG_LIMIT`, `ERRORS_KEPT`, `ERROR_TOAST_SPACING` | Fetches of one source that may hang past their deadline before it pauses (2); error reports kept (20); seconds between error toasts (30). |
 
 `OrbitalApp`'s default CSS gives every `GlassPanel` a border from the theme's primary colour (left, top) to its secondary colour (right, bottom); your CSS and `GlassPanel.set_accent` override it.
 
@@ -327,9 +336,11 @@ class FailingRule:
 - An alert is raised when a condition's key first appears.
 - Conditions that already hold the first time their `source` is fetched are a baseline, not news, and don't alert; the exception is kinds in `startup_kinds`.
 - When a condition goes away, its queued or snoozed alert is dropped, and an open popup closes itself. When it comes back, it alerts again.
-- So the key must change when the situation is "new again": `WaitingRule` puts the entity's `since` in it.
+- So the key must change when the situation is "new again", and only then: `WaitingRule` puts the entity's `since` in it.
 
 The library ships **`WaitingRule(source="CC")`**: an `Entity` entered `WAITING`. Kind `"waiting"`, headline "NEEDS YOU", priority 100, amber, body from `where`, `reason` and `detail`, target the entity. Pass your entities' source key if it isn't `CC`.
+
+> **`since` must be stable.** It must be when the entity *entered* `WAITING`, the same on every fetch while it waits. A source that sets `since=now()` on every fetch makes every poll a new wait, so the same popup comes back every few seconds. When the API has no such timestamp, keep the first time you saw the wait in the source, keyed by the entity's id (as `PipelineSource` does for stages in [`AGENTS.md`](AGENTS.md#2-the-data-and-the-source)).
 
 The **queue** (`AlertQueue`) shows one alert at a time, highest priority first. In the popup (`AlertScreen`), `enter` jumps to the target, `o` opens the link, `s` snoozes it for `ALERT_SNOOZE` (it comes back if still relevant) and `esc` dismisses it. For a one-off, call `app.raise_alert(Alert(key=..., kind=..., title=...))`; it stays until dismissed.
 
@@ -337,9 +348,10 @@ The **queue** (`AlertQueue`) shows one alert at a time, highest priority first. 
 
 Each alert with `notify=True` can also send a desktop notification, ring the bell and badge the window title (`textual_orbital.notify.Notifier`):
 
-- `notify="auto"` picks OSC 777 for Ghostty, OSC 9 for iTerm2, WezTerm and kitty, and nothing under tmux or screen or in other terminals. `TEXTUAL_ORBITAL_NOTIFY=osc777|osc9|off` overrides the guess.
+- `notify="auto"` picks OSC 777 for Ghostty, OSC 9 for iTerm2, WezTerm and kitty, and nothing under screen or in other terminals (under tmux, see below). `TEXTUAL_ORBITAL_NOTIFY=osc777|osc9|off` overrides the guess.
 - The notification's title is the app's title, a colon and the alert's headline in sentence case (`str.capitalize`: the first letter upper case, the rest lower case), for example "Machine Deck: Disk almost full" for `headline="DISK ALMOST FULL"`. Its body is the alert's title and first body line. Notifications are spaced at least 1.2 s apart.
 - The title badge is "◉ N waiting · App title" while entities wait, or "◉ N alerts" while alerts are queued.
+- **Under tmux**, notifications go out wrapped in tmux's DCS passthrough (`ESC P tmux; ... ESC \`), which tmux 3.3 and later forward only with `set -g allow-passthrough on` in `tmux.conf`. In `auto` mode the outer terminal is guessed from the variables tmux keeps (`GHOSTTY_RESOURCES_DIR` for Ghostty, `KITTY_WINDOW_ID`...); set `TEXTUAL_ORBITAL_NOTIFY` if the guess is off. The bell and the title badge are left to tmux. GNU screen gets no notifications.
 
 What Ghostty 1.4 does with those, checked in its source at tag `v1.4.0`:
 
@@ -392,10 +404,10 @@ Switch with `app.theme = "orbital-navy"` (or the command palette's "Change theme
 | `TaskBoard` | `TaskBoard()` | `set_tasks(tasks, groups=(), at=None)`, `tick(at)` | A `SelectList`; `groups` come first, in that order, then the rest by name. |
 | `EventLog` | `EventLog(*, colors=None)` | `set_rows(events)` | A `SelectList` of `Event`s; `colors` maps kinds to colours (other kinds get a stable colour of their own; `kind_color(kind)`). |
 | `DoneList` | `DoneList()` | `set_rows(done_tasks)` | A `SelectList` of `DoneTask`s. |
-| `AlertScreen` | `AlertScreen(alert, image=None, queued=0, beacon="waiting")` | | Dismisses with `"jump"`, `"open"`, `"snooze"` or `"dismiss"`; its hint line offers `o` only when the alert has a `url`. `OrbitalApp` shows it for you. |
+| `AlertScreen` | `AlertScreen(alert, image=None, queued=0, beacon="waiting")` | `close_resolved()` | Dismisses with `"jump"`, `"open"`, `"snooze"` or `"dismiss"`, or `"resolved"` when the app closes it because its condition went away (now if it is on top, else once it is on top again); its hint line offers `o` only when the alert has a `url`. `OrbitalApp` shows it for you. |
 | `DetailScreen` | `DetailScreen(title, subtitle="", fields=(), body="", visual=None, url=None, accent=..., kind="DETAIL")` | | A large popup: `fields` are `(label, value)` pairs, `visual` any widget (hidden when narrow). Dismisses with `"open"` (`o`) or None (`esc`): `push_screen(screen, callback)` and call `open_link` on `"open"`. |
 | `HelpScreen` | `HelpScreen(keys, legend=LEGEND)` | | Your keys as `(key, what)` pairs, and the legend as `(glyph, colour, meaning)` rows. From 80 columns the dialog is 86 wide: a key line fits a key of up to 7 characters and 23 of `what`, a legend line up to 5 characters of glyphs and 43 of meaning. Under 80 columns `what` gets 17 and the legend what is left (31 at 70 columns). Longer lines wrap. |
-| `SourcesScreen` | `SourcesScreen(statuses, at=None)` | | Every source's health, last good fetch, interval, item count and error. Pass `app.store.statuses()`. |
+| `SourcesScreen` | `SourcesScreen(statuses, at=None, errors=())` | | Every source's health, last good fetch, interval, item count and error, with the failures in a row and the next try; then the newest `ERRORS_SHOWN` (5) of `errors`. Pass `app.store.statuses()` and `app.errors`. |
 | `OrbitalModal` | subclass it | | The popups' base: centred, with a `.dialog-hint` line docked at the bottom. |
 
 Helpers: `beacon_view(state, colour, glyph="◉")` (a big beacon as a `SpriteView`, for a detail view), `hint(("esc", "close"), ...)` (key hints as Rich text), `state_text(entity, at)`, `status_word(item)`, `order_entities(entities)`, `signal_glyphs(score, colour)`, `task_color(status)`, and the colour tables `STATE_COLORS`, `STATE_GLYPHS`, `HEALTH_COLORS` (track health), `HEALTH_WORDS`, `TASK_COLORS`. The generic instruments (`GlassPanel`, `RingGauge`, `ProgressArc`, `StatTile`, `InfoCard`, `SelectList`...) come from `textual_glass`.
@@ -428,11 +440,12 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 
 | File | Checks |
 | --- | --- |
-| `tests/test_units.py` | Source health, week stats, stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), rules running after every fetch, `timed_fetch` errors, the alert queue (order, dedupe, snooze, resolve), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes and spacing, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
-| `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row, detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the track's caption, the brand's badge and the alert's hint line. |
-| `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, every alert kind with OSC 777 notifications, and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
+| `tests/test_units.py` | Source health, week stats, stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
+| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, backoff and `poll_all`, error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, snapshots re-stamped by snoozing and on a new day, the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
+| `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row, detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), and no error reports. |
+| `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, every alert kind with OSC 777 notifications, notifications through tmux passthrough, quitting with a hung fetch (`tests/hung_app.py`), and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
-| `tests/conftest.py` | The `output` fixture, and `no_browser`: an autouse fixture that replaces `webbrowser.open` so no test can open the real browser. |
+| `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |
 
 ## Limitations
 
@@ -441,5 +454,5 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 - **Process-wide colour tables.** `PALETTE`, `SOURCE_COLORS`, `SOURCE_NAMES` and `WHY_COLORS` are module-level dicts; apps add to them at import time.
 - **Notifications** were checked only against Ghostty's source. The window title is cleared on exit, not restored: Ghostty 1.4 has no title pop.
 - A finite-play GIF below a popup plays its run again after the popup closes.
-- Kitty, tmux and screen are untested. Under tmux or screen, glass is off and notifications are off unless forced.
+- Kitty, tmux and screen are untested. Under tmux or screen, glass is off. Under tmux, notifications go through passthrough (checked only in a recorded byte stream); under screen they are off.
 - Glass uses private Textual API (see [textual-glass's Limitations](../textual-glass/README.md#limitations)); both packages pin `textual>=8.2,<9`.
