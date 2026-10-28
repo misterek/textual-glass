@@ -38,6 +38,8 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
+from textual_glass import on_hard_exit
+
 if TYPE_CHECKING:
     from textual.app import App
 
@@ -116,6 +118,8 @@ class Notifier:
 
     #: How many writes ``sent`` keeps.
     SENT_KEPT = 50
+    #: The title restore's entry in glass's ``on_hard_exit`` (rule 24).
+    EXIT_KEY = "textual-orbital.title"
 
     def __init__(self, app: App[Any], write: Callable[[str], bool], mode: str = "auto", bell: bool = True,
                  title: bool = True) -> None:
@@ -133,9 +137,11 @@ class Notifier:
         #: The last ``SENT_KEPT`` writes that went out, oldest first (for tests and the health screen).
         self.sent: deque[str] = deque(maxlen=self.SENT_KEPT)
 
-    def _write(self, data: str) -> None:
-        if self._send(data):
-            self.sent.append(data)
+    def _write(self, data: str) -> bool:
+        if not self._send(data):
+            return False
+        self.sent.append(data)
+        return True
 
     def notify(self, alert: Alert) -> None:
         """A desktop notification (and the bell) for ``alert``."""
@@ -178,13 +184,17 @@ class Notifier:
             return
         self._badge = text
         self._touched = True
-        self._write(set_title(f"{text} · {self.app.title}" if text else self.app.title))
+        if self._write(set_title(f"{text} · {self.app.title}" if text else self.app.title)):
+            on_hard_exit(self.EXIT_KEY, set_title(""))  # killed with a badge up: clear it anyway
 
     def restore(self) -> None:
         """On exit: clear the title. Ghostty 1.4 treats an empty OSC 2 as "no
         title was ever set" (``windowTitle`` in ``stream_handler.zig``): it
         shows the working directory or its default again, and the shell's own
-        titles take over. Title pop (``CSI 23 t``) is not implemented there."""
+        titles take over. Title pop (``CSI 23 t``) is not implemented there.
+        A hard exit (SIGTERM, SIGHUP, an interpreter exit without it) clears the
+        title too, through glass's ``on_hard_exit``; this removes that entry."""
+        on_hard_exit(self.EXIT_KEY, None)
         if self.title and self._touched:
             self._write(set_title(""))
             self._badge = None

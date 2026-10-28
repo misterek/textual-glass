@@ -14,6 +14,7 @@ import pytest
 from textual.app import App
 from textual.theme import Theme
 
+from textual_glass import hard_exit
 from textual_orbital import notify
 from textual_orbital.alerts import AlertQueue, AlertRules, Condition, WaitingRule
 from textual_orbital.model import (
@@ -520,6 +521,7 @@ def test_notifications_pass_through_tmux() -> None:
     n.badge("◉ 1 waiting")
     assert sent == ["\x1bPtmux;\x1b\x1b]777;notify;Console: Needs you;deploy\x07\x1b\\\x07",
                     set_title("◉ 1 waiting · Console")]
+    n.restore()  # a clean exit: nothing left for on_hard_exit
 
 
 def test_notifier_keeps_only_the_last_writes() -> None:
@@ -529,6 +531,21 @@ def test_notifier_keeps_only_the_last_writes() -> None:
         n.badge(f"◉ {i} waiting")
     last = Notifier.SENT_KEPT + 9
     assert len(n.sent) == Notifier.SENT_KEPT and n.sent[-1] == set_title(f"◉ {last} waiting · Console")
+    n.restore()  # a clean exit: nothing left for on_hard_exit
+
+
+def test_the_title_badge_is_cleared_on_a_hard_exit_too() -> None:
+    """Rule 24: while the notifier's title is up, glass's ``on_hard_exit`` holds its restore."""
+    app = cast(App[Any], SimpleNamespace(title="Console", set_timer=lambda wait, cb: None))
+    connected = [False]
+    n = Notifier(app, lambda data: connected[0], mode="off")
+    n.badge("◉ 1 waiting")
+    assert Notifier.EXIT_KEY not in hard_exit._entries, "nothing reached a terminal: nothing to restore"
+    connected[0] = True
+    n.badge("◉ 2 waiting")
+    assert hard_exit._entries[Notifier.EXIT_KEY] == set_title("")
+    n.restore()
+    assert Notifier.EXIT_KEY not in hard_exit._entries
 
 
 def test_notifier_spaces_notifications_and_badges_the_title(monkeypatch: pytest.MonkeyPatch) -> None:

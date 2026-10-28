@@ -385,6 +385,7 @@ Each alert with `notify=True` can also send a desktop notification, ring the bel
 - `notify="auto"` picks OSC 777 for Ghostty, OSC 9 for iTerm2, WezTerm and kitty, and nothing under screen or in other terminals (under tmux, see below). `TEXTUAL_ORBITAL_NOTIFY=osc777|osc9|off` overrides the guess.
 - The notification's title is the app's title, a colon and the alert's headline in sentence case (`str.capitalize`: the first letter upper case, the rest lower case), for example "Machine Deck: Disk almost full" for `headline="DISK ALMOST FULL"`. Its body is the alert's title and first body line. Notifications are spaced at least 1.2 s apart.
 - The title badge is "◉ N waiting · App title" while entities wait, or "◉ N alerts" while alerts are queued.
+- On exit the title is cleared, and also when the app is killed (SIGTERM, or SIGHUP when the window closes): the notifier registers the clear with glass's `on_hard_exit` while its title is up.
 - **Under tmux**, notifications go out wrapped in tmux's DCS passthrough (`ESC P tmux; ... ESC \`), which tmux 3.3 and later forward only with `set -g allow-passthrough on` in `tmux.conf`. In `auto` mode the outer terminal is guessed from the variables tmux keeps (`GHOSTTY_RESOURCES_DIR` for Ghostty, `KITTY_WINDOW_ID`...); set `TEXTUAL_ORBITAL_NOTIFY` if the guess is off. The bell and the title badge are left to tmux. GNU screen gets no notifications.
 
 What Ghostty 1.4 does with those, checked in its source at tag `v1.4.0`:

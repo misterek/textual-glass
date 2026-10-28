@@ -249,6 +249,7 @@ class OrbitalApp(Glass, App[None]):
     @on(events.Unmount)
     def _orbital_unmount(self) -> None:
         self._orbital_closed = True
+        self.notifier.restore()  # after an exception, exit() may not have run
 
     @on(events.Resize)
     def _orbital_resize(self, event: events.Resize) -> None:

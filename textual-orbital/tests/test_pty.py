@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -305,6 +306,23 @@ def test_quitting_never_waits_for_a_hung_fetch() -> None:
     assert capture.code == 0, capture.code
     assert capture.wall - capture.mark_time("q") < 4.0
     assert b"Traceback" not in capture.raw and b"STUCK" in capture.raw
+
+
+@pytest.mark.parametrize("glass", ["on", "off"])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_hard_exit_clears_the_window_title(signum: int, glass: str) -> None:
+    """Rule 24: killed while its title is up, the app still clears it (an empty OSC 2), with
+    glass on or off."""
+    def probe(label: str, pid: int) -> None:
+        if label == "kill":
+            os.kill(pid, signum)
+
+    env = {} if glass == "on" else {"TEXTUAL_GLASS": "off"}
+    capture = run_app(STATIC, [Step(3.0, "start"), Step(0.5, "kill")], size=SIZE, timeout=10, probe=probe, env=env)
+    assert capture.code == -signum, capture.code
+    titles = re.findall(rb"\x1b\]2;([^\x07]*)\x07", capture.raw)
+    assert titles and titles[0], "the app set its title"
+    assert titles[-1] == b"", f"the last title written is the restore: {titles[-3:]}"
 
 
 # -- idle cost -------------------------------------------------------------------------------
