@@ -81,7 +81,7 @@ WHY_COLORS.update({"incident": PALETTE["red"], "fix release": PALETTE["red"], "a
 
 ALERT_KINDS = ("waiting", RELEASE_FAILED, INCIDENT)
 
-HELP_KEYS = [
+HELP_KEYS = [  # 14 lines: the dialog then leaves the beacons in view at 90x28
     ("1-4", "switch page"),
     ("j k ↑ ↓", "move in a list"),
     ("← →", "beacons, dots"),
@@ -89,15 +89,12 @@ HELP_KEYS = [
     ("enter", "details (alert: jump)"),
     ("o", "open in browser"),
     ("s", "snooze (1h; alert 10m)"),
-    ("u", "wake everything snoozed"),
-    ("z", "what is snoozed"),
+    ("u z", "wake all / list snoozed"),
     ("space", "fold the be-aware list"),
     ("[ ]", "older / newer week"),
-    ("r", "refresh all sources"),
-    ("h", "source health"),
+    ("r h", "refresh / source health"),
     ("t", "test alert"),
-    ("?", "this help"),
-    ("q", "quit"),
+    ("? q", "this help / quit"),
 ]
 
 
