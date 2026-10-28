@@ -677,3 +677,44 @@ def test_widgets_add_no_attribute_textual_has() -> None:
     for widget in instances:
         clashes = {n for n in set(vars(widget)) - plain if hasattr(Widget, n)}
         assert not clashes, (type(widget).__name__, clashes)
+
+
+async def test_instrument_colours_change_with_each_update(output: Output) -> None:
+    """A colour given at construction can change with the data (a grade), and ``None`` keeps it."""
+    from textual_glass.widgets import StatTile
+
+    app = GlassBoard()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        tile, arc = app.query_one("#landed", StatTile), app.query_one(ProgressArc)
+        beacon = app.query_one(SpriteView)
+
+        def tile_colours() -> tuple[Any, Any, Any]:
+            scene = _scene(app)
+            bars, panel = scene[f"bars:{id(tile.chart)}"], scene[f"panel:{id(tile)}"]
+            assert isinstance(bars, R.Bars) and isinstance(panel, R.Panel)
+            value = next(seg for seg in tile.stat.render_line(0) if seg.text.strip() == "12")
+            assert value.style is not None and value.style.color is not None
+            return (bars.c1, bars.c2), (panel.c1, panel.c2), value.style.color.triplet
+
+        series = [2, 4, 1, 0, 3, 1, 1]
+        tile.set(12, 3, series, colors=("#ff0000", "#ffaa00"), color="#ff4d6d")
+        await settle(app, pilot)
+        chart, border, value = tile_colours()
+        assert chart == ("#ff0000", "#ffaa00") and border == ((255, 0, 0), (255, 170, 0))
+        assert tuple(value) == (255, 77, 109)
+        tile.set(12, 3, series)
+        await settle(app, pilot)
+        assert tile_colours() == (chart, border, value), "None keeps the colours"
+
+        arc.set(0.62, "Migrate DB", colors=("#00ff00", "#0000ff"))
+        await settle(app, pilot)
+        ring = _scene(app)[f"arc:{id(arc)}"]
+        assert isinstance(ring, R.Ring) and (ring.c1, ring.c2) == ("#00ff00", "#0000ff")
+
+        app.glass.deactivate()
+        beacon.set_sprite(beacon.key, beacon.maker, fallback="!", fallback_color="#123456")
+        await pilot.pause()
+        glyph = next(seg for y in range(beacon.size.height) for seg in beacon.render_line(y) if "!" in seg.text)
+        assert glyph.style is not None and glyph.style.color is not None
+        assert tuple(glyph.style.color.triplet) == (0x12, 0x34, 0x56)
