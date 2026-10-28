@@ -361,6 +361,14 @@ async def test_detail_help_sources_and_jump(output: Output) -> None:
             app.jump_to(target)
             await idle(app, pilot)
             assert isinstance(app.screen, DetailScreen) and app.screen.kind == kind, target
+            if kind == "RELEASE":  # its run log is a lazy body, loaded in a thread
+                body = app.screen.query_one("#detail-body")
+                assert "loading…" in str(body.render())
+                for _ in range(40):
+                    if "run 8820 by mei" in str(body.render()):
+                        break
+                    await asyncio.sleep(0.05)
+                assert "build ✓ passed  ·  test … running" in str(body.render())
             await pilot.press("escape")
         app.jump_to(("track", "nothing"))
         await pilot.press("tab")  # to the releases track

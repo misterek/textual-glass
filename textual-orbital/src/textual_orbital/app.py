@@ -53,7 +53,7 @@ from textual.timer import Timer
 from textual_glass import Glass, LoadedImage, load_image, terminal_write
 
 from .alerts import AlertQueue, AlertRules, Rule, WaitingRule
-from .model import Alert, AttentionItem, EntityState, ErrorReport, Health, Snapshot, SourceStatus
+from .model import Alert, AttentionItem, EntityState, ErrorReport, Health, Snapshot, SourceStatus, describe_error
 from .notify import Notifier
 from .provider import Provider, Source, SourceData, Store, fetch_timeout, poll_delay, timed_fetch
 from .theme import ORBITAL, ORBITAL_NAVY, now
@@ -74,12 +74,6 @@ Screen GlassPanel {
     border-bottom: round $secondary;
 }
 """
-
-
-def _describe(error: BaseException) -> str:
-    """An exception as one line: its type and the first line of its text."""
-    text = str(error).strip()
-    return f"{type(error).__name__}: {text.splitlines()[0]}"[:200] if text else type(error).__name__
 
 
 def _name(callback: Callable[..., Any]) -> str:
@@ -261,7 +255,7 @@ class OrbitalApp(Glass, App[None]):
         ``ERROR_TOAST_SPACING`` seconds (later ones are counted in the next).
 
         ``where`` names what raised (``"rules"``, ``"MyPage.update_snapshot"``)."""
-        message = _describe(error)
+        message = describe_error(error)
         log.error("%s: %s", where, message, exc_info=error)
         count = 1
         for i, old in enumerate(self.errors):
@@ -336,7 +330,7 @@ class OrbitalApp(Glass, App[None]):
         try:
             threading.Thread(target=work, daemon=True, name=f"orbital-fetch-{key}").start()
         except RuntimeError as error:  # no more threads
-            self._finish(poll, None, _describe(error))
+            self._finish(poll, None, describe_error(error))
             return
         poll.running = True
         poll.deadline = self.set_timer(poll.timeout, lambda: self._attempt("deadline", self._timed_out, key, token),
@@ -382,7 +376,7 @@ class OrbitalApp(Glass, App[None]):
                 self.store.apply(key, data, at, ms)
         except Exception as problem:  # noqa: BLE001 - reported, and the source still polls
             self.report_error(f"Store.apply {key}", problem)
-            self.store.fail(key, _describe(problem), at)
+            self.store.fail(key, describe_error(problem), at)
         finally:
             self._schedule(poll, at)
         self._publish(at)

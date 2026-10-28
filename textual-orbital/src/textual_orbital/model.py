@@ -76,6 +76,13 @@ class SourceStatus:
         return Health.FRESH
 
 
+def describe_error(error: BaseException) -> str:
+    """An exception as one line, as :class:`ErrorReport` keeps it: its type and
+    the first line of its text."""
+    text = str(error).strip()
+    return f"{type(error).__name__}: {text.splitlines()[0]}"[:200] if text else type(error).__name__
+
+
 @dataclass(frozen=True)
 class ErrorReport:
     """An exception the app caught on its own thread (in a hook, a rule, a page,

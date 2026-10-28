@@ -22,6 +22,7 @@ from textual_orbital import (
     AlertScreen,
     AttentionItem,
     Condition,
+    DetailScreen,
     Entity,
     EntityState,
     ErrorReport,
@@ -228,6 +229,74 @@ async def test_fetch_runs_in_a_thread_with_a_deadline_and_hands_back_on_the_app_
         await pilot.pause()
         assert isinstance(app.screen, SourcesScreen)
         assert app.errors[-1].message == "ValueError: then bug" and "pushes" in app.errors[-1].where
+
+
+# -- lazy detail values (O12) -----------------------------------------------------------------
+
+
+def detail_text(screen: DetailScreen) -> str:
+    return " ".join(str(w.render()) for w in screen.query("Static"))
+
+
+async def test_lazy_detail_values_load_in_threads_and_show_errors_in_place() -> None:
+    class Impatient(DetailScreen):
+        LOAD_TIMEOUT = 0.3
+
+    gate, hung = threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def comments() -> str:
+        threads.append(threading.current_thread().name)
+        gate.wait(5)
+        return "2 comments, last by dana"
+
+    def broken() -> str:
+        gate.wait(5)
+        raise RuntimeError("API said 502")
+
+    def slow() -> str:
+        hung.wait(5)
+        return "too late"
+
+    app = Board(Quick("QK", interval=60))
+    async with app.run_test(size=(90, 28)) as pilot:
+        screen = Impatient("PR 412", fields=[("state", "open"), ("comments", comments), ("checks", broken)],
+                       body=slow)
+        app.push_screen(screen)
+        await pilot.pause()
+        text = detail_text(screen)
+        assert "STATE     open" in text and text.count("loading…") == 3, "placeholders until they return"
+        gate.set()
+        await until(lambda: "2 comments" in detail_text(screen), what="the comments")
+        assert threads and threads[0].startswith("orbital-call-"), "off the app thread"
+        await until(lambda: "TimeoutError" in detail_text(screen), what="the body's deadline")
+        text = detail_text(screen)
+        assert "✕ RuntimeError: API said 502" in text and "✕ TimeoutError: timed out after 0.3 s" in text
+        assert {e.where for e in app.errors} == {"Impatient checks", "Impatient body"}, "reported too"
+        hung.set()
+        await asyncio.sleep(0.1)
+        assert "too late" not in detail_text(screen), "a late value is dropped"
+
+
+async def test_a_lazy_value_that_returns_after_the_popup_closed_is_dropped() -> None:
+    gate = threading.Event()
+
+    def fails_later() -> str:
+        gate.wait(5)
+        raise RuntimeError("nobody is looking")
+
+    app = Board(Quick("QK", interval=60))
+    async with app.run_test(size=(90, 28)) as pilot:
+        screen = DetailScreen("PR 412", fields=[("comments", fails_later)])
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert screen not in app.screen_stack
+        gate.set()
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+        assert not app.errors, "dropped: not shown, not reported"
 
 
 # -- the poll schedule and backoff (O8) ------------------------------------------------------

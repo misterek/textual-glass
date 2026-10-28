@@ -22,6 +22,7 @@ import importlib
 import os
 import sys
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -81,7 +82,7 @@ WHY_COLORS.update({"incident": PALETTE["red"], "fix release": PALETTE["red"], "a
 
 ALERT_KINDS = ("waiting", RELEASE_FAILED, INCIDENT)
 
-HELP_KEYS = [  # 14 lines: the dialog then leaves the beacons in view at 90x28
+HELP_KEYS = [  # at most 14 lines: a taller dialog covers the beacons at 90x28
     ("1-4", "switch page"),
     ("j k ↑ ↓", "move in a list"),
     ("← →", "beacons, dots"),
@@ -292,6 +293,7 @@ class MissionConsole(OrbitalApp):
             track.set_items(list(snap.track), at)
             track.selected_key = record.key
             stage = STAGES[max(0, min(len(STAGES) - 1, record.stage))]
+            run_log = getattr(self.provider, "release_log", None)  # a slow call: loaded in a thread, lazily
             screen = DetailScreen(
                 record.title, Text.assemble((record.source, f"bold {source_color(record.source)}"), ("  ", ""),
                                             (record.label, PALETTE["text_soft"]),
@@ -301,6 +303,7 @@ class MissionConsole(OrbitalApp):
                  ("in stage", fmt_age(at - record.stage_since) if record.stage_since else "–"),
                  ("started", fmt_age(at - record.opened_at) + " ago" if record.opened_at else "–"),
                  ("run", str(release.run) if release else "–"), ("link", record.url or "–")],
+                body=partial(run_log, record.key) if callable(run_log) else "",
                 visual=track, url=record.url, accent=colour, kind="RELEASE")
         elif isinstance(record, Task):
             colour = task_color(record.status)

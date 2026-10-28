@@ -8,8 +8,9 @@ glass they are ordinary Textual modals over a tinted screen.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
+from functools import partial
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -24,7 +25,7 @@ from textual_glass import GlassImage, GlassPanel, LoadedImage, SpriteView
 from textual_glass.sprites import beacon_frames
 
 from ..alerts import alert_color
-from ..model import Alert, ErrorReport, SourceStatus
+from ..model import Alert, ErrorReport, SourceStatus, describe_error
 from ..theme import PALETTE, SOURCE_NAMES, ellipsize, fmt_age, fmt_interval, now
 from .header import HEALTH_COLORS, HEALTH_GLYPHS
 
@@ -186,13 +187,29 @@ class AlertScreen(OrbitalModal):
 
 # ==================================================================== detail ==
 
+#: A detail value: text, or a zero-argument callable that returns it (a slow lookup).
+Value = Text | str | Callable[[], Text | str]
+
 
 class DetailScreen(OrbitalModal):
     """A large popup for one record: a title, a subtitle, label/value fields, an
     optional visual (any widget) and a body text. ``o`` opens ``url``.
 
+    A field's value, or the body, may be a zero-argument callable for a slow
+    lookup (linked pull requests, comments). When the popup opens, each runs in
+    a daemon thread of its own with a deadline of ``LOAD_TIMEOUT`` seconds
+    (``OrbitalApp.fetch``, so the app must be an ``OrbitalApp``); ``LOADING``
+    shows until it returns. An error, or the deadline, shows in its place and
+    goes to ``OrbitalApp.report_error``. A value that returns after the popup
+    closed is dropped.
+
     Dismisses with ``"open"`` (o) or None (escape).
     """
+
+    #: Seconds a lazy value may take before it shows as timed out.
+    LOAD_TIMEOUT: ClassVar[float] = 10.0
+    #: What a lazy value shows until it returns.
+    LOADING: ClassVar[str] = "loading…"
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape,backspace,q", "close", "back", show=False),
@@ -209,14 +226,14 @@ class DetailScreen(OrbitalModal):
     DetailScreen #detail-body { height: auto; max-height: 8; margin: 1 0 0 0; }
     """
 
-    def __init__(self, title: str, subtitle: Text | str = "", fields: Sequence[tuple[str, Text | str]] = (),
-                 body: str = "", visual: Widget | None = None, url: str | None = None,
+    def __init__(self, title: str, subtitle: Text | str = "", fields: Sequence[tuple[str, Value]] = (),
+                 body: Value = "", visual: Widget | None = None, url: str | None = None,
                  accent: str = PALETTE["accent"], kind: str = "DETAIL") -> None:
         super().__init__()
         self.title_text = title
         self.subtitle = subtitle
-        self.fields = list(fields)
-        self.body = body
+        self.fields: list[tuple[str, Value]] = list(fields)
+        self.body: Value = body
         self.visual = visual
         self.url = url
         self.accent = accent
@@ -228,26 +245,67 @@ class DetailScreen(OrbitalModal):
             head.append("\n")
             head.append_text(self.subtitle if isinstance(self.subtitle, Text)
                              else Text(self.subtitle, style=PALETTE["text_soft"]))
-        fields = Text()
-        label_w = max((len(k) for k, _ in self.fields), default=0) + 2
-        for key, value in self.fields:
-            fields.append(f"{key.upper():<{label_w}}", style=PALETTE["text_faint"])
-            fields.append_text(value if isinstance(value, Text) else Text(str(value), style=PALETTE["text"]))
-            fields.append("\n")
         with GlassPanel(title=f"◆ {self.kind}", accent=self.accent, accent_2=PALETTE["accent_2"], dialog=True,
                         id="detail"):
             yield Static(head, id="detail-head")
             with Horizontal(id="detail-main"):
-                yield Static(fields, id="detail-fields")
+                yield Static(self._fields_text(), id="detail-fields")
                 if self.visual is not None:
                     with Vertical(id="detail-visual"):
                         yield self.visual
             if self.body:
-                yield Static(Text(self.body, style=PALETTE["text_soft"]), id="detail-body")
+                yield Static(self._text(self.body, PALETTE["text_soft"]), id="detail-body")
             pairs = [("esc", "back")]
             if self.url:
                 pairs.insert(0, ("o", "open in browser"))
             yield Static(hint(*pairs), classes="dialog-hint")
+
+    def _text(self, value: Value, style: str) -> Text:
+        if callable(value):
+            return Text(self.LOADING, style=f"italic {PALETTE['text_dim']}")
+        return value if isinstance(value, Text) else Text(str(value), style=style)
+
+    def _fields_text(self) -> Text:
+        out = Text()
+        label_w = max((len(k) for k, _ in self.fields), default=0) + 2
+        for key, value in self.fields:
+            out.append(f"{key.upper():<{label_w}}", style=PALETTE["text_faint"])
+            out.append_text(self._text(value, PALETTE["text"]))
+            out.append("\n")
+        return out
+
+    def on_mount(self) -> None:
+        lazy: list[tuple[int | None, Callable[[], Text | str]]] = [
+            (i, value) for i, (_, value) in enumerate(self.fields) if callable(value)]
+        if callable(self.body):
+            lazy.append((None, self.body))
+        if not lazy:
+            return
+        fetch = getattr(self.app, "fetch", None)
+        if fetch is None:
+            raise TypeError("DetailScreen: lazy values need an OrbitalApp (app.fetch)")
+        for index, load in lazy:
+            fetch(load, then=partial(self._loaded, index), timeout=self.LOAD_TIMEOUT)
+
+    def _loaded(self, index: int | None, value: Text | str | None, error: BaseException | None) -> None:
+        """A lazy value is back (on the app thread): show it, or its error."""
+        if not self.is_attached or self not in self.app.screen_stack:
+            return  # the popup closed first: dropped
+        label = "body" if index is None else self.fields[index][0]
+        shown: Text | str
+        if error is not None:
+            shown = Text(f"✕ {describe_error(error)}", style=PALETTE["red"])
+            report = getattr(self.app, "report_error", None)
+            if report is not None:
+                report(f"{type(self).__name__} {label}", error)
+        else:
+            shown = value if value is not None else ""
+        if index is None:
+            self.body = shown
+            self.query_one("#detail-body", Static).update(self._text(shown, PALETTE["text_soft"]))
+        else:
+            self.fields[index] = (label, shown)
+            self.query_one("#detail-fields", Static).update(self._fields_text())
 
     def action_close(self) -> None:
         self.dismiss(None)

@@ -443,7 +443,7 @@ What each piece does:
 - `HeaderStrip` shows the tabs, a health dot per source and the clock. The app feeds the dots (`health_changed`); the clock lives outside the pages, so `minute_tick` ticks it.
 - `ContentSwitcher` holds the pages. A page switch lands its glass in the same frame as its text (rule 19).
 - Every `SelectList` (the queue, the table) posts `SelectList.Selected` on `enter`; `Track` posts `Track.Selected`.
-- `DetailScreen` dismisses with `"open"` when the user presses `o` in it; the callback opens the link.
+- `DetailScreen` dismisses with `"open"` when the user presses `o` in it; the callback opens the link. A value that takes a slow call (the run's log, its comments) can be a zero-argument callable, `("log", lambda: fetch_log(record.key))`: it loads in a thread while "loading…" shows.
 - `snooze_file` keeps what you snoozed (`s`) across restarts, so a restart doesn't bring every snoozed row and popup back.
 
 ### 6. Run it, test it, look at it

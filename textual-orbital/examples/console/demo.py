@@ -322,6 +322,21 @@ class DemoWorld:
             held = [e for e in self.events if first <= e.when.astimezone().date() <= last]
         return _events(first, min(last, self.first_day - timedelta(days=1)), now()) + held
 
+    def release_log(self, key: str) -> str:
+        """A release's pipeline run, stage by stage, as a slow API would return it."""
+        time.sleep(HISTORY_DELAY)
+        with self.lock:
+            item = self.releases.get(key)
+        if item is None:
+            raise LookupError(f"no release {key}")
+        last = {TrackHealth.FAIL: "✕ failed", TrackHealth.WARN: "! needs work", TrackHealth.PENDING: "… running",
+                TrackHealth.IDLE: "‖ held"}.get(item.health, "✓ passed")
+        steps = [f"{name.lower()} {'✓ passed' if i < item.stage else last}" for i, name in
+                 enumerate(STAGES[:item.stage + 1])]
+        rel = item.data if isinstance(item.data, Release) else None
+        head = f"run {rel.run} by {rel.owner}" if rel else "run"
+        return f"{head}: {item.detail}\n" + "  ·  ".join(steps)
+
     # -- what each source sees -----------------------------------------------------------
 
     def attention_for(self, source: str) -> list[AttentionItem]:
@@ -455,3 +470,7 @@ class DemoProvider:
         """Events from ``first`` to ``last``, for weeks older than the sources
         report: the console's Week page fetches them with ``OrbitalApp.fetch``."""
         return self.world.history(first, last)
+
+    def release_log(self, key: str) -> str:
+        """A release's pipeline run: the console's release detail loads it lazily."""
+        return self.world.release_log(key)
