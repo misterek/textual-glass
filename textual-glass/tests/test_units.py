@@ -7,6 +7,7 @@ import inspect
 import io
 import os
 import re
+import select
 import threading
 import time
 from collections.abc import Callable
@@ -842,7 +843,9 @@ def test_no_tty_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not detect_mod.detect({"TERM": "xterm-ghostty"}).enabled
 
 
-def _answering_pty(reply: bytes | None) -> tuple[str, threading.Thread, int]:
+def _answering_pty(reply: bytes | None, *later: tuple[float, bytes]) -> tuple[str, threading.Thread, int]:
+    """A pty whose other end answers the query with ``reply`` at once, then each
+    ``(delay, data)`` in ``later``, ``delay`` seconds after the query arrived."""
     master, slave = os.openpty()
     path = os.ttyname(slave)
 
@@ -854,12 +857,29 @@ def _answering_pty(reply: bytes | None) -> tuple[str, threading.Thread, int]:
                 data += os.read(master, 1024)
             except OSError:
                 return
+        asked = time.monotonic()
         if reply is not None:
             os.write(master, reply)
+        for delay, more in later:
+            time.sleep(max(0.0, asked + delay - time.monotonic()))
+            os.write(master, more)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return path, thread, slave
+
+
+def _unread(slave: int) -> bytes:
+    """What is still waiting to be read on the tty (what Textual would read as keys)."""
+    import termios
+
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~termios.ICANON
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    data = b""
+    while select.select([slave], [], [], 0.2)[0]:
+        data += os.read(slave, 1024)
+    return data
 
 
 @pytest.mark.parametrize("reply, expected", [
@@ -873,9 +893,34 @@ def test_query(reply: bytes | None, expected: bool | None) -> None:
     answer = detect_mod.query_terminal(path, timeout=0.3)
     elapsed = time.monotonic() - t0
     thread.join(1)
+    assert _unread(slave) == b""
     os.close(slave)
     assert answer is expected
     assert elapsed < 0.6  # never hangs, even when nothing answers
+
+
+def test_a_late_reply_is_read_by_the_query_not_left_for_textual() -> None:
+    """A reply that comes just after the timeout is drained (and still counts),
+    instead of reaching Textual's input as key presses."""
+    path, thread, slave = _answering_pty(None, (0.36, b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c"))
+    answer = detect_mod.query_terminal(path, timeout=0.3)
+    thread.join(1)
+    left = _unread(slave)
+    os.close(slave)
+    assert answer is True and left == b""
+
+
+def test_a_reply_that_has_started_is_read_to_its_fence() -> None:
+    """The graphics reply came in time, the DA1 fence late: the terminal is answering,
+    so the query waits for the fence (up to a second more) instead of giving up."""
+    path, thread, slave = _answering_pty(b"\x1b_Gi=31;OK\x1b\\", (0.8, b"\x1b[?62;22c"))
+    t0 = time.monotonic()
+    answer = detect_mod.query_terminal(path, timeout=0.3)
+    elapsed = time.monotonic() - t0
+    thread.join(1)
+    left = _unread(slave)
+    os.close(slave)
+    assert answer is True and left == b"" and elapsed < 1.4
 
 
 def test_query_falls_back_when_nothing_answers(tty: None, monkeypatch: pytest.MonkeyPatch) -> None:

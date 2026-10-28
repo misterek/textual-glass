@@ -12,6 +12,10 @@ never reach Textual's key parser. The order is:
    Every terminal answers DA1, so when the DA1 reply arrives without a graphics
    reply first, the answer is no. When nothing at all arrives before the
    timeout (a pty with nobody on the other end), the answer is also no.
+   Replies that come late are still read here, never by Textual as key
+   presses: with nothing back at the timeout it listens ``DRAIN`` seconds
+   longer, and once a reply has started it waits up to ``LATE`` seconds more
+   for its fence.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ QUERY_ID = 31
 QUERY = f"\x1b_Gi={QUERY_ID},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c".encode()
 DA1_REPLY = re.compile(rb"\x1b\[\?[0-9;]*c")
 GRAPHICS_OK = re.compile(rb"\x1b_Gi=" + str(QUERY_ID).encode() + rb";OK\x1b\\")
+DRAIN = 0.1  # after the timeout with nothing back: how much longer to listen for a slow reply
+LATE = 1.0   # after the timeout once a reply has started: how much longer to wait for its DA1 fence
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,9 @@ def detect(
     timeout: float = 0.3,
     tty_path: str = "/dev/tty",
 ) -> Support:
-    """Work out whether to enable glass. Never blocks for longer than ``timeout``."""
+    """Work out whether to enable glass. A terminal that never answers costs
+    ``timeout`` plus ``DRAIN`` seconds; one that has started to answer is given up
+    to ``LATE`` seconds more to finish."""
     env = os.environ if env is None else env
     override = env.get("TEXTUAL_GLASS", "").strip().lower()
     if override in OFF_WORDS:
@@ -133,19 +141,20 @@ def query_terminal(tty_path: str = "/dev/tty", timeout: float = 0.3) -> bool | N
 
 
 def _read_until_da1(fd: int, timeout: float) -> bytes:
-    deadline = time.monotonic() + timeout
+    """Everything up to the DA1 reply. Past ``timeout`` it keeps reading for
+    ``DRAIN`` seconds more, or ``LATE`` once anything has come back, so a slow
+    reply is consumed here and doesn't reach Textual's input as key presses."""
+    start = time.monotonic()
     buffer = b""
-    while True:
-        remaining = deadline - time.monotonic()
+    while not DA1_REPLY.search(buffer):
+        remaining = start + timeout + (LATE if buffer else DRAIN) - time.monotonic()
         if remaining <= 0:
             break
         ready, _, _ = select.select([fd], [], [], remaining)
         if not ready:
-            break
+            continue  # the deadline is checked again (it grows once a reply has started)
         chunk = os.read(fd, 4096)
         if not chunk:
             break
         buffer += chunk
-        if DA1_REPLY.search(buffer):
-            break
     return buffer
