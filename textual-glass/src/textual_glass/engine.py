@@ -232,7 +232,7 @@ def placeholder_ids(strip: Strip) -> frozenset[int]:
     """The image ids of the placeholder cells in a line (each run's id is its foreground colour)."""
     ids: set[int] | None = None
     for text, style, _ in strip:
-        if text and text[0] == kitty.PLACEHOLDER and style is not None and style.color is not None:
+        if kitty.PLACEHOLDER in text and style is not None and style.color is not None:  # a run may share a segment
             rgb = style.color.triplet
             if rgb is not None:
                 if ids is None:

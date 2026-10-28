@@ -572,6 +572,21 @@ async def test_background_job_runs_done_on_the_app_thread() -> None:
     engine._executor.shutdown()
 
 
+def test_placeholder_ids_finds_every_run_in_a_line() -> None:
+    """What the sprite sweep reads from a widget's rendered line (rule 21)."""
+    from rich.segment import Segment
+    from rich.style import Style
+    from textual.strip import Strip
+
+    from textual_glass.engine import placeholder_ids
+
+    run = kitty.placeholder_row(0, 2)
+    line = Strip([Segment("ab", Style(color="#ffffff")), Segment(run, Style(color=kitty.id_color(0x123456))),
+                  Segment(" " + run, Style(color=kitty.id_color(0x10ABCD))), Segment(run)])
+    assert placeholder_ids(line) == {0x123456, 0x10ABCD}, "a run sharing a segment counts; one with no colour can't"
+    assert placeholder_ids(Strip([Segment("plain")])) == frozenset()
+
+
 def test_dim_rules_leave_placeholder_cells_alone() -> None:
     """Rule 6: under a modal the filter dims text, but a placeholder cell's
     foreground colour is an image id and must come through untouched."""
