@@ -3,6 +3,7 @@ Fast; only the theme test starts a (headless) Textual app."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -241,6 +242,112 @@ def test_timed_fetch_reports_errors() -> None:
     assert data is None and error == "gh: not logged in"
     data, error, _ = timed_fetch(Src("X", SourceData()))
     assert data is not None and error is None
+
+
+class Raises:
+    """A source whose fetch raises something that is not an ``Exception``."""
+
+    key, name, interval = "X", "X", 60.0
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def fetch(self) -> SourceData:
+        raise self.error
+
+
+def test_timed_fetch_turns_base_exceptions_into_failures() -> None:
+    """O6: reused script code that calls sys.exit() fails the source instead of
+    killing the fetch before it reports back."""
+    assert timed_fetch(Raises(SystemExit(3)))[:2] == (None, "SystemExit: 3")
+    assert timed_fetch(Raises(SystemExit()))[:2] == (None, "SystemExit")
+    assert timed_fetch(Raises(GeneratorExit()))[:2] == (None, "GeneratorExit")
+    with pytest.raises(KeyboardInterrupt):
+        timed_fetch(Raises(KeyboardInterrupt()))  # ctrl+c on the main thread still stops the program
+    results: list[tuple[SourceData | None, str | None, float]] = []
+    worker = threading.Thread(target=lambda: results.append(timed_fetch(Raises(KeyboardInterrupt()))))
+    worker.start()
+    worker.join(5)
+    assert results and results[0][:2] == (None, "KeyboardInterrupt"), "on a worker thread it is a failure"
+
+
+def test_store_counts_every_record_and_failures_in_a_row() -> None:
+    src = Src("GH", SourceData(attention=[AttentionItem("g", "GH", 5, "review", "x")],
+                               events=[Event(T0, "merged", "GH", "a"), Event(T0, "merged", "GH", "b")],
+                               metrics={"disk": 0.5}))
+    store = Store([src])
+    store.apply("GH", src.fetch(), T0)
+    assert store.status("GH").items == 3, "events count too; metrics are not records"
+    store.fail("GH", "HTTP 502", T0)
+    store.fail("GH", "HTTP 502", T0)
+    assert store.status("GH").failures == 2
+    store.schedule("GH", T0 + timedelta(minutes=1))
+    assert store.status("GH").next_poll == T0 + timedelta(minutes=1)
+    store.apply("GH", src.fetch(), T0)
+    status = store.status("GH")
+    assert (status.failures, status.error) == (0, None), "a good fetch resets the count"
+    assert status.next_poll == T0 + timedelta(minutes=1), "only the app schedules"
+
+
+def test_store_fails_a_source_with_a_naive_datetime() -> None:
+    """O4: one naive timestamp used to break the attention sort for every source."""
+    naive = datetime(2026, 10, 27, 12, 0)
+    gh = Src("GH", SourceData(attention=[AttentionItem("g", "GH", 5, "review", "x", since=T0)]))
+    store = Store([gh, Src("TT", SourceData()), Src("EV", SourceData())])
+    assert store.apply("GH", gh.fetch(), T0)
+    v = store.content_version
+    bad = SourceData(attention=[AttentionItem("t", "TT", 5, "review", "y", since=naive)])
+    assert not store.apply("TT", bad, T0)
+    status = store.status("TT")
+    assert status.error == "naive datetime in AttentionItem.since" and status.health(T0) is Health.FAILING
+    assert store.content_version == v and [i.key for i in store.snapshot(T0).attention] == ["g"]
+    assert not store.apply("EV", SourceData(events=[Event(naive, "merged", "EV", "z")]), T0)
+    assert store.status("EV").error == "naive datetime in Event.when"
+    assert not store.apply("EV", SourceData(track=[TrackItem("k", "EV", "z", opened_at=naive)]), T0)
+    assert store.status("EV").error == "naive datetime in TrackItem.opened_at"
+    from textual_orbital.model import DoneTask, Goal
+
+    fine = SourceData(goals=[Goal("g", "goal", due=date(2026, 11, 1))], done=[DoneTask("d", "done", T0)],
+                      entities=[Entity("e", "e", data=PullRequest(1, "naive is fine in your own record"))])
+    assert store.apply("EV", fine, T0), "a date is not a datetime, and data is the app's own"
+    assert store.apply("TT", SourceData(attention=[AttentionItem("t", "TT", 5, "review", "y", since=T0)]), T0)
+    assert store.status("TT").error is None, "the next good fetch clears it"
+
+
+def test_store_rejects_keys_another_source_already_uses() -> None:
+    """O9: keys stay bare, so two sources emitting "412" would snooze and look up together."""
+    gh = Src("GH", SourceData(attention=[AttentionItem("412", "GH", 5, "review", "x")],
+                              track=[TrackItem("web", "GH", "web")], entities=[Entity("s1", "s1")]))
+    store = Store([gh, Src("TT", SourceData())])
+    assert store.apply("GH", gh.fetch(), T0)
+    assert store.apply("GH", gh.fetch(), T0), "a source may send its own keys again"
+    clashes = [("412", SourceData(attention=[AttentionItem("412", "TT", 9, "respond", "y")])),
+               ("web", SourceData(track=[TrackItem("web", "TT", "y")])),
+               ("s1", SourceData(entities=[Entity("s1", "other")]))]
+    for key, data in clashes:
+        assert not store.apply("TT", data, T0), key
+        assert store.status("TT").error == f"duplicate key '{key}' (also from GH): prefix keys with the source"
+    snap = store.snapshot(T0)
+    item = snap.item("412")
+    assert [i.title for i in snap.attention] == ["x"] and item is not None and item.title == "x"
+    assert store.apply("TT", SourceData(attention=[AttentionItem("TT:412", "TT", 9, "respond", "y")],
+                                        entities=[Entity("TT:s1", "s1")]), T0), "prefixed keys are fine"
+    assert store.apply("TT", SourceData(attention=[AttentionItem("s1", "TT", 9, "respond", "y")]), T0), \
+        "an attention key may equal an entity id: separate lookups"
+
+
+def test_poll_delay_backs_off_and_fetch_timeout_defaults() -> None:
+    from textual_orbital.provider import BACKOFF_CAP, fetch_timeout, poll_delay
+
+    assert [poll_delay(10, n) for n in range(4)] == [10, 20, 40, 80]
+    assert poll_delay(10, 7) == BACKOFF_CAP == 900 and poll_delay(10, 10_000) == BACKOFF_CAP
+    assert poll_delay(3600, 3) == 3600, "an interval past the cap is the cap"
+    assert fetch_timeout(Src("X", SourceData())) == 120, "2 x a 60 s interval"
+    fast = Src("CC", SourceData())
+    fast.interval = 1.0
+    assert fetch_timeout(fast) == 10, "at least 10 s"
+    fast.timeout = 2.5  # type: ignore[attr-defined]
+    assert fetch_timeout(fast) == 2.5
 
 
 # ------------------------------------------------------------------ alerts --

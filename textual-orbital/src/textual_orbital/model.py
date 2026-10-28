@@ -36,15 +36,31 @@ class Health(str, Enum):
 
 @dataclass(frozen=True)
 class SourceStatus:
-    """The state of one data source, as shown by the header's health dots."""
+    """The state of one data source, as shown by the header's health dots.
+
+    Attributes:
+        key: The source's key.
+        name: Its name.
+        interval: Seconds between fetches while it works.
+        last_ok: When the last good fetch ended.
+        last_attempt: When the last fetch ended, good or not (or timed out).
+        error: Why the last attempt failed, or None.
+        items: How many records the last good fetch returned (events included).
+        failures: Failed attempts in a row (timeouts included); 0 after a good one.
+            The app waits ``interval * 2 ** failures`` before the next one, up to a cap.
+        next_poll: When the next fetch is due, or None when none is scheduled
+            (a fetch is hung; see ``OrbitalApp.HUNG_LIMIT``).
+    """
 
     key: str
     name: str
-    interval: float  # seconds between fetches
+    interval: float
     last_ok: datetime | None = None
     last_attempt: datetime | None = None
     error: str | None = None
-    items: int = 0  # how many records the last good fetch returned
+    items: int = 0
+    failures: int = 0
+    next_poll: datetime | None = None
 
     @property
     def stale_after(self) -> timedelta:
@@ -58,6 +74,24 @@ class SourceStatus:
         if now - self.last_ok > self.stale_after:
             return Health.STALE
         return Health.FRESH
+
+
+@dataclass(frozen=True)
+class ErrorReport:
+    """An exception the app caught on its own thread (in a hook, a rule, a page,
+    a callback from a thread) and reported with ``OrbitalApp.report_error``.
+
+    Attributes:
+        at: When it last happened.
+        where: What raised (``"rules"``, ``"OverviewPage.update_snapshot"``...).
+        message: The exception's type and the first line of its text.
+        count: How many times it has happened (the same ``where`` and ``message``).
+    """
+
+    at: datetime
+    where: str
+    message: str
+    count: int = 1
 
 
 # -------------------------------------------------------------------- entities
