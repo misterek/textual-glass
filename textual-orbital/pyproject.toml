@@ -1,6 +1,6 @@
 [project]
 name = "textual-orbital"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 description = "Always-on dashboards for Textual: sources, a merged snapshot, alert rules, notifications and dashboard widgets, built on textual-glass."
 license = "MIT-0"
