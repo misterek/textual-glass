@@ -211,10 +211,11 @@ class AlertToast(GlassPanel):
     It closes through :meth:`finish`, with the action taken: ``"timeout"``,
     ``"jump"`` (a click), ``"resolved"`` (:meth:`close_resolved`), or whatever
     the app passes (``OrbitalApp.finish_alert``: ``"snooze"``, ``"dismiss"``,
-    ``"open"``), and then calls ``done(action)``. Removed any other way (its
-    screen closed), it calls ``done("dismiss")``, so the app always hears.
+    ``"open"``), and then calls ``done(action)``. Removed any other way, it
+    calls ``done("dismiss")``, so the app always hears (rule 26).
     ``OrbitalApp`` shows it for alerts whose style is ``"toast"``, and moves it
-    to the screen on top when a popup opens or closes.
+    to the screen on top when a popup opens or closes (:meth:`withdraw` takes
+    the old one away quietly).
 
     It docks at the bottom of the screen, on a layer of its own (so it takes
     no room from the page) and ``overlay: screen`` (so glass draws it on the
