@@ -23,13 +23,14 @@ from textual.app import App, ComposeResult
 from textual.strip import Strip
 
 from textual_glass import Glass, GlassImage, GlassPanel, SpriteView, StatTile, kitty
-from textual_glass.engine import MAIN, Z0
+from textual_glass.engine import MAIN, Z0, Z_FLOAT
 from textual_glass.items import Lane, Panel, Pill, Ring
 from textual_glass.palette import rgb
 from textual_glass.testing.pilot_helpers import Output, idle, settle, start
 from textual_orbital import (
     Alert,
     AlertScreen,
+    AlertToast,
     AttentionItem,
     BeaconRow,
     Brand,
@@ -278,6 +279,148 @@ async def test_alert_queue_snooze_and_resolve(output: Output) -> None:
                 break
         assert not isinstance(app.screen, AlertScreen), "the popup resolves itself"
         assert app.alert_queue.active is None
+
+
+FLOAT = (0, "float")  # the bottom screen's float layer, where glass draws a toast
+
+
+async def until(condition: Any, timeout: float = 3.0) -> None:
+    for _ in range(int(timeout / 0.05)):
+        if condition():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {condition}")
+
+
+async def test_toasts_take_no_keys_and_show_one_at_a_time(output: Output) -> None:
+    """``alert_style="toast"``: "Claude needs you" stays a popup (``NeedsYouRule`` sets its
+    style), other alerts toast in the bottom-right corner, on glass's float layer, one at a
+    time with "+N more", while the keys stay with the dashboard; s snoozes, esc dismisses."""
+    app = make(alerts=True, alert_style="toast")
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        assert isinstance(app.screen, AlertScreen) and app.alert_view is app.screen, "the startup wait: a popup"
+        await pilot.press("escape")
+        await idle(app, pilot)
+        queue = app.query_one("#queue", PriorityList)
+        layout = queue.region
+        for key in ("one", "two", "three"):
+            app.raise_alert(Alert(key, "custom", f"toast {key}", body=(f"{key}: first line", "second line"),
+                                  headline="DEPLOYED", target=("item", "TT-2207")))
+        await idle(app, pilot)
+        toast = app.alert_view
+        assert isinstance(toast, AlertToast) and toast.alert.key == "one" and app.screen is app.screen_stack[0]
+        text = " ".join(str(w.render()) for w in toast.query("Static"))
+        assert "toast one" in text and "one: first line" in text and "second line" not in text
+        assert "+2 more" in text and "s snooze" in text and toast.border_title == "◉ DEPLOYED"
+        assert (toast.region.right, toast.region.bottom) == (SIZE[0] - 1, SIZE[1] - 1), "bottom right, over the keys"
+        assert toast.region.width == 40 and toast.region.height == 5
+        assert queue.region == layout, "the page keeps its room"
+        assert app.focused is queue, "no focus taken"
+        panel = next(i for i in app.glass.layers[FLOAT].static if isinstance(i, Panel))
+        assert panel.rect == (toast.region.x, toast.region.y, toast.region.width, toast.region.height)
+        model = output.model()
+        floats = [i for (i, _), p in model.placements.items() if p["z"] == Z0 + Z_FLOAT]
+        assert len(floats) == 1, "one float image over the backdrop"
+        sprite = _placeholder_ids_on_screen(app, toast.region.y + 1)
+        assert sprite and sprite <= set(model.images), "the beacon, a sprite in the terminal"
+        await pilot.press("j")
+        await pilot.pause()
+        assert queue.index == 1, "keys go to the dashboard"
+        await pilot.press("s")  # the console binds s to finish_alert("snooze") while a toast shows
+        await idle(app, pilot)
+        assert "one" in app.alert_queue.snoozed and queue.index == 1, "the toast was snoozed, not a row"
+        toast = app.alert_view
+        assert isinstance(toast, AlertToast) and toast.alert.key == "two"
+        await pilot.press("escape")
+        await idle(app, pilot)
+        assert isinstance(app.alert_view, AlertToast) and app.alert_view.alert.key == "three"
+        app.finish_alert("dismiss")
+        await idle(app, pilot)
+        assert app.alert_view is None and app.alert_queue.active is None and FLOAT not in app.glass.layers
+        model = output.model()
+        assert not any(i in model.images for i in floats), "the float image is deleted"
+        assert model.errors == [] and not app.errors
+
+
+async def test_a_toast_times_out_resolves_and_jumps(output: Output) -> None:
+    """A timeout counts as dismissed and the next alert shows; a rule's toast closes when its
+    condition goes away; a click jumps to the alert's target."""
+    app = make(alerts=True, alert_style="toast", toast_timeout=0.5)
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        await pilot.press("escape")  # the startup wait's popup
+        app.raise_alert(Alert("short", "custom", "goes by itself", priority=60))
+        app.raise_alert(Alert("next", "custom", "comes after it", priority=50))
+        await until(lambda: isinstance(app.alert_view, AlertToast) and app.alert_view.alert.key == "next")
+        assert "short" not in app.alert_queue.snoozed and app.alert_queue.active.key == "next"
+        await until(lambda: app.alert_view is None)
+        await idle(app, pilot)
+        assert FLOAT not in app.glass.layers
+        app.toast_timeout = 30.0
+        world(app)._release("GH:search@1.8.0", TrackHealth.FAIL, "integration tests failed")
+        app.poll_all()
+        await until(lambda: isinstance(app.alert_view, AlertToast))
+        toast = app.alert_view
+        assert isinstance(toast, AlertToast) and toast.alert.kind == RELEASE_FAILED and toast.beacon == "error"
+        world(app)._release("GH:search@1.8.0", TrackHealth.PENDING, "retrying")
+        app.poll_all()
+        await until(lambda: app.alert_view is None and not toast.is_attached)
+        assert app.alert_queue.active is None and not app.alert_queue.snoozed, "resolved"
+        app.raise_alert(Alert("go", "custom", "click me", target=("track", "GH:search@1.8.0")))
+        await until(lambda: isinstance(app.alert_view, AlertToast))
+        await pilot.pause()
+        await pilot.click(AlertToast)
+        await until(lambda: isinstance(app.screen, DetailScreen))
+        assert app.screen.kind == "RELEASE" and app.alert_view is None
+        assert output.model().errors == [] and not app.errors
+
+
+async def test_a_toast_moves_to_the_popup_on_top_and_back(output: Output) -> None:
+    """The toast sits on the screen on top: over a popup that opens, back on the dashboard
+    when it closes, with the time it had left; the alert never gets lost on the way."""
+    app = make(alerts=True, alert_style="toast")
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        await pilot.press("escape")
+        app.raise_alert(Alert("x", "custom", "a toast", body=("over everything",)))
+        await idle(app, pilot)
+        first = app.alert_view
+        assert isinstance(first, AlertToast)
+        await pilot.press("question_mark")
+        await idle(app, pilot)
+        over = app.alert_view
+        assert isinstance(over, AlertToast) and over is not first and over.parent is app.screen
+        assert type(app.screen).__name__ == "HelpScreen" and not first.is_attached
+        assert over.remaining() <= first.timeout and over.alert is first.alert
+        assert (1, "float") in app.glass.layers, "drawn above the popup's dialog, not dimmed"
+        await pilot.press("escape")  # the help screen closes, with the toast moved off it first
+        await idle(app, pilot)
+        back = app.alert_view
+        assert isinstance(back, AlertToast) and back.parent is app.screen_stack[0] and back.alert.key == "x"
+        assert FLOAT in app.glass.layers and (1, "float") not in app.glass.layers
+        app.finish_alert("dismiss")
+        await idle(app, pilot)
+        assert app.alert_view is None and app.alert_queue.active is None
+        assert output.model().errors == [] and not app.errors
+
+
+async def test_a_toast_without_glass(output: Output) -> None:
+    app = make(alerts=True, alert_style="toast", glass=False)
+    async with app.run_test(size=SIZE) as pilot:
+        await until(lambda: isinstance(app.screen, AlertScreen))
+        await pilot.pause()
+        await pilot.press("escape")
+        app.raise_alert(Alert("x", "custom", "plain toast", body=("in any terminal",)))
+        await until(lambda: isinstance(app.alert_view, AlertToast))
+        await pilot.pause()
+        toast = app.alert_view
+        assert isinstance(toast, AlertToast) and toast.region.right == SIZE[0] - 1
+        r = toast.region
+        lines = ["".join(seg.text for seg in _screen_line(app, y))[r.x:r.right] for y in range(r.y, r.bottom)]
+        assert lines[0].startswith("╭─ ◉ INCOMING TRANSMISSION") and lines[-1].startswith("╰"), lines
+        assert "plain toast" in lines[1] and "in any terminal" in lines[2] and "◉" in lines[2], lines
+        assert "\x1b_G" not in output.text, "no graphics at all"
 
 
 async def test_alerts_follow_the_demo_dynamics(output: Output) -> None:

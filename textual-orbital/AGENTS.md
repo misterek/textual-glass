@@ -8,26 +8,26 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 
 | Module | What it does |
 | --- | --- |
-| `model.py` | The records: `Entity`, `AttentionItem`, `TrackItem`, `Event`, `Goal`, `Task`, `DoneTask`, `SourceStatus`, `Alert`, `Metrics`, `Snapshot`, `WeekStats`, `DayCount` and `week_stats`, `queue_load`. |
+| `model.py` | The records: `Entity`, `AttentionItem`, `TrackItem`, `Event`, `Goal`, `Task`, `DoneTask`, `SourceStatus`, `Alert` (and `ALERT_STYLES`), `Metrics`, `Snapshot`, `WeekStats`, `DayCount` and `week_stats`, `queue_load`. |
 | `provider.py` | **The data seam.** `Source`, `SourceData`, `Provider`, `StaticProvider`, the `Store` that merges per-source data into a `Snapshot` (and rejects naive datetimes and duplicate keys), `timed_fetch`, `fetch_timeout`, `poll_delay`. |
 | `alerts.py` | `AlertQueue` (priority, dedupe, snooze, resolve, snoozes restored from a file), `Rule`, `Condition`, `AlertRules` (snapshot transitions to alerts, with the startup baseline), `WaitingRule`, `alert_color`. |
 | `notify.py` | `Notifier`: OSC 777 / OSC 9 notifications, the OSC 2 title badge and the bell, with Ghostty 1.4's behaviour documented; `notification_mode`. |
 | `theme.py` | `ORBITAL` and `ORBITAL_NAVY` (Textual themes with glass's variables), `PALETTE`, the source and "why" colour tables, colour helpers, `fmt_age`, `fmt_interval`, `ellipsize`, `now`. |
-| `app.py` | `OrbitalApp(Glass, App)`: polling (a daemon thread and a deadline per fetch, backoff), publishing snapshots in guarded steps, `report_error`, health, the minute tick, alerts and their popups, notifications, the title badge, snoozing (and the snooze file), opening links, breakpoints, `call_from_worker`. |
+| `app.py` | `OrbitalApp(Glass, App)`: polling (a daemon thread and a deadline per fetch, backoff), publishing snapshots in guarded steps, `report_error`, health, the minute tick, alerts and their popups or toasts (`alert_view`, `finish_alert`, moving a toast to the screen on top), `fetch`, notifications, the title badge, snoozing (and the snooze file), opening links, breakpoints, `call_from_worker`. |
 | `widgets/header.py` | `HeaderStrip`, `Brand`, `SourceHealth`, `Clock`, `KeyBar`. |
 | `widgets/beacons.py` | `BeaconRow`, `state_text`, `order_entities`, `STATE_COLORS`, `STATE_GLYPHS`. |
 | `widgets/lists.py` | `PriorityList`, `TaskBoard`, `EventLog`, `DoneList` (all `SelectList` subclasses), `Section`, `signal_glyphs`, `task_color`. |
 | `widgets/track.py` | `Track`, `TrackTable`, `status_word`, `HEALTH_COLORS`, `HEALTH_WORDS`. |
 | `widgets/page.py` | `Page`. |
-| `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `DetailScreen`, `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
+| `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `AlertToast`, `DetailScreen` (with lazy values), `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
 
 Elsewhere in `textual-orbital/`:
 
 | Path | What it is |
 | --- | --- |
-| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`. |
+| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`, `--alert-style`, `--toast-timeout`; `ConsoleToast` (its `HINTS`) and the keys it binds to `finish_alert`. |
 | `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`. |
-| `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`. |
+| `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`; `NeedsYouRule`, the library's `WaitingRule` with its alerts kept popups (`style="modal"`). |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, and `history(first, last)`, a slow call for older weeks. Only for the demo and the tests; don't import it from real code. |
 | `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
@@ -779,6 +779,7 @@ For a pixel effect, keep each item that left with the time it left, and have a `
 - **In an app**, write a class with `conditions(snapshot)` (step 3 above, or `examples/console/rules.py`) and pass it in `rules=(...)`. Include `WaitingRule()` if you have entities. The `Condition`'s key must change when the situation is "new again"; its `source` decides the startup baseline; add the kind to `startup_kinds` (`OrbitalApp.alert_rules.startup_kinds`) only if it should alert for conditions already true at startup.
 - **For a one-off**, call `app.raise_alert(Alert(key=..., kind=..., title=..., body=(...), headline=..., priority=..., color=..., url=..., target=...))`. The key dedupes it; it is not dropped by `resolve`.
 - **Pictures:** `OrbitalApp(alert_images={"pipeline failed": "~/art.gif"})`, or `image=` on the alert. Without one, the popup draws a beacon in the alert's colour, in the state `alert_beacon(alert)` returns.
+- **Popups or toasts:** `OrbitalApp(alert_style="toast")` shows alerts as toasts in the bottom-right corner that take no keys and go away after `toast_timeout` seconds; a rule can keep its own alerts popups with `style="modal"` (the console's `NeedsYouRule`). A toast has no keys of its own: bind yours to `app.finish_alert("snooze")` and `("dismiss")` while `isinstance(app.alert_view, AlertToast)`, and name them in a subclass's `HINTS` (set `ALERT_TOAST` to it), as the console does.
 - **In the library**, a rule must be generic (only the generic records, never `data`). Add it to `alerts.py`, export it, and add a unit test in `tests/test_units.py` like `test_waiting_rule_alert` and `test_rules_alert_on_transitions_not_on_baseline`.
 
 ## Tests

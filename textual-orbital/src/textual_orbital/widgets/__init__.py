@@ -7,6 +7,7 @@
 * ``HeaderStrip`` (``Brand``, ``SourceHealth``, ``Clock``), ``KeyBar``.
 * ``Page``: one page of a dashboard.
 * ``OrbitalModal``, ``AlertScreen``, ``DetailScreen``, ``HelpScreen``, ``SourcesScreen``: popups.
+* ``AlertToast``: an alert as a corner toast.
 
 The generic instruments (``GlassPanel``, ``RingGauge``, ``StatTile``,
 ``ProgressArc``, ``InfoCard``...) come from ``textual_glass.widgets``.
@@ -18,12 +19,23 @@ from .header import HEALTH_GLYPHS as SOURCE_HEALTH_GLYPHS
 from .header import Brand, Clock, HeaderStrip, KeyBar, SourceHealth
 from .lists import TASK_COLORS, DoneList, EventLog, PriorityList, Section, TaskBoard, signal_glyphs, task_color
 from .page import Page
-from .screens import LEGEND, AlertScreen, DetailScreen, HelpScreen, OrbitalModal, SourcesScreen, beacon_view, hint
+from .screens import (
+    LEGEND,
+    AlertScreen,
+    AlertToast,
+    DetailScreen,
+    HelpScreen,
+    OrbitalModal,
+    SourcesScreen,
+    beacon_view,
+    hint,
+)
 from .track import HEALTH_COLORS, HEALTH_WORDS, Track, TrackTable, status_word
 
 __all__ = [
     "HEALTH_COLORS", "HEALTH_WORDS", "LEGEND", "SOURCE_HEALTH_COLORS", "SOURCE_HEALTH_GLYPHS", "STATE_COLORS",
-    "STATE_GLYPHS", "TASK_COLORS", "AlertScreen", "BeaconRow", "Brand", "Clock", "DetailScreen", "DoneList",
+    "STATE_GLYPHS", "TASK_COLORS", "AlertScreen", "AlertToast", "BeaconRow", "Brand", "Clock", "DetailScreen",
+    "DoneList",
     "EventLog", "HeaderStrip", "HelpScreen", "KeyBar", "OrbitalModal", "Page", "PriorityList", "Section",
     "SourceHealth", "SourcesScreen", "TaskBoard", "Track", "TrackTable", "beacon_view", "hint", "order_entities",
     "signal_glyphs", "state_text", "status_word", "task_color",

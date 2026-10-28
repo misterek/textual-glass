@@ -26,6 +26,9 @@ SIZES = ((90, 28), (140, 45), (70, 22))
 STEPS = [Step(4.0, "alert"), Step(0.0, "esc", "escape"), Step(2.0, "console"),
          Step(0.0, "k2", "2"), Step(1.8, "releases"), Step(0.0, "k3", "3"), Step(1.8, "week"),
          Step(0.0, "k4", "4"), Step(1.8, "board"), Step(0.0, "q", "q")]
+#: An alert as a toast: the startup wait stays a popup, then t raises a test alert.
+TOAST_STEPS = [Step(4.0, "popup"), Step(0.0, "esc", "escape"), Step(1.0, "t", "t"), Step(1.8, "toast"),
+               Step(0.0, "q", "q")]
 
 
 def main() -> None:
@@ -36,6 +39,7 @@ def main() -> None:
     for size in SIZES:
         paths += shoot(APP, ROOT, size, STEPS, ("alert", *PAGES), args.out)
     paths += shoot([*APP, "--plain"], ROOT, SIZES[0], STEPS, ("console",), args.out, prefix="plain_")
+    paths += shoot([*APP, "--alert-style", "toast"], ROOT, SIZES[0], TOAST_STEPS, ("toast",), args.out)
     print("\n".join(paths))
 
 

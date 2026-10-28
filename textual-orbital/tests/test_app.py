@@ -19,7 +19,9 @@ from textual.app import ComposeResult
 
 import textual_orbital.app as orbital_app
 from textual_orbital import (
+    Alert,
     AlertScreen,
+    AlertToast,
     AttentionItem,
     Condition,
     DetailScreen,
@@ -544,6 +546,53 @@ async def test_a_broken_snooze_file_is_reported_and_never_stops_startup(tmp_path
             assert path.read_text() == content, "a broken file is left alone until something changes"
             app.snooze_item("CC:pr")
             assert list(json.loads(path.read_text())["items"]) == ["CC:pr"]
+
+
+# -- toasts: every alert view closes through _alert_done (O11, rule 26) -----------------------
+
+
+async def test_every_toast_ends_in_alert_done_however_it_goes() -> None:
+    """A toast whose screen is popped moves to the screen on top; one removed any other
+    way still tells the app; either way the next alert shows. ``finish_alert`` acts on a
+    toast, and on a popup only while it is on top (rule 24)."""
+    app = Board(Quick("QK", interval=60), alert_style="toast")
+    async with app.run_test(size=(90, 28)) as pilot:
+        assert app.finish_alert("dismiss") is False, "nothing to act on"
+        app.push_screen(SourcesScreen(app.store.statuses()))
+        await pilot.pause()
+        app.raise_alert(Alert("a", "custom", "first"))
+        app.raise_alert(Alert("b", "custom", "second"))
+        await pilot.pause()
+        toast = app.alert_view
+        assert isinstance(toast, AlertToast) and toast.parent is app.screen and toast.queued == 1
+        await pilot.press("escape")  # the sources screen closes: the toast moves off it first
+        await until(lambda: isinstance(app.alert_view, AlertToast) and app.alert_view.parent is app.screen_stack[0],
+                    what="the toast on the bottom screen")
+        assert app.alert_view is not toast and app.alert_view.alert.key == "a" and not toast.is_attached
+        await app.alert_view.remove()  # gone some other way: the app still hears, as a dismiss
+        await until(lambda: isinstance(app.alert_view, AlertToast) and app.alert_view.alert.key == "b",
+                    what="the next alert")
+        assert app.alert_queue.active is not None and app.alert_queue.active.key == "b"
+        assert app.finish_alert("snooze") and "b" in app.alert_queue.snoozed and app.alert_view is None
+
+        app.raise_alert(Alert("c", "custom", "a popup", style="modal"))  # its own style wins
+        await pilot.pause()
+        popup = app.alert_view
+        assert isinstance(popup, AlertScreen) and app.screen is popup
+        app.push_screen(SourcesScreen(app.store.statuses()))
+        await pilot.pause()
+        assert app.finish_alert("dismiss") is False and isinstance(app.screen, SourcesScreen), "covered: left alone"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.finish_alert("dismiss") and not app.errors
+        await until(lambda: app.alert_view is None and len(app.screen_stack) == 1, what="the popup closing")
+
+
+def test_alert_styles_are_checked() -> None:
+    with pytest.raises(ValueError, match="alert_style"):
+        Board(Quick("QK"), alert_style="banner")
+    with pytest.raises(ValueError, match="Alert.style"):
+        Alert("k", "custom", "t", style="banner")
 
 
 # -- the snapshot's time (O5) and the minute tick --------------------------------------------

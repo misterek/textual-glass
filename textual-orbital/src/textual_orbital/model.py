@@ -367,6 +367,9 @@ class DoneTask:
 
 # ----------------------------------------------------------------------- alerts
 
+#: How an alert shows: a popup that takes the keyboard, or a toast in a corner that goes away by itself.
+ALERT_STYLES = ("modal", "toast")
+
 
 @dataclass(frozen=True)
 class Alert:
@@ -391,6 +394,8 @@ class Alert:
         headline: The small line over the title; see :attr:`heading`.
         from_rule: Raised by a rule, so it is dropped when the rule's condition
             goes away. ``AlertRules`` sets it; one-off alerts leave it False.
+        style: ``"modal"`` (a popup) or ``"toast"`` (a corner toast that goes
+            away by itself), or None for the app's ``alert_style``.
     """
 
     key: str
@@ -406,6 +411,11 @@ class Alert:
     raised_at: datetime | None = None
     headline: str = ""
     from_rule: bool = False
+    style: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.style is not None and self.style not in ALERT_STYLES:
+            raise ValueError(f"Alert.style must be one of {ALERT_STYLES} or None, not {self.style!r}")
 
     @property
     def heading(self) -> str:

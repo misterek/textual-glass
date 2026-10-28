@@ -48,16 +48,27 @@ from urllib.parse import urlsplit
 
 from textual import events, on
 from textual.app import App
+from textual.screen import Screen
 from textual.timer import Timer
 
 from textual_glass import Glass, LoadedImage, load_image, terminal_write
 
 from .alerts import AlertQueue, AlertRules, Rule, WaitingRule
-from .model import Alert, AttentionItem, EntityState, ErrorReport, Health, Snapshot, SourceStatus, describe_error
+from .model import (
+    ALERT_STYLES,
+    Alert,
+    AttentionItem,
+    EntityState,
+    ErrorReport,
+    Health,
+    Snapshot,
+    SourceStatus,
+    describe_error,
+)
 from .notify import Notifier
 from .provider import Provider, Source, SourceData, Store, fetch_timeout, poll_delay, timed_fetch
 from .theme import ORBITAL, ORBITAL_NAVY, now
-from .widgets.screens import AlertScreen
+from .widgets.screens import AlertScreen, AlertToast
 
 log = logging.getLogger("textual_orbital")
 
@@ -125,6 +136,10 @@ class OrbitalApp(Glass, App[None]):
         rules: The alert rules (see :mod:`textual_orbital.alerts`).
         alert_images: A picture or GIF per alert kind (paths), e.g. ``{"waiting": "~/art.gif"}``.
         alerts: Raise "incoming transmission" popups.
+        alert_style: How alerts show: ``"modal"`` (a popup that takes the keyboard) or ``"toast"`` (a
+            corner toast that takes no keys and goes away after ``toast_timeout`` seconds). An alert's
+            own ``style`` overrides it.
+        toast_timeout: Seconds a toast stays (a timeout counts as dismissed).
         notify: Desktop notifications: ``"auto"``, ``"osc777"``, ``"osc9"`` or ``"off"``.
         bell: Ring the bell with each alert (Ghostty bounces the dock icon).
         title_badge: Put "◉ 2 waiting" in the window title.
@@ -148,8 +163,9 @@ class OrbitalApp(Glass, App[None]):
     #: How long ``s`` on an alert hides it, and how long an item snooze lasts.
     ALERT_SNOOZE: ClassVar[timedelta] = timedelta(minutes=10)
     ITEM_SNOOZE: ClassVar[timedelta] = timedelta(hours=1)
-    #: The popup class for alerts.
+    #: The popup class for alerts, and the toast class for alerts shown as toasts.
     ALERT_SCREEN: ClassVar[type[AlertScreen]] = AlertScreen
+    ALERT_TOAST: ClassVar[type[AlertToast]] = AlertToast
     #: Fetches of one source that may hang past their deadline at once. A thread
     #: can't be stopped, so at this many the source stops polling until one returns.
     HUNG_LIMIT: ClassVar[int] = 2
@@ -158,15 +174,20 @@ class OrbitalApp(Glass, App[None]):
     ERROR_TOAST_SPACING: ClassVar[float] = 30.0
 
     def __init__(self, provider: Provider, *, rules: Sequence[Rule] = (WaitingRule(),),
-                 alert_images: dict[str, str] | None = None, alerts: bool = True, notify: str = "auto",
+                 alert_images: dict[str, str] | None = None, alerts: bool = True, alert_style: str = "modal",
+                 toast_timeout: float = 8.0, notify: str = "auto",
                  bell: bool = True, title_badge: bool = True, open_urls: bool = False,
                  open_hosts: Collection[str] | None = None, snooze_file: str | Path | None = None,
                  **kwargs: Any) -> None:
+        if alert_style not in ALERT_STYLES:
+            raise ValueError(f"alert_style must be one of {ALERT_STYLES}, not {alert_style!r}")
         super().__init__(**kwargs)
         self.provider = provider
         self.store = Store(provider.sources())
         self.snapshot: Snapshot | None = None
         self.alerts_enabled = alerts
+        self.alert_style = alert_style
+        self.toast_timeout = toast_timeout
         self.alert_queue = AlertQueue()
         images = {kind: str(Path(path).expanduser()) for kind, path in (alert_images or {}).items()}
         self.alert_rules = AlertRules(rules, images)
@@ -197,7 +218,7 @@ class OrbitalApp(Glass, App[None]):
         self._orbital_toast_timer: Timer | None = None
         self._orbital_calls = 0  # tokens for fetch()
         self._orbital_waiting: dict[int, tuple[Callable[[Any, BaseException | None], object], Timer]] = {}
-        self._alert_screen: AlertScreen | None = None
+        self._alert_view: AlertScreen | AlertToast | None = None  # the alert on screen
         self.register_theme(ORBITAL)
         self.register_theme(ORBITAL_NAVY)
         self.theme = ORBITAL.name
@@ -213,6 +234,8 @@ class OrbitalApp(Glass, App[None]):
         self.notifier.badge("")  # the window title says what this window is
         self._attempt("snooze file", self._load_snoozes)  # before the first fetch can raise an alert
         self._load_images(sorted(set(self.alert_rules.images.values())))
+        # immediate: a toast moves before a popped screen is removed with it on
+        self.screen_change_signal.subscribe(self, self._screen_changed, immediate=True)
         for key in self._orbital_polls:
             self._poll(key)
         self._arm_minute()
@@ -226,6 +249,11 @@ class OrbitalApp(Glass, App[None]):
     @on(events.Unmount)
     def _orbital_unmount(self) -> None:
         self._orbital_closed = True
+
+    @on(events.Resize)
+    def _orbital_resize(self, event: events.Resize) -> None:
+        if isinstance(self._alert_view, AlertToast) and self._alert_view.is_attached:
+            self._alert_view.place(event.size.width)
 
     def call_from_worker(self, callback: Callable[..., Any], *args: Any) -> None:
         """Run ``callback(*args)`` on the app's loop, in the app's context, from
@@ -681,8 +709,14 @@ class OrbitalApp(Glass, App[None]):
             return False
         self.notifier.notify(alert)
         self._show_next_alert()
+        self._count_queued()
         self._update_badge()
         return True
+
+    def _count_queued(self) -> None:
+        """The alert on screen says how many more are waiting."""
+        if self._alert_view is not None and self._alert_view.is_attached:
+            self._alert_view.set_queued(len(self.alert_queue))
 
     def _evaluate_alerts(self, snapshot: Snapshot) -> None:
         fresh, live = self.alert_rules.evaluate(snapshot)
@@ -692,23 +726,44 @@ class OrbitalApp(Glass, App[None]):
         for alert in fresh:
             self.raise_alert(alert)
         self._show_next_alert()  # a queued alert takes the resolved one's place
+        self._count_queued()  # resolve may have dropped queued ones
 
     def _close_resolved_alert(self) -> None:
-        """The open popup's condition went away. Forget it at once, so a second
-        publish can't close it again (O10), and close it only while it is on the
-        screen stack: now if it is on top, else once it is on top again."""
-        screen, self._alert_screen = self._alert_screen, None
+        """The alert's condition went away. Forget its view at once, so a second
+        publish can't close it again (O10). A popup closes only while it is on
+        the screen stack: now if it is on top, else once it is on top again
+        (rule 24); a toast closes now."""
+        view, self._alert_view = self._alert_view, None
         self.alert_queue.dismiss()
-        if screen is not None and screen in self.screen_stack:
-            screen.close_resolved()
+        if isinstance(view, AlertToast) or (view is not None and view in self.screen_stack):
+            view.close_resolved()
 
     def alert_beacon(self, alert: Alert) -> str:
         """The drawn beacon's state for an alert without a picture (``"waiting"``,
         ``"error"``...)."""
         return "waiting"
 
+    @property
+    def alert_view(self) -> AlertScreen | AlertToast | None:
+        """The alert on screen: its popup or its toast, or None."""
+        return self._alert_view
+
+    def finish_alert(self, action: str = "dismiss") -> bool:
+        """Act on the alert on screen as the popup's keys do: ``"jump"``,
+        ``"open"``, ``"snooze"`` or ``"dismiss"``. Bind your own keys to it for
+        toasts, which take none. A popup is acted on only while it is on top
+        (rule 24). False when no alert is showing, or its popup is covered."""
+        view = self._alert_view
+        if isinstance(view, AlertToast):
+            view.finish(action)
+            return True
+        if view is not None and view.is_active:
+            view.action_finish(action)
+            return True
+        return False
+
     def _show_next_alert(self) -> None:
-        if self._alert_screen is not None:
+        if self._alert_view is not None:
             return
         upcoming = self.alert_queue.pending[:1]
         path = upcoming[0].image if upcoming else None
@@ -719,20 +774,55 @@ class OrbitalApp(Glass, App[None]):
         if alert is None:
             return
         image = self.alert_images.get(alert.image) if alert.image else None
-        screen = self.ALERT_SCREEN(alert, image, queued=len(self.alert_queue), beacon=self.alert_beacon(alert))
-        self._alert_screen = screen
+        queued, beacon = len(self.alert_queue), self.alert_beacon(alert)
+        if (alert.style or self.alert_style) == "toast":
+            toast = self._make_toast(alert, image, queued, beacon, self.toast_timeout)
+            self._alert_view = toast
+            self._mount_toast(toast)
+            return
+        screen = self.ALERT_SCREEN(alert, image, queued=queued, beacon=beacon)
+        self._alert_view = screen
         self.push_screen(screen, lambda action: self._alert_done(screen, alert, action))
 
-    def _alert_done(self, screen: AlertScreen, alert: Alert, action: str | None) -> None:
-        if self._alert_screen is screen:  # else it was resolved, and the queue knows already
-            self._alert_screen = None
+    def _make_toast(self, alert: Alert, image: LoadedImage | None, queued: int, beacon: str,
+                    timeout: float) -> AlertToast:
+        def done(action: str) -> None:
+            self._alert_done(toast, alert, action)
+
+        toast = self.ALERT_TOAST(alert, image, queued=queued, beacon=beacon, timeout=timeout, done=done)
+        return toast
+
+    def _mount_toast(self, toast: AlertToast) -> None:
+        if not toast.closed and self._alert_view is toast:
+            self.screen.mount(toast)
+
+    def _screen_changed(self, screen: Screen[Any]) -> None:
+        self._attempt("alert toast", self._move_toast)
+
+    def _move_toast(self) -> None:
+        """A popup opened or closed: the toast goes to the screen on top with the
+        time it had left (a fresh widget; the old one is withdrawn quietly)."""
+        toast = self._alert_view
+        if not isinstance(toast, AlertToast) or toast.closed or toast.parent is self.screen:
+            return
+        moved = self._make_toast(toast.alert, toast.image, toast.queued, toast.beacon, toast.remaining())
+        toast.withdraw()
+        self._alert_view = moved
+        self.call_later(self._mount_toast, moved)  # after the new screen is set up
+
+    def _alert_done(self, view: AlertScreen | AlertToast, alert: Alert, action: str | None) -> None:
+        """Every alert view ends here, whatever closed it (rule 26)."""
+        if self._orbital_closed or not self.is_running:
+            return  # quitting: the toast's widgets are being removed
+        if self._alert_view is view:  # else it was resolved, and the queue knows already
+            self._alert_view = None
             if action == "snooze":
                 self.alert_queue.snooze(self.ALERT_SNOOZE)
                 self._save_snoozes()
                 self.notify(f"Snoozed for {int(self.ALERT_SNOOZE.total_seconds() // 60)} minutes: {alert.title}",
                             timeout=3, markup=False)
             else:
-                self.alert_queue.dismiss()
+                self.alert_queue.dismiss()  # a toast's timeout counts as dismissed
         if action == "open":
             self.open_link(alert.url)
         elif action == "jump":

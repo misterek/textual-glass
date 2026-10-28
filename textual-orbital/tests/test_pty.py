@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from textual_glass.engine import LEVEL_STEP, Z0, Z_SCRIM
+from textual_glass.engine import LEVEL_STEP, Z0, Z_FLOAT, Z_SCRIM
 from textual_glass.kitty import PLACEHOLDER, Z_BELOW_BACKGROUND
 from textual_glass.testing import harness
 from textual_glass.testing.harness import BOX_GLYPHS, CH, CW, Capture, Replay, Step, graphics_in, replay_steps
@@ -232,6 +232,38 @@ def test_window_sizes(size: tuple[int, int], wants: list[str], absent: list[str]
 
 
 # -- alerts from the demo world -------------------------------------------------------------
+
+
+def test_a_toast_is_placed_on_the_float_layer_and_deleted() -> None:
+    """``--alert-style toast``: the startup wait stays a popup (``NeedsYouRule``); ``t`` raises
+    a toast in the bottom-right corner, glass on the float layer above the backdrop and its
+    beacon a placeholder sprite, every cell's background still the default; when it times
+    out its float image is deleted and the page shows whole again."""
+    steps = [Step(4.0, "popup"), Step(0.0, "esc", "escape"), Step(1.0, "t", "t"), Step(1.5, "toast"),
+             Step(2.5, "gone"), Step(0.0, "q", "q")]
+    argv = [*APP, "--static", "--notify", "off", "--alert-style", "toast", "--toast-timeout", "2"]
+    capture = run_app(argv, steps, size=SIZE)
+    snaps = _snaps(capture, SIZE, "toast")
+    assert capture.code == 0 and b"Traceback" not in capture.raw
+    assert "INCOMING TRANSMISSION" in snaps["esc"].all_text(), "the startup wait is a popup"
+    rp = snaps["toast"]
+    x0, y0, x1, y1 = SIZE[0] - 41, SIZE[1] - 6, SIZE[0] - 1, SIZE[1] - 1  # 40 x 5, above the key bar
+    assert "NEEDS YOU" in rp.text(y0)[x0:x1] and "test-transmission" in rp.text(y0 + 1)[x0:x1]
+    assert "s snooze" in rp.text(y0 + 3)[x0:x1]
+    (image_id, placement), = [(i, p) for (i, _), p in rp.model.placements.items()
+                              if not p["virtual"] and p["z"] == Z0 + Z_FLOAT]
+    assert placement["col"] <= x0 and placement["col"] + placement["c"] >= x1, placement
+    assert placement["row"] <= y0 and placement["row"] + placement["r"] >= y1, placement
+    sprites = _placeholder_ids(rp, range(y0 + 1, y1 - 1))
+    assert sprites and sprites <= set(rp.model.images), "the beacon, uploaded"
+    bgs = [bg for row in rp.cell_bgs() for bg in row]
+    assert bgs.count("default") == len(bgs), "the toast's cells let its glass show through"
+    gone = snaps["gone"]
+    assert image_id not in gone.model.images, "its float image is deleted"
+    assert all(p["z"] != Z0 + Z_FLOAT for p in gone.model.placements.values())
+    assert "test-transmission" not in gone.all_text() and "RELEASES" in gone.all_text()
+    end = snaps["end"].model
+    assert not end.errors and not end.images
 
 
 def test_demo_dynamics_raise_every_alert_kind_with_notifications() -> None:

@@ -1,23 +1,29 @@
-"""Popups: the incoming-transmission alert, detail views, help and source health.
+"""Popups: the incoming-transmission alert, detail views, help and source health,
+and the alert toast.
 
-All of them are ``ModalScreen``\\ s. With glass, the screen below stays visible:
+The popups are ``ModalScreen``\\ s. With glass, the screen below stays visible:
 a scrim dims its glass, glass's line filter dims its text, and the dialog is a
 :class:`~textual_glass.widgets.GlassPanel` drawn on its own layer. Without
-glass they are ordinary Textual modals over a tinted screen.
+glass they are ordinary Textual modals over a tinted screen. The toast
+(:class:`AlertToast`) is a panel docked in a corner of the screen on top, on
+glass's float layer, that takes neither focus nor keys.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from functools import partial
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -159,6 +165,12 @@ class AlertScreen(OrbitalModal):
             out.append(line + "\n", style=PALETTE["text"] if i == 0 else PALETTE["text_soft"])
         return out
 
+    def set_queued(self, queued: int) -> None:
+        """How many more alerts are waiting (``OrbitalApp`` keeps it current)."""
+        if queued != self.queued:
+            self.queued = queued
+            self._update_meta()
+
     def _update_meta(self) -> None:
         meta = Text(f"received {fmt_age(now() - self.raised)} ago", style=PALETTE["text_dim"])
         if self.queued:
@@ -183,6 +195,158 @@ class AlertScreen(OrbitalModal):
         if self.resolved:
             self.resolved = False
             self.dismiss("resolved")
+
+
+# ===================================================================== toast ==
+
+
+class AlertToast(GlassPanel):
+    """An :class:`~textual_orbital.model.Alert` as a toast: a narrow panel in the
+    bottom-right corner of the screen on top, with the alert's art or beacon,
+    its headline (in the border), title and first body line, and "+N more"
+    when more alerts are queued. It takes neither focus nor keys, and goes away
+    by itself after ``timeout`` seconds.
+
+    It closes through :meth:`finish`, with the action taken: ``"timeout"``,
+    ``"jump"`` (a click), ``"resolved"`` (:meth:`close_resolved`), or whatever
+    the app passes (``OrbitalApp.finish_alert``: ``"snooze"``, ``"dismiss"``,
+    ``"open"``), and then calls ``done(action)``. Removed any other way (its
+    screen closed), it calls ``done("dismiss")``, so the app always hears.
+    ``OrbitalApp`` shows it for alerts whose style is ``"toast"``, and moves it
+    to the screen on top when a popup opens or closes.
+
+    It docks at the bottom of the screen, on a layer of its own (so it takes
+    no room from the page) and ``overlay: screen`` (so glass draws it on the
+    float layer, above the page's glass); :meth:`place` moves it to the right.
+
+    Args:
+        alert: What to show.
+        image: A decoded picture (``textual_glass.load_image``), or None for the drawn beacon.
+        queued: How many more alerts are waiting.
+        beacon: The drawn beacon's state when there is no picture.
+        timeout: Seconds until it goes away by itself.
+        done: Called with the action when it closes.
+    """
+
+    SCOPED_CSS = False  # the breakpoint rules start at the screen (rule 11)
+    DEFAULT_CSS = """
+    AlertToast {
+        dock: bottom;
+        layer: orbital-toast;
+        overlay: screen;
+        width: 40;
+        height: 5;
+        margin: 0 0 1 0;
+    }
+    AlertToast #toast-body { height: 3; }
+    AlertToast #toast-picture { width: 6; height: 3; margin: 0 1 0 0; }
+    AlertToast #toast-text { width: 1fr; height: 3; }
+    AlertToast #toast-text Static { text-wrap: nowrap; text-overflow: ellipsis; }
+    AlertToast #toast-lines { height: 2; }
+    AlertToast #toast-meta { height: 1; }
+    Screen.-narrow AlertToast { width: 36; }
+    Screen.-wide AlertToast { width: 52; }
+    Screen.-wide AlertToast #toast-picture { width: 8; }
+    """
+
+    #: Key hints on the last line, for the keys the app binds to ``OrbitalApp.finish_alert``
+    #: (a toast has none of its own), e.g. ``(("s", "snooze"), ("esc", "dismiss"))``.
+    HINTS: ClassVar[Sequence[tuple[str, str]]] = ()
+
+    def __init__(self, alert: Alert, image: LoadedImage | None = None, queued: int = 0, beacon: str = "waiting",
+                 timeout: float = 8.0, done: Callable[[str], object] | None = None) -> None:
+        colour = alert_color(alert)
+        super().__init__(title=f"◉ {alert.heading}", accent=colour, accent_2=PALETTE["accent_2"], dialog=True)
+        self.alert = alert
+        self.image = image
+        self.queued = queued
+        self.beacon = beacon
+        self.timeout = timeout
+        self.done = done
+        self.closed = False
+        self.ends_at = time.monotonic() + timeout  # set again when it shows
+        self._toast_timer: Timer | None = None
+
+    def picture(self) -> Widget:
+        if self.image is not None:
+            return GlassImage.from_image(self.image, id="toast-picture", cache_key=f"alert:{self.alert.image}")
+        return beacon_view(self.beacon, alert_color(self.alert), "✕" if self.beacon == "error" else "◉",
+                           id="toast-picture")
+
+    def compose(self) -> ComposeResult:
+        text = Text()  # one line each, cut with "…" (text-wrap: nowrap)
+        text.append(self.alert.title + "\n", style=f"bold {PALETTE['text_bright']}")
+        text.append(self.alert.body[0] if self.alert.body else "", style=PALETTE["text"])
+        with Horizontal(id="toast-body"):
+            yield self.picture()
+            with Vertical(id="toast-text"):
+                yield Static(text, id="toast-lines")
+                yield Static(self._meta(), id="toast-meta")
+
+    def _meta(self) -> Text:
+        out = Text()
+        if self.queued:
+            out.append(f"+{self.queued} more", style=f"bold {PALETTE['amber']}")
+            if self.HINTS:
+                out.append("  ")
+        out.append_text(hint(*self.HINTS))
+        return out
+
+    def set_queued(self, queued: int) -> None:
+        """How many more alerts are waiting (``OrbitalApp`` keeps it current)."""
+        if queued != self.queued:
+            self.queued = queued
+            if self.is_mounted:
+                self.query_one("#toast-meta", Static).update(self._meta())
+
+    def on_mount(self) -> None:
+        self.ends_at = time.monotonic() + self.timeout
+        self._toast_timer = self.set_timer(self.timeout, lambda: self.finish("timeout"), name="alert-toast")
+        self.place()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.place()  # a breakpoint changed its width (GlassPanel.on_resize fits the title too)
+
+    def place(self, width: int | None = None) -> None:
+        """Move it to the right edge of a ``width``-column screen (the app's
+        width by default), one column in."""
+        own = (self.styles.width.cells if self.styles.width is not None else None) or self.outer_size.width
+        self.styles.offset = (max(0, (width or self.app.size.width) - own - 1), 0)
+
+    def remaining(self) -> float:
+        """Seconds until it goes away by itself."""
+        return max(0.0, self.ends_at - time.monotonic())
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.finish("jump")
+
+    def finish(self, action: str) -> None:
+        """Close it with ``action`` and tell ``done``. ``"open"`` does nothing
+        without a ``url``, as on the popup."""
+        if self.closed or (action == "open" and not self.alert.url):
+            return
+        self.withdraw()
+        if self.done is not None:
+            self.done(action)
+
+    def close_resolved(self) -> None:
+        """The alert's condition went away: close now with ``"resolved"``."""
+        self.finish("resolved")
+
+    def withdraw(self) -> None:
+        """Take it off the screen without telling ``done`` (the app moving it)."""
+        self.closed = True
+        if self._toast_timer is not None:
+            self._toast_timer.stop()
+        if self.is_attached:
+            self.remove()
+
+    def on_unmount(self) -> None:
+        if not self.closed:  # removed some other way: the app must still hear
+            self.closed = True
+            if self.done is not None:
+                self.done("dismiss")
 
 
 # ==================================================================== detail ==

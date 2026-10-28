@@ -7,12 +7,14 @@ Run it from the repository root, in Ghostty::
     uv run python textual-orbital/examples/console/app.py
     uv run python textual-orbital/examples/console/app.py --fake-speed 10   # every alert within seconds
     uv run python textual-orbital/examples/console/app.py --plain           # text only, as in any terminal
+    uv run python textual-orbital/examples/console/app.py --alert-style toast   # alerts as corner toasts
     uv run python textual-orbital/examples/console/app.py --snooze-file ~/.cache/console-snoozes.json
     uv run python textual-orbital/examples/console/app.py --provider mydata:make_provider
 
 Keys: 1-4 pages, j/k or arrows to move, Enter for details, Tab between panels,
 o to open in the browser, s to snooze, z for what is snoozed, h for source
-health, t for a test alert, ? for help, q to quit.
+health, t for a test alert, m to switch alerts between popups and toasts, ?
+for help, q to quit. While a toast shows, s snoozes it and esc dismisses it.
 """
 
 from __future__ import annotations
@@ -35,13 +37,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from demo import STAGES, DemoProvider, Release  # noqa: E402
 from pages import PAGES  # noqa: E402
-from rules import INCIDENT, RELEASE_FAILED, IncidentRule, ReleaseFailedRule  # noqa: E402
+from rules import INCIDENT, RELEASE_FAILED, IncidentRule, NeedsYouRule, ReleaseFailedRule  # noqa: E402
 
 from textual_glass import SelectList  # noqa: E402
 from textual_orbital import (  # noqa: E402
     SOURCE_COLORS,
     WHY_COLORS,
     Alert,
+    AlertToast,
     AttentionItem,
     BeaconRow,
     DetailScreen,
@@ -59,7 +62,6 @@ from textual_orbital import (  # noqa: E402
     Task,
     Track,
     TrackItem,
-    WaitingRule,
 )
 from textual_orbital.theme import PALETTE, fmt_age, now, source_color, urgency_color, why_color  # noqa: E402
 from textual_orbital.widgets import (  # noqa: E402
@@ -95,8 +97,15 @@ HELP_KEYS = [  # at most 14 lines: a taller dialog covers the beacons at 90x28
     ("[ ]", "older / newer week"),
     ("r h", "refresh / source health"),
     ("t", "test alert"),
+    ("m", "alerts: popup or toast"),
     ("? q", "this help / quit"),
 ]
+
+
+class ConsoleToast(AlertToast):
+    """The console's alert toast: its hint line names the keys the console binds."""
+
+    HINTS = (("s", "snooze"), ("esc", "dismiss"))
 
 
 class MissionConsole(OrbitalApp):
@@ -104,6 +113,7 @@ class MissionConsole(OrbitalApp):
 
     CSS_PATH = HERE / "console.tcss"
     TITLE = "Mission Console"
+    ALERT_TOAST = ConsoleToast
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("q", "quit", "quit", priority=True),
@@ -120,10 +130,12 @@ class MissionConsole(OrbitalApp):
         Binding("h,H", "sources", show=False),
         Binding("question_mark", "help", show=False),
         Binding("t", "test_alert", show=False),
+        Binding("m", "alert_style", show=False),
+        Binding("escape", "dismiss_toast", show=False),
     ]
 
     def __init__(self, provider: Provider, **kwargs: Any) -> None:
-        super().__init__(provider, rules=(WaitingRule(), ReleaseFailedRule(), IncidentRule()), **kwargs)
+        super().__init__(provider, rules=(NeedsYouRule(), ReleaseFailedRule(), IncidentRule()), **kwargs)
         self.page = 0
 
     # -- layout -----------------------------------------------------------------------
@@ -192,6 +204,9 @@ class MissionConsole(OrbitalApp):
         self.open_link(getattr(self._focused_row(), "url", None))
 
     def action_snooze(self) -> None:
+        if isinstance(self.alert_view, AlertToast):
+            self.finish_alert("snooze")  # the toast takes no keys: s snoozes it while it shows
+            return
         row = self._focused_row()
         if isinstance(row, AttentionItem):
             self.snooze_item(row.key)
@@ -220,6 +235,16 @@ class MissionConsole(OrbitalApp):
                                                                         back)))
         subtitle = "u wakes them" + (f"  ·  {alerts} alert{'s' if alerts != 1 else ''} snoozed" if alerts else "")
         self.push_screen(DetailScreen(f"{len(self.snoozed)} snoozed", subtitle, fields, kind="SNOOZED"))
+
+    def action_dismiss_toast(self) -> None:
+        if isinstance(self.alert_view, AlertToast):
+            self.finish_alert("dismiss")
+
+    def action_alert_style(self) -> None:
+        """m: alerts as popups or as toasts ("Claude needs you" stays a popup: ``NeedsYouRule``)."""
+        self.alert_style = "toast" if self.alert_style == "modal" else "modal"
+        self.notify("Alerts show as toasts (Claude waiting: still a popup)" if self.alert_style == "toast"
+                    else "Alerts show as popups", timeout=3)
 
     def action_refresh(self) -> None:
         self.poll_all()
@@ -351,6 +376,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--static", action="store_true", help="freeze the demo world (nothing changes)")
     parser.add_argument("--plain", action="store_true", help="text only, no pixels")
     parser.add_argument("--no-alerts", action="store_true", help="no popups")
+    parser.add_argument("--alert-style", default="modal", choices=["modal", "toast"],
+                        help="alerts as popups or as corner toasts (Claude waiting stays a popup)")
+    parser.add_argument("--toast-timeout", type=float, default=8.0, metavar="SECONDS", help="how long a toast stays")
     parser.add_argument("--notify", default="auto", choices=["auto", "osc777", "osc9", "off"],
                         help="desktop notifications (default: by terminal)")
     parser.add_argument("--alert-image", metavar="PATH", help="a picture or GIF for every alert")
@@ -363,7 +391,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         provider = DemoProvider(speed=args.fake_speed, dynamics=not args.static)
     images = dict.fromkeys(ALERT_KINDS, args.alert_image) if args.alert_image else {}
-    app = MissionConsole(provider, alert_images=images, alerts=not args.no_alerts, notify=args.notify,
+    app = MissionConsole(provider, alert_images=images, alerts=not args.no_alerts, alert_style=args.alert_style,
+                         toast_timeout=args.toast_timeout, notify=args.notify,
                          snooze_file=args.snooze_file, open_urls=bool(args.provider),
                          glass=False if args.plain else None)
     app.run()
