@@ -21,6 +21,12 @@ What Ghostty 1.4 does with each (checked in its source, tag ``v1.4.0``):
 * **BEL**: with Ghostty's default ``bell-features`` (``attention`` and
   ``title``), an unfocused window bounces the dock icon once and gets a bell
   emoji in its title until it is focused.
+
+Under tmux, the notification escapes are wrapped in tmux's DCS passthrough
+(``ESC P tmux; ... ESC \\``, every ESC inside doubled), so they reach the
+terminal tmux runs in. Since tmux 3.3 that needs ``set -g allow-passthrough
+on`` in ``tmux.conf``; without it tmux drops them. The bell and the title badge
+are not wrapped: tmux handles those itself. GNU screen gets no notifications.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -48,20 +55,32 @@ def _clean(text: str, limit: int = 200) -> str:
 def notification_mode(env: Mapping[str, str] | None = None) -> str:
     """Pick a notification escape for the terminal: ``osc777``, ``osc9`` or ``off``.
 
-    ``TEXTUAL_ORBITAL_NOTIFY`` (``osc777``, ``osc9`` or ``off``) overrides the guess."""
+    Under tmux, ``TERM`` (and, from tmux 3.3, ``TERM_PROGRAM``) are tmux's own,
+    so the guess goes by the variables the outer terminal set and tmux kept
+    (``GHOSTTY_RESOURCES_DIR``, ``KITTY_WINDOW_ID``...). Under GNU screen it is
+    ``off``. ``TEXTUAL_ORBITAL_NOTIFY`` (``osc777``, ``osc9`` or ``off``)
+    overrides the guess."""
     env = os.environ if env is None else env
     forced = env.get("TEXTUAL_ORBITAL_NOTIFY", "").strip().lower()
     if forced in ("osc777", "osc9", "off"):
         return forced
-    if env.get("TMUX") or env.get("STY"):
+    if env.get("STY"):
         return "off"
-    term = env.get("TERM", "")
+    tmux = bool(env.get("TMUX"))
+    term = "" if tmux else env.get("TERM", "")
     program = env.get("TERM_PROGRAM", "").lower()
-    if term == "xterm-ghostty" or program == "ghostty":
+    if term == "xterm-ghostty" or program == "ghostty" or (tmux and env.get("GHOSTTY_RESOURCES_DIR")):
         return "osc777"
-    if program in ("iterm.app", "wezterm") or term == "xterm-kitty" or env.get("KITTY_WINDOW_ID"):
+    if (program in ("iterm.app", "wezterm") or term == "xterm-kitty" or env.get("KITTY_WINDOW_ID")
+            or (tmux and (env.get("ITERM_SESSION_ID") or env.get("WEZTERM_PANE")))):
         return "osc9"
     return "off"
+
+
+def tmux_passthrough(data: str) -> str:
+    """``data`` wrapped in tmux's DCS passthrough, so tmux hands it to the outer
+    terminal (it needs ``allow-passthrough on``)."""
+    return "\x1bPtmux;" + data.replace("\x1b", "\x1b\x1b") + "\x1b\\"
 
 
 def osc777(title: str, body: str) -> str:
@@ -83,6 +102,8 @@ class Notifier:
     """Desktop notifications, a title badge and the bell for ``app``.
 
     The app's ``title`` names it in notifications and in the window title.
+    Under tmux (``TMUX`` set when it is made; see ``passthrough``) notifications
+    go through tmux's DCS passthrough.
 
     Args:
         app: The running app (its ``title``, and ``set_timer`` to space notifications).
@@ -92,6 +113,9 @@ class Notifier:
         bell: Ring the bell with each notification (dock bounce in Ghostty).
         title: Keep a badge in the window title while things are waiting.
     """
+
+    #: How many writes ``sent`` keeps.
+    SENT_KEPT = 50
 
     def __init__(self, app: App[Any], write: Callable[[str], bool], mode: str = "auto", bell: bool = True,
                  title: bool = True) -> None:
@@ -104,7 +128,10 @@ class Notifier:
         self._touched = False  # we have set the title (so restore clears it)
         self._last = 0.0
         self._backlog: list[str] = []
-        self.sent: list[str] = []  # what was sent, for tests and the health screen
+        #: Wrap notifications in tmux's DCS passthrough.
+        self.passthrough = bool(os.environ.get("TMUX"))
+        #: The last ``SENT_KEPT`` writes that went out, oldest first (for tests and the health screen).
+        self.sent: deque[str] = deque(maxlen=self.SENT_KEPT)
 
     def _write(self, data: str) -> None:
         if self._send(data):
@@ -121,6 +148,8 @@ class Notifier:
             out = osc777(f"{self.app.title}: {heading}", body)
         elif self.mode == "osc9":
             out = osc9(f"{self.app.title}: {heading}", body)
+        if out and self.passthrough:
+            out = tmux_passthrough(out)
         if self.bell:
             out += "\x07"
         if out:

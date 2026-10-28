@@ -30,7 +30,7 @@ from textual_orbital.model import (
     queue_load,
     week_stats,
 )
-from textual_orbital.notify import Notifier, notification_mode, osc9, osc777, set_title
+from textual_orbital.notify import Notifier, notification_mode, osc9, osc777, set_title, tmux_passthrough
 from textual_orbital.provider import SourceData, StaticProvider, Store, timed_fetch
 from textual_orbital.theme import (
     ORBITAL,
@@ -462,8 +462,36 @@ def test_notification_escapes() -> None:
     assert set_title("a\x1bb") == "\x1b]2;a b\x07"
     assert notification_mode({"TERM_PROGRAM": "ghostty"}) == "osc777"
     assert notification_mode({"TERM": "xterm-256color"}) == "off"
-    assert notification_mode({"TERM_PROGRAM": "ghostty", "TMUX": "1"}) == "off"
     assert notification_mode({"TEXTUAL_ORBITAL_NOTIFY": "osc9"}) == "osc9"
+    assert notification_mode({"TERM_PROGRAM": "ghostty", "STY": "1"}) == "off", "GNU screen: no passthrough"
+    tmux = {"TMUX": "/tmp/tmux-501/default,1,0", "TERM": "tmux-256color", "TERM_PROGRAM": "tmux"}
+    assert notification_mode(tmux) == "off", "an outer terminal we can't name"
+    assert notification_mode({**tmux, "GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/x"}) == "osc777"
+    assert notification_mode({**tmux, "KITTY_WINDOW_ID": "1"}) == "osc9"
+    assert notification_mode({**tmux, "TERM": "xterm-ghostty", "TERM_PROGRAM": ""}) == "off", "TERM is tmux's"
+
+
+def test_notifications_pass_through_tmux() -> None:
+    """O14: under tmux, OSC 777/9 go through DCS passthrough (allow-passthrough on); the bell
+    and the title don't, tmux handles those."""
+    assert tmux_passthrough("\x1b]9;hi\x07") == "\x1bPtmux;\x1b\x1b]9;hi\x07\x1b\\"
+    sent: list[str] = []
+    app = cast(App[Any], SimpleNamespace(title="Console", set_timer=lambda wait, cb: None))
+    n = Notifier(app, lambda data: sent.append(data) is None, mode="osc777")
+    n.passthrough = True
+    n.notify(Alert("a", "waiting", "deploy", headline="NEEDS YOU"))
+    n.badge("◉ 1 waiting")
+    assert sent == ["\x1bPtmux;\x1b\x1b]777;notify;Console: Needs you;deploy\x07\x1b\\\x07",
+                    set_title("◉ 1 waiting · Console")]
+
+
+def test_notifier_keeps_only_the_last_writes() -> None:
+    app = cast(App[Any], SimpleNamespace(title="Console", set_timer=lambda wait, cb: None))
+    n = Notifier(app, lambda data: True, mode="off")
+    for i in range(Notifier.SENT_KEPT + 10):
+        n.badge(f"◉ {i} waiting")
+    last = Notifier.SENT_KEPT + 9
+    assert len(n.sent) == Notifier.SENT_KEPT and n.sent[-1] == set_title(f"◉ {last} waiting · Console")
 
 
 def test_notifier_spaces_notifications_and_badges_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,7 +510,7 @@ def test_notifier_spaces_notifications_and_badges_the_title(monkeypatch: pytest.
     first = Alert("a", "waiting", "deploy", body=("infra · permission prompt",), headline="NEEDS YOU")
     n.notify(first)
     n.notify(replace(first, key="b", title="docs"))
-    assert n.sent == ["\x1b]777;notify;Console: Needs you;deploy · infra · permission prompt\x07\x07"]
+    assert list(n.sent) == ["\x1b]777;notify;Console: Needs you;deploy · infra · permission prompt\x07\x07"]
     assert len(timers) == 1 and timers[0][0] == pytest.approx(notify.MIN_SPACING), "the second waits its turn"
     clock[0] += notify.MIN_SPACING
     timers[0][1]()
@@ -494,7 +522,7 @@ def test_notifier_spaces_notifications_and_badges_the_title(monkeypatch: pytest.
     n.badge("◉ 1 waiting")
     n.badge(None)
     n.restore()
-    assert n.sent[2:] == [set_title("◉ 1 waiting · Console"), set_title("Console"), set_title("")]
+    assert list(n.sent)[2:] == [set_title("◉ 1 waiting · Console"), set_title("Console"), set_title("")]
     connected = False
     n.badge("◉ 2 waiting")
     assert len(n.sent) == 5 and written[-1] == set_title("◉ 2 waiting · Console"), "unsent writes aren't recorded"

@@ -35,6 +35,14 @@ def no_browser(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     yield opened
 
 
+@pytest.fixture(autouse=True)
+def outside_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as in a plain Ghostty window, even from a shell inside tmux or screen
+    (the notifier wraps its escapes when ``TMUX`` is set)."""
+    for name in ("TMUX", "STY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def output(monkeypatch: pytest.MonkeyPatch) -> Iterator[Output]:
     """Capture what glass and the notifier write instead of sending it to a terminal.
