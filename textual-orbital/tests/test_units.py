@@ -390,6 +390,18 @@ def test_resolve_drops_only_rule_alerts() -> None:
     assert not q.resolve(set()), "a one-off alert is never resolved"
 
 
+def test_restored_alert_snoozes_hold_the_alert_until_they_end() -> None:
+    """Snoozes saved by an earlier run (``OrbitalApp(snooze_file=...)``) come back
+    as keys and times: the alert a rule raises again is held, then shown."""
+    q = AlertQueue()
+    q.restore({"held": T0 + timedelta(minutes=10), "quiet": T0 + timedelta(minutes=5)})
+    assert q.snoozed == {"held": T0 + timedelta(minutes=10), "quiet": T0 + timedelta(minutes=5)}
+    assert not q.push(alert("held", 99, from_rule=True)), "raised again at startup: held, not shown"
+    assert not q.resolve({"held"}) and set(q.snoozed) == {"held", "quiet"}, "a snooze no rule raised again stays"
+    assert q.wake(T0 + timedelta(minutes=11)) == 2
+    assert [a.key for a in q.pending] == ["held"] and not q.snoozed, "only the alert raised again comes back"
+
+
 class FailedRule:
     """An app's own rule over track items (a release failed)."""
 

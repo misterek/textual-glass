@@ -52,6 +52,7 @@ uv run python textual-orbital/examples/console/app.py --plain            # text 
 | `--no-alerts` | No popups. |
 | `--notify auto\|osc777\|osc9\|off` | Desktop notifications (default: by terminal). |
 | `--alert-image PATH` | A picture or animated GIF for every alert (needs `images`). |
+| `--snooze-file PATH` | Keep snoozes in this JSON file, so they survive a restart. |
 | `--provider MODULE:FACTORY` | Real data instead of the demo: `FACTORY()` must return a provider. Turns on opening links in the browser. |
 
 | Key | Action |
@@ -63,6 +64,7 @@ uv run python textual-orbital/examples/console/app.py --plain            # text 
 | `o` | Open the selected row's link (the demo only shows it) |
 | `s` | Snooze the selected queue row for an hour; on an alert, snooze it for 10 minutes |
 | `u` | Wake everything snoozed |
+| `z` | What is snoozed, and when each item comes back |
 | `space` | Fold the "be aware" list |
 | `r` | Fetch every source now |
 | `h` | Source health: why a dot is amber or red (a click on the dots works too) |
@@ -252,7 +254,8 @@ The rules for writing real sources (stable keys, "since" timestamps, `stage_sinc
 
 ```text
 OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, notify="auto", bell=True,
-           title_badge=True, open_urls=False, open_hosts=None, **kwargs)   # other keywords go to Glass and App
+           title_badge=True, open_urls=False, open_hosts=None, snooze_file=None,
+           **kwargs)   # other keywords go to Glass and App
 ```
 
 | Argument | Meaning |
@@ -266,6 +269,7 @@ OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, 
 | `title_badge` | Put "◉ 2 waiting · Title" in the window title. |
 | `open_urls` | `open_link` opens the browser, in a thread (it shells out on macOS). The default `False` only shows the link: pass `True` in your real dashboard's `main()`, never in tests (rule 20 in [`../AGENTS.md`](../AGENTS.md)). |
 | `open_hosts` | With `open_urls`, the hosts `open_link` may open, e.g. `{"github.com"}` (exact names, any case); a link to another host is only shown. None (the default) means any http or https link. |
+| `snooze_file` | A JSON file (a path; `~` works) that keeps item and alert snoozes across restarts, each with when it ends. It is read when the app mounts, before the first fetch, and snoozes that ended while the app was closed are dropped; a file that can't be read or parsed is reported (`report_error`) and treated as empty, never stopping startup. It is written after every change, to a temporary file then `os.replace`, so it is never half written; its directory is made if needed. None (the default) keeps snoozes in memory. |
 
 It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It defines **no key bindings**: your app binds its own keys to its actions and to the methods below.
 
@@ -283,7 +287,8 @@ It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It d
 | `snapshot`, `store` | `snapshot` is the latest `Snapshot` (None until the first fetch). Every fetch replaces it, taken at that fetch's end, even when the content is unchanged (then `snapshot_changed` doesn't run). `store` is the `Store` (`store.statuses()`). |
 | `poll_all()` | Fetch every source now, including those waiting out a backoff. |
 | `report_error(where, error)`, `errors` | Report an exception caught on the app thread: logged with its traceback (the `textual_orbital` logger), kept in `errors` (the last `ERRORS_KEPT`, 20, oldest first; the same error once, with a count) and shown in a toast at most every `ERROR_TOAST_SPACING` (30) seconds. The app reports what its hooks, rules, pages and thread callbacks raise; call it for your own. Show `errors` with `SourcesScreen(statuses, errors=app.errors)`. |
-| `snooze_item(key, duration=None)`, `wake_items()`, `snoozed`, `visible_items(items)` | Hide an attention item for `ITEM_SNOOZE` (an hour), bring them all back; `snoozed` maps keys to when they wake. Pages filter with `Page.snoozed()`. |
+| `snooze_item(key, duration=None)`, `unsnooze(key)`, `wake_items()`, `visible_items(items)` | Hide an attention item for `ITEM_SNOOZE` (an hour); bring one back (False if it wasn't snoozed) or all of them (returns how many); filter a list. Pages filter with `Page.snoozed()`. |
+| `snoozed`, `alert_queue.snoozed` | What is snoozed: attention item keys, and alert keys, each mapped to when it comes back. With `snooze_file`, both survive a restart, and a snoozed alert raised again at startup (a `WaitingRule` alert, say) stays quiet until its snooze ends. |
 | `raise_alert(alert)` | Queue a one-off alert (deduplicated by key). |
 | `jump_to(target)` | Find the record an `("entity", id)`, `("track", key)` or `("item", key)` target names and call `show_detail`. |
 | `open_link(url)` | Open in the browser (with `open_urls`), or show the link. |
@@ -342,7 +347,7 @@ The library ships **`WaitingRule(source="CC")`**: an `Entity` entered `WAITING`.
 
 > **`since` must be stable.** It must be when the entity *entered* `WAITING`, the same on every fetch while it waits. A source that sets `since=now()` on every fetch makes every poll a new wait, so the same popup comes back every few seconds. When the API has no such timestamp, keep the first time you saw the wait in the source, keyed by the entity's id (as `PipelineSource` does for stages in [`AGENTS.md`](AGENTS.md#2-the-data-and-the-source)).
 
-The **queue** (`AlertQueue`) shows one alert at a time, highest priority first. In the popup (`AlertScreen`), `enter` jumps to the target, `o` opens the link, `s` snoozes it for `ALERT_SNOOZE` (it comes back if still relevant) and `esc` dismisses it. For a one-off, call `app.raise_alert(Alert(key=..., kind=..., title=...))`; it stays until dismissed.
+The **queue** (`AlertQueue`) shows one alert at a time, highest priority first. Its `snoozed` maps snoozed alerts' keys to when they come back; `restore(snoozed)` snoozes keys before their alerts are raised (what `snooze_file` does at startup), and a restored alert that no rule raises again just ends with its snooze. In the popup (`AlertScreen`), `enter` jumps to the target, `o` opens the link, `s` snoozes it for `ALERT_SNOOZE` (it comes back if still relevant) and `esc` dismisses it. For a one-off, call `app.raise_alert(Alert(key=..., kind=..., title=...))`; it stays until dismissed.
 
 ## Notifications in Ghostty
 
@@ -440,9 +445,9 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 
 | File | Checks |
 | --- | --- |
-| `tests/test_units.py` | Source health, week stats, stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
-| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, backoff and `poll_all`, error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, snapshots re-stamped by snoozing and on a new day, the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
-| `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row, detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the queue's `RowsLeft`, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), and no error reports. |
+| `tests/test_units.py` | Source health, week stats, stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve, snoozes restored from a file), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
+| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, backoff and `poll_all`, error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, snapshots re-stamped by snoozing and on a new day, snoozes kept in a file across a restart (no popup at launch for a snoozed wait, ended ones dropped, broken files reported and never fatal, atomic writes), the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
+| `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row and listing what is snoozed, detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the queue's `RowsLeft`, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), and no error reports. |
 | `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, every alert kind with OSC 777 notifications, notifications through tmux passthrough, quitting with a hung fetch (`tests/hung_app.py`), and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
 | `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |

@@ -10,10 +10,10 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 | --- | --- |
 | `model.py` | The records: `Entity`, `AttentionItem`, `TrackItem`, `Event`, `Goal`, `Task`, `DoneTask`, `SourceStatus`, `Alert`, `Metrics`, `Snapshot`, `WeekStats`, `DayCount` and `week_stats`, `queue_load`. |
 | `provider.py` | **The data seam.** `Source`, `SourceData`, `Provider`, `StaticProvider`, the `Store` that merges per-source data into a `Snapshot` (and rejects naive datetimes and duplicate keys), `timed_fetch`, `fetch_timeout`, `poll_delay`. |
-| `alerts.py` | `AlertQueue` (priority, dedupe, snooze, resolve), `Rule`, `Condition`, `AlertRules` (snapshot transitions to alerts, with the startup baseline), `WaitingRule`, `alert_color`. |
+| `alerts.py` | `AlertQueue` (priority, dedupe, snooze, resolve, snoozes restored from a file), `Rule`, `Condition`, `AlertRules` (snapshot transitions to alerts, with the startup baseline), `WaitingRule`, `alert_color`. |
 | `notify.py` | `Notifier`: OSC 777 / OSC 9 notifications, the OSC 2 title badge and the bell, with Ghostty 1.4's behaviour documented; `notification_mode`. |
 | `theme.py` | `ORBITAL` and `ORBITAL_NAVY` (Textual themes with glass's variables), `PALETTE`, the source and "why" colour tables, colour helpers, `fmt_age`, `fmt_interval`, `ellipsize`, `now`. |
-| `app.py` | `OrbitalApp(Glass, App)`: polling (a daemon thread and a deadline per fetch, backoff), publishing snapshots in guarded steps, `report_error`, health, the minute tick, alerts and their popups, notifications, the title badge, snoozing, opening links, breakpoints, `call_from_worker`. |
+| `app.py` | `OrbitalApp(Glass, App)`: polling (a daemon thread and a deadline per fetch, backoff), publishing snapshots in guarded steps, `report_error`, health, the minute tick, alerts and their popups, notifications, the title badge, snoozing (and the snooze file), opening links, breakpoints, `call_from_worker`. |
 | `widgets/header.py` | `HeaderStrip`, `Brand`, `SourceHealth`, `Clock`, `KeyBar`. |
 | `widgets/beacons.py` | `BeaconRow`, `state_text`, `order_entities`, `STATE_COLORS`, `STATE_GLYPHS`. |
 | `widgets/lists.py` | `PriorityList`, `TaskBoard`, `EventLog`, `DoneList` (all `SelectList` subclasses), `Section`, `signal_glyphs`, `task_color`. |
@@ -25,7 +25,7 @@ Elsewhere in `textual-orbital/`:
 
 | Path | What it is |
 | --- | --- |
-| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`. |
+| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`. |
 | `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint. |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`. |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world. Only for the demo and the tests; don't import it from real code. |
@@ -430,7 +430,8 @@ def main() -> None:
     parser.add_argument("--plain", action="store_true", help="text only, no pixels")
     args = parser.parse_args()
     sys.path.insert(0, os.getcwd())  # so --provider finds modules next to you
-    CIBoard(load_provider(args.provider), open_urls=True, glass=False if args.plain else None).run()
+    CIBoard(load_provider(args.provider), open_urls=True, snooze_file="~/.cache/ci-board/snoozes.json",
+            glass=False if args.plain else None).run()
 
 
 if __name__ == "__main__":
@@ -443,6 +444,7 @@ What each piece does:
 - `ContentSwitcher` holds the pages. A page switch lands its glass in the same frame as its text (rule 19).
 - Every `SelectList` (the queue, the table) posts `SelectList.Selected` on `enter`; `Track` posts `Track.Selected`.
 - `DetailScreen` dismisses with `"open"` when the user presses `o` in it; the callback opens the link.
+- `snooze_file` keeps what you snoozed (`s`) across restarts, so a restart doesn't bring every snoozed row and popup back.
 
 ### 6. Run it, test it, look at it
 

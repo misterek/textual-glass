@@ -7,11 +7,12 @@ Run it from the repository root, in Ghostty::
     uv run python textual-orbital/examples/console/app.py
     uv run python textual-orbital/examples/console/app.py --fake-speed 10   # every alert within seconds
     uv run python textual-orbital/examples/console/app.py --plain           # text only, as in any terminal
+    uv run python textual-orbital/examples/console/app.py --snooze-file ~/.cache/console-snoozes.json
     uv run python textual-orbital/examples/console/app.py --provider mydata:make_provider
 
 Keys: 1-4 pages, j/k or arrows to move, Enter for details, Tab between panels,
-o to open in the browser, s to snooze, h for source health, t for a test
-alert, ? for help, q to quit.
+o to open in the browser, s to snooze, z for what is snoozed, h for source
+health, t for a test alert, ? for help, q to quit.
 """
 
 from __future__ import annotations
@@ -89,6 +90,7 @@ HELP_KEYS = [
     ("o", "open in browser"),
     ("s", "snooze (1h; alert 10m)"),
     ("u", "wake everything snoozed"),
+    ("z", "what is snoozed"),
     ("space", "fold the be-aware list"),
     ("r", "refresh all sources"),
     ("h", "source health"),
@@ -114,6 +116,7 @@ class MissionConsole(OrbitalApp):
         Binding("o", "open", show=False),
         Binding("s", "snooze", show=False),
         Binding("u", "wake", show=False),
+        Binding("z", "snoozed", show=False),
         Binding("r", "refresh", show=False),
         Binding("h,H", "sources", show=False),
         Binding("question_mark", "help", show=False),
@@ -202,6 +205,22 @@ class MissionConsole(OrbitalApp):
         count = self.wake_items()
         self.notify(f"Woke {count} snoozed item{'s' if count != 1 else ''}", timeout=2)
         self._status()
+
+    def action_snoozed(self) -> None:
+        """What is snoozed, and when each item comes back (``snoozed`` and ``alert_queue.snoozed``)."""
+        at = now()
+        alerts = len(self.alert_queue.snoozed)
+        if not self.snoozed and not alerts:
+            self.notify("Nothing is snoozed", timeout=2)
+            return
+        fields: list[tuple[str, Text | str]] = []
+        for key, until in sorted(self.snoozed.items(), key=lambda pair: pair[1]):
+            item = self.snapshot.item(key) if self.snapshot else None
+            back = (f"  back in {fmt_age(until - at)}", PALETTE["text_dim"])
+            fields.append((item.source if item else "–", Text.assemble((item.title if item else key, PALETTE["text"]),
+                                                                        back)))
+        subtitle = "u wakes them" + (f"  ·  {alerts} alert{'s' if alerts != 1 else ''} snoozed" if alerts else "")
+        self.push_screen(DetailScreen(f"{len(self.snoozed)} snoozed", subtitle, fields, kind="SNOOZED"))
 
     def action_refresh(self) -> None:
         self.poll_all()
@@ -334,6 +353,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--notify", default="auto", choices=["auto", "osc777", "osc9", "off"],
                         help="desktop notifications (default: by terminal)")
     parser.add_argument("--alert-image", metavar="PATH", help="a picture or GIF for every alert")
+    parser.add_argument("--snooze-file", metavar="PATH", help="keep snoozes in this JSON file across restarts")
     args = parser.parse_args(argv)
 
     if args.provider:
@@ -343,7 +363,8 @@ def main(argv: list[str] | None = None) -> None:
         provider = DemoProvider(speed=args.fake_speed, dynamics=not args.static)
     images = dict.fromkeys(ALERT_KINDS, args.alert_image) if args.alert_image else {}
     app = MissionConsole(provider, alert_images=images, alerts=not args.no_alerts, notify=args.notify,
-                         open_urls=bool(args.provider), glass=False if args.plain else None)
+                         snooze_file=args.snooze_file, open_urls=bool(args.provider),
+                         glass=False if args.plain else None)
     app.run()
 
 

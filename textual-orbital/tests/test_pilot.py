@@ -308,9 +308,18 @@ async def test_snooze_hides_a_row(output: Output) -> None:
         await settle(app, pilot)
         assert first is not None and first.key not in [getattr(r, "key", None) for r in queue.rows]
         assert "snoozed" in app.query_one("#keys").render_line(0).text
+        await pilot.press("z")  # what is snoozed
+        await settle(app, pilot)
+        assert isinstance(app.screen, DetailScreen) and app.screen.kind == "SNOOZED"
+        listed = [str(value) for _, value in app.screen.fields]
+        assert any(first.title in line and re.search(r"back in (59m|1h)$", line) for line in listed), listed
+        await pilot.press("escape")
         await pilot.press("u")
         await settle(app, pilot)
         assert first.key in [getattr(r, "key", None) for r in queue.rows]
+        await pilot.press("z")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, DetailScreen), "nothing to list"
 
 
 async def test_updated_is_the_last_good_fetch(output: Output) -> None:

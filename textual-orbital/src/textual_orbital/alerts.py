@@ -16,7 +16,7 @@ typed from ``data``). For a one-off, call ``app.raise_alert(Alert(...))``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -34,12 +34,15 @@ class AlertQueue:
 
     ``active`` is the one on screen. Raising an alert whose key is active,
     queued or snoozed does nothing (the queued copy is refreshed instead).
+    ``snoozed`` maps the keys of snoozed alerts to when they come back.
     """
 
     def __init__(self) -> None:
         self.active: Alert | None = None
         self._queue: list[Alert] = []
-        self._snoozed: dict[str, tuple[datetime, Alert]] = {}
+        # key -> (until, the alert); the alert is None for a snooze restored from a file
+        # until a rule raises that alert again
+        self._snoozed: dict[str, tuple[datetime, Alert | None]] = {}
 
     def __len__(self) -> int:
         return len(self._queue)
@@ -59,6 +62,9 @@ class AlertQueue:
         if self.active is not None and self.active.key == alert.key:
             return False
         if alert.key in self._snoozed:
+            until, held = self._snoozed[alert.key]
+            if held is None:  # restored from a file: keep this one, to show when the snooze ends
+                self._snoozed[alert.key] = (until, alert)
             return False
         for i, queued in enumerate(self._queue):
             if queued.key == alert.key:
@@ -87,23 +93,35 @@ class AlertQueue:
             self._snoozed[alert.key] = ((at or now()) + duration, alert)
         return alert
 
+    def restore(self, snoozed: Mapping[str, datetime]) -> None:
+        """Snooze alerts by key until the given times, before they are raised
+        (snoozes saved by an earlier run). An alert raised with one of these
+        keys is held, and shown when its snooze ends if it is still relevant."""
+        for key, until in snoozed.items():
+            if key not in self._snoozed:
+                self._snoozed[key] = (until, None)
+
     def resolve(self, live_keys: Iterable[str]) -> bool:
         """Drop queued and snoozed rule alerts whose condition has gone (one-off
-        alerts stay). Returns True if the active alert's condition went away
-        (the caller closes it)."""
+        alerts stay, and so do restored snoozes no rule has raised again).
+        Returns True if the active alert's condition went away (the caller
+        closes it)."""
         live = set(live_keys)
         self._queue = [a for a in self._queue if a.key in live or not a.from_rule]
-        self._snoozed = {k: v for k, v in self._snoozed.items() if k in live or not v[1].from_rule}
+        self._snoozed = {k: v for k, v in self._snoozed.items()
+                         if k in live or v[1] is None or not v[1].from_rule}
         active = self.active
         return active is not None and active.from_rule and active.key not in live
 
     def wake(self, at: datetime | None = None) -> int:
-        """Move snoozed alerts whose time is up back into the queue."""
+        """Move snoozed alerts whose time is up back into the queue (a restored
+        snooze that no rule raised again just ends). Returns how many snoozes ended."""
         t = at or now()
         due = [k for k, (until, _) in self._snoozed.items() if until <= t]
         for key in due:
             _, alert = self._snoozed.pop(key)
-            self.push(replace(alert, raised_at=t))
+            if alert is not None:
+                self.push(replace(alert, raised_at=t))
         return len(due)
 
 

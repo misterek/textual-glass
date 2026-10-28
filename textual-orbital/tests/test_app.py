@@ -6,10 +6,12 @@ opening links. Real timers and threads, with intervals of a quarter second."""
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -339,6 +341,88 @@ async def test_a_second_publish_never_closes_a_resolved_alert_twice() -> None:
         await pilot.pause()
         await pilot.pause()
         assert len(app.screen_stack) == 1 and app.alert_queue.active is None and not app.errors
+
+
+# -- snoozes that survive a restart (O7) -----------------------------------------------------
+
+
+WAITS = SourceData(entities=[Entity("s1", "deploy", state=EntityState.WAITING, since=T0)],
+                   attention=[AttentionItem("CC:s1", "CC", 10, "respond", "deploy", since=T0),
+                              AttentionItem("CC:pr", "CC", 5, "review", "a pull request", since=T0)])
+
+
+async def test_snoozes_survive_a_restart_and_a_snoozed_wait_stays_quiet_at_launch(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "snoozes.json"  # its directory is made on the first write
+    app = Board(Quick("CC", WAITS, interval=60), rules=(WaitingRule(),), snooze_file=path)
+    async with app.run_test() as pilot:
+        await until(lambda: isinstance(app.screen, AlertScreen), what="the waiting alert")
+        assert not path.exists(), "nothing is written until something is snoozed"
+        await pilot.press("s")  # snooze the alert for ALERT_SNOOZE
+        await until(lambda: app.alert_queue.snoozed, what="the alert snooze")
+        app.snooze_item("CC:pr")
+        saved = json.loads(path.read_text())
+        (alert_key,) = saved["alerts"]
+        assert alert_key.startswith("waiting:s1:") and list(saved["items"]) == ["CC:pr"]
+        assert datetime.fromisoformat(saved["items"]["CC:pr"]) == app.snoozed["CC:pr"]
+        assert [p.name for p in path.parent.iterdir()] == ["snoozes.json"], "no temporary file left"
+
+    again = Board(Quick("CC", WAITS, interval=60), rules=(WaitingRule(),), snooze_file=path)
+    async with again.run_test() as pilot:
+        await until(lambda: again.snapshot is not None, what="a fetch")
+        await pilot.pause()
+        assert not isinstance(again.screen, AlertScreen), "a snoozed wait doesn't pop up again at launch"
+        assert set(again.snoozed) == {"CC:pr"} and set(again.alert_queue.snoozed) == {alert_key}
+        assert again.unsnooze("CC:pr") and not again.unsnooze("CC:pr")
+        assert json.loads(path.read_text())["items"] == {}, "saved after unsnooze"
+        again._wake_alerts(now() + again.ALERT_SNOOZE + timedelta(minutes=1))  # the snooze ends
+        await until(lambda: isinstance(again.screen, AlertScreen), what="the alert, back")
+        await pilot.pause()
+        assert again.screen.alert.key == alert_key and json.loads(path.read_text())["alerts"] == {}
+        assert not again.errors
+
+
+async def test_snoozes_that_ended_while_closed_are_dropped(tmp_path: Path) -> None:
+    path = tmp_path / "snoozes.json"
+    at = now()
+    path.write_text(json.dumps({"items": {"CC:s1": (at - timedelta(minutes=1)).isoformat(),
+                                          "CC:pr": (at + timedelta(minutes=30)).isoformat()},
+                                "alerts": {"gone": (at - timedelta(hours=1)).isoformat()}}))
+    app = Board(Quick("CC", WAITS, interval=60), snooze_file=path)
+    async with app.run_test():
+        await until(lambda: app.snapshot is not None, what="a fetch")
+        assert list(app.snoozed) == ["CC:pr"] and not app.alert_queue.snoozed
+        assert [i.key for i in app.visible_items(app.snapshot.attention)] == ["CC:s1"]
+        saved = json.loads(path.read_text())
+        assert list(saved["items"]) == ["CC:pr"] and saved["alerts"] == {}, "rewritten without them"
+        assert not app.errors
+
+
+@pytest.mark.parametrize("content, message", [
+    ("{not json", "JSONDecodeError"),
+    ('["a list"]', "ValueError: not a JSON object"),
+    ('{"items": {"CC:pr": "tomorrow"}}', "ValueError: Invalid isoformat string"),
+    ('{"items": {"CC:pr": "2026-10-28T12:00:00"}}', "ValueError: items 'CC:pr': a time without an offset"),
+    ('{"alerts": {"k": 5}}', "TypeError"),
+    (None, "IsADirectoryError"),  # a directory where the file should be
+])
+async def test_a_broken_snooze_file_is_reported_and_never_stops_startup(tmp_path: Path, content: str | None,
+                                                                        message: str) -> None:
+    path = tmp_path / "snoozes.json"
+    if content is None:
+        path.mkdir()
+    else:
+        path.write_text(content)
+    app = Board(Quick("CC", WAITS, interval=60), rules=(WaitingRule(),), snooze_file=path)
+    async with app.run_test() as pilot:
+        await until(lambda: isinstance(app.screen, AlertScreen), what="startup, with its alert")
+        await pilot.pause()
+        (report,) = app.errors
+        assert report.where == f"snooze file {path}" and report.message.startswith(message), report
+        assert not app.snoozed and not app.alert_queue.snoozed, "treated as empty"
+        if content is not None:
+            assert path.read_text() == content, "a broken file is left alone until something changes"
+            app.snooze_item("CC:pr")
+            assert list(json.loads(path.read_text())["items"]) == ["CC:pr"]
 
 
 # -- the snapshot's time (O5) and the minute tick --------------------------------------------

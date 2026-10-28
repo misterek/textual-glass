@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
+import os
 import threading
 import time
 import webbrowser
@@ -74,6 +76,28 @@ def _describe(error: BaseException) -> str:
     return f"{type(error).__name__}: {text.splitlines()[0]}"[:200] if text else type(error).__name__
 
 
+def _read_snoozes(text: str) -> tuple[dict[str, datetime], dict[str, datetime]]:
+    """Parse a snooze file: ``{"items": {key: until}, "alerts": {key: until}}``,
+    each ``until`` an ISO time with an offset. Raises ValueError (or TypeError)
+    for anything else."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    parts: list[dict[str, datetime]] = []
+    for part in ("items", "alerts"):
+        entries = data.get(part, {})
+        if not isinstance(entries, dict):
+            raise ValueError(f"{part!r} is not an object")
+        parsed: dict[str, datetime] = {}
+        for key, value in entries.items():
+            until = datetime.fromisoformat(value)
+            if until.tzinfo is None:
+                raise ValueError(f"{part} {key!r}: a time without an offset")
+            parsed[key] = until
+        parts.append(parsed)
+    return parts[0], parts[1]
+
+
 @dataclass
 class _Poll:
     """The app's side of one source: its fetch in flight and its next one."""
@@ -103,6 +127,8 @@ class OrbitalApp(Glass, App[None]):
             in a real dashboard.
         open_hosts: With ``open_urls``, the hosts ``open_link`` may open (``{"github.com"}``); None
             means any http or https link.
+        snooze_file: A JSON file that keeps item and alert snoozes across restarts (read at
+            startup, written after every change); None keeps them in memory only.
 
     Other keyword arguments go to ``Glass`` and ``App`` (``glass=False`` for text only).
     """
@@ -129,7 +155,8 @@ class OrbitalApp(Glass, App[None]):
     def __init__(self, provider: Provider, *, rules: Sequence[Rule] = (WaitingRule(),),
                  alert_images: dict[str, str] | None = None, alerts: bool = True, notify: str = "auto",
                  bell: bool = True, title_badge: bool = True, open_urls: bool = False,
-                 open_hosts: Collection[str] | None = None, **kwargs: Any) -> None:
+                 open_hosts: Collection[str] | None = None, snooze_file: str | Path | None = None,
+                 **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.provider = provider
         self.store = Store(provider.sources())
@@ -143,7 +170,10 @@ class OrbitalApp(Glass, App[None]):
                                  title=title_badge)
         self.open_urls = open_urls
         self.open_hosts = None if open_hosts is None else frozenset(host.lower() for host in open_hosts)
+        #: Snoozed attention items: key -> when they come back. Alert snoozes are ``alert_queue.snoozed``.
         self.snoozed: dict[str, datetime] = {}
+        self.snooze_file = None if snooze_file is None else Path(snooze_file).expanduser()
+        self._orbital_saved: str | None = None  # the snooze file's content as last read or written
         self.fetches = 0
         #: What ``report_error`` caught, oldest first (the same error once, with a count).
         self.errors: deque[ErrorReport] = deque(maxlen=self.ERRORS_KEPT)
@@ -174,6 +204,7 @@ class OrbitalApp(Glass, App[None]):
         # they can push screens and compose widgets like any handler (rule 13).
         self._orbital_context = contextvars.copy_context()
         self.notifier.badge("")  # the window title says what this window is
+        self._attempt("snooze file", self._load_snoozes)  # before the first fetch can raise an alert
         self._load_images(sorted(set(self.alert_rules.images.values())))
         for key in self._orbital_polls:
             self._poll(key)
@@ -459,6 +490,7 @@ class OrbitalApp(Glass, App[None]):
 
     def _wake_alerts(self, at: datetime) -> None:
         if self.alert_queue.wake(at):
+            self._save_snoozes()
             self._show_next_alert()
 
     # -- snoozing items -------------------------------------------------------------------------
@@ -467,13 +499,23 @@ class OrbitalApp(Glass, App[None]):
         """Hide an attention item (by key) for ``duration`` (default ``ITEM_SNOOZE``)."""
         at = now()
         self.snoozed[key] = at + (duration or self.ITEM_SNOOZE)
+        self._save_snoozes()
         self._republish(at)
+
+    def unsnooze(self, key: str) -> bool:
+        """Bring back one snoozed item (by key); False if it wasn't snoozed."""
+        if self.snoozed.pop(key, None) is None:
+            return False
+        self._save_snoozes()
+        self._republish(now())
+        return True
 
     def wake_items(self) -> int:
         """Bring back every snoozed item; returns how many."""
         count = len(self.snoozed)
         self.snoozed.clear()
         if count:
+            self._save_snoozes()
             self._republish(now())
         return count
 
@@ -482,11 +524,64 @@ class OrbitalApp(Glass, App[None]):
         for key in due:
             del self.snoozed[key]
         if due:
+            self._save_snoozes()
             self._republish(at)
 
     def visible_items(self, items: Sequence[AttentionItem]) -> list[AttentionItem]:
         """``items`` without the snoozed ones."""
         return [i for i in items if i.key not in self.snoozed]
+
+    # -- the snooze file --------------------------------------------------------------------------
+
+    def _load_snoozes(self) -> None:
+        """Read the snooze file, if there is one, and keep the snoozes that
+        haven't ended. One that can't be read or parsed is reported and treated
+        as empty: it never stops startup (rule 25)."""
+        path = self.snooze_file
+        if path is None:
+            return
+        self._orbital_saved = self._snooze_text()  # a missing or broken file is only written after a change
+        try:
+            text = path.read_text(encoding="utf-8")
+            items, alerts = _read_snoozes(text)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError) as error:  # unreadable, not JSON, or not ours
+            self.report_error(f"snooze file {path}", error)
+            return
+        self._orbital_saved = text
+        at = now()
+        self.snoozed.update({key: until for key, until in items.items() if until > at})
+        self.alert_queue.restore({key: until for key, until in alerts.items() if until > at})
+        self._save_snoozes()  # without the snoozes that ended while the app was closed
+
+    def _snooze_text(self) -> str:
+        state = {"items": {key: until.isoformat() for key, until in sorted(self.snoozed.items())},
+                 "alerts": {key: until.isoformat() for key, until in sorted(self.alert_queue.snoozed.items())}}
+        return json.dumps(state, indent=1, ensure_ascii=False) + "\n"
+
+    def _save_snoozes(self) -> None:
+        """Write the snooze file if the snoozes changed: to a temporary file
+        next to it, then ``os.replace``, so a crash never leaves half a file.
+        A failed write is reported and tried again at the next change."""
+        path = self.snooze_file
+        if path is None:
+            return
+        text = self._snooze_text()
+        if text == self._orbital_saved:
+            return
+        self._orbital_saved = text  # also after a failure: tried again at the next change, not every fetch
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as error:
+            self.report_error(f"snooze file {path}", error)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # -- alerts ----------------------------------------------------------------------------------
 
@@ -531,6 +626,7 @@ class OrbitalApp(Glass, App[None]):
         fresh, live = self.alert_rules.evaluate(snapshot)
         if self.alert_queue.resolve(live):
             self._close_resolved_alert()
+        self._save_snoozes()  # resolve may have dropped snoozed alerts
         for alert in fresh:
             self.raise_alert(alert)
         self._show_next_alert()  # a queued alert takes the resolved one's place
@@ -570,6 +666,7 @@ class OrbitalApp(Glass, App[None]):
             self._alert_screen = None
             if action == "snooze":
                 self.alert_queue.snooze(self.ALERT_SNOOZE)
+                self._save_snoozes()
                 self.notify(f"Snoozed for {int(self.ALERT_SNOOZE.total_seconds() // 60)} minutes: {alert.title}",
                             timeout=3, markup=False)
             else:
