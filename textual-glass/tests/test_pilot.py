@@ -793,3 +793,120 @@ async def test_timer_stays_paused_after_deactivate_when_a_render_lands_late(outp
         engine._timer.resume()  # a resume that slipped through anyway
         engine.tick()
         assert not _ticking(app), "the next tick pauses it again"
+
+
+class FakeClock:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_errors_count_in_a_sliding_window_and_glass_comes_back(output: Output,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """More than five errors within a minute turn glass off; scattered errors never
+    do. After turning itself off, glass tries again with a growing delay, at most
+    three times, then stays off; a retry that stays healthy resets the count."""
+    import textual_glass.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "RETRY_DELAYS", (0.05, 0.1, 0.15))
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        clock = engine.clock = FakeClock()
+        notes: list[str] = []
+        monkeypatch.setattr(engine, "_log", lambda text, error=False: notes.append(text))
+        boom = RuntimeError("boom")
+
+        for _ in range(12):  # twelve errors over eight hours: harmless
+            engine._failed(boom)
+            clock.now += 8 * 3600 / 12
+        assert engine.active and engine.errors == 12
+
+        async def burst() -> None:
+            for _ in range(6):
+                engine._failed(boom)
+                clock.now += 5
+            assert not engine.active, "six errors in half a minute turn glass off"
+            assert not output.model().images, "and every image is deleted"
+
+        async def comes_back() -> None:
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if engine.active:
+                    break
+            assert engine.active, "glass tried again"
+            await idle(app, pilot)
+            assert engine.layers[MAIN].image_id in output.model().images, "and drew everything again"
+
+        delays = engine_mod.RETRY_DELAYS
+        await burst()
+        assert engine.retry_in == delays[0]
+        await comes_back()
+        clock.now += engine_mod.HEALTHY + 1  # the retry stayed healthy: the next problem is a new one
+        await burst()
+        assert engine.retry_in == delays[0], "the count of retries starts again"
+        await comes_back()
+        for attempt in (2, 3):
+            clock.now += 60  # back on for only a minute: these retries are in a row
+            await burst()
+            assert engine.retry_in == delays[attempt - 1]
+            await comes_back()
+        clock.now += 60
+        await burst()
+        assert engine.retry_in is None, "after three retries in a row, glass stays off"
+        await asyncio.sleep(0.4)
+        assert not engine.active
+        assert sum("trying again in" in n for n in notes) == 4, notes
+        assert sum("trying glass again" in n for n in notes) == 4, notes
+        assert any("for good" in n for n in notes), notes
+
+        engine.activate(force=True)  # by hand: a fresh budget
+        await idle(app, pilot)
+        await burst()
+        assert engine.retry_in == delays[0]
+        engine.deactivate()  # turning glass off by hand cancels the retry
+        assert engine.retry_in is None
+        await asyncio.sleep(0.2)
+        assert not engine.active
+        assert not output.model().errors
+
+
+async def test_errors_in_worker_callbacks_reach_the_error_budget(output: Output) -> None:
+    """A callback from the worker thread that raises is counted (and logged), not lost in asyncio."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+
+        def done(result: int) -> None:
+            raise ValueError("broken done")
+
+        app.glass.background_job(lambda: 1, done)
+        await idle(app, pilot)
+        assert app.glass.errors == 1 and "broken done" in (app.glass.last_error or "")
+        assert app.glass.pending_jobs == 0 and app.glass.active
+
+
+async def test_turning_off_inside_a_frame_writes_no_sync_markers(output: Output,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the error budget runs out inside Textual's frame, the deletes are written
+    inside that frame: sync markers of glass's own would end Textual's update early."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        for _ in range(5):
+            engine._failed(RuntimeError("almost"))
+
+        def broken(now: float) -> bool:
+            raise RuntimeError("the last straw")
+
+        monkeypatch.setattr(engine, "_sync", broken)
+        mark = output.mark()
+        engine.on_frame()
+        assert not engine.active
+        sent = output.since(mark)
+        assert kitty.RESET_DEFAULT_BACKGROUND in sent and "a=d" in sent
+        assert kitty.SYNC_START not in sent and kitty.SYNC_END not in sent

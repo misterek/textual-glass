@@ -43,7 +43,7 @@ import sys
 import termios
 import time
 import weakref
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -82,6 +82,11 @@ FULL_FRACTION = 0.5     # beyond this, re-render the whole layer
 SPRITE_MAX_PX = 192     # sprite frames are rendered at most this big per side
 PAGE_CACHE = 4          # pages whose backdrops stay in the terminal for instant switches
 
+ERROR_LIMIT = 5         # more errors than this within ERROR_WINDOW seconds turn glass off...
+ERROR_WINDOW = 60.0
+RETRY_DELAYS = (60.0, 300.0, 1800.0)  # ...then it tries again after each delay in turn, and stays off after the last
+HEALTHY = 600.0         # a retry that stays on this long starts the count of retries again
+
 Rect = tuple[int, int, int, int]
 
 
@@ -114,6 +119,9 @@ class Writer:
         self.pending: list[str] = []
         self.bytes_sent = 0
         self.commands = 0
+        #: Set while glass runs inside Textual's synchronized frame (``on_frame``):
+        #: a flush then writes without markers of its own, which would end Textual's update early.
+        self.in_frame = False
 
     def queue(self, data: str) -> None:
         if data:
@@ -129,10 +137,10 @@ class Writer:
         self._write(self._take())
 
     def flush(self) -> None:
-        """Write queued commands as their own synchronized update."""
+        """Write queued commands as their own synchronized update (or straight into Textual's, inside one)."""
         data = self._take()
         if data:
-            self._write(kitty.SYNC_START + data + kitty.SYNC_END)
+            self._write(data if self.in_frame else kitty.SYNC_START + data + kitty.SYNC_END)
 
     def _write(self, data: str) -> None:
         if data and hooks.driver_write(self.app, data):
@@ -273,7 +281,15 @@ class GlassEngine:
         self.size: tuple[int, int] = (0, 0)
         self.last_scene: Scene | None = None
         self.last_error: str | None = None
-        self.errors = 0
+        self.errors = 0  # every error since the app started
+        #: Glass turned itself off after too many errors and tries again in this many seconds.
+        self.retry_in: float | None = None
+        self.clock: Callable[[], float] = time.monotonic  # the error budget's clock
+        self._error_times: deque[float] = deque()  # errors within the last ERROR_WINDOW seconds
+        self._retries = 0  # automatic retries in a row
+        self._retried_at: float | None = None
+        self._retry_timer: Any = None
+        self._forced = False  # activated with force=True (kept for retries and resumes)
         self._session = 0  # bumped whenever glass turns off: worker results from before are dropped
         self.render_ms: dict[str, float] = {}
         self.pending_jobs = 0  # renders and jobs running in the worker thread
@@ -321,11 +337,19 @@ class GlassEngine:
             self.activate()
 
     def activate(self, force: bool = False) -> None:
-        """Turn glass on. ``force`` also allows it under Textual's headless driver
-        (pilot tests); output then goes nowhere unless a test captures it."""
+        """Turn glass on, with a fresh error budget. ``force`` also allows it under
+        Textual's headless driver (pilot tests); output then goes nowhere unless
+        a test captures it."""
+        self._cancel_retry()
+        self._retries = 0
+        self._activate(force)
+
+    def _activate(self, force: bool) -> None:
         app = self.app
-        if (app.is_headless and not force) or app.is_inline or not hooks.has_driver(app):
+        if self.active or (app.is_headless and not force) or app.is_inline or not hooks.has_driver(app):
             return
+        self._forced = force
+        self._error_times.clear()
         self._loop = asyncio.get_running_loop()
         self._app_context = contextvars.copy_context()  # Textual's active_app is set here
         self._filters = weakref.WeakKeyDictionary()
@@ -348,7 +372,12 @@ class GlassEngine:
             widget.glass_changed()
 
     def deactivate(self) -> None:
-        """Turn glass off: delete every image and give Textual its plain look back."""
+        """Turn glass off: delete every image and give Textual its plain look back
+        (and forget a retry after errors that was pending)."""
+        self._cancel_retry()
+        self._deactivate()
+
+    def _deactivate(self) -> None:
         if not self.active:
             return
         self._delete_everything()
@@ -372,6 +401,7 @@ class GlassEngine:
 
     def shutdown(self) -> None:
         """The app is exiting: clean the terminal up (deletes, OSC 111)."""
+        self._cancel_retry()
         if self.active:
             self._delete_everything()
             self.active = False
@@ -449,11 +479,15 @@ class GlassEngine:
         """At the end of each Textual frame: update the glass inside the same frame."""
         if not self.active or self._in_sync:
             return
+        self.writer.in_frame = True
         try:
-            self._sync(time.monotonic())
-        except Exception as error:  # noqa: BLE001
-            self._failed(error)
-        self.writer.drain_into_frame()
+            try:
+                self._sync(time.monotonic())
+            except Exception as error:  # noqa: BLE001
+                self._failed(error)  # may turn glass off: its deletes go into this frame too
+            self.writer.drain_into_frame()
+        finally:
+            self.writer.in_frame = False
 
     def tick(self) -> None:
         """60 Hz while something animates (pill slides, fades); paused when idle or off."""
@@ -483,23 +517,66 @@ class GlassEngine:
         (log.error if error else log.warning)(f"textual-glass: {text}")
 
     def _failed(self, error: BaseException) -> None:
+        """Count an error. More than ERROR_LIMIT within ERROR_WINDOW seconds turn
+        glass off (the app carries on, plain); it then tries again later."""
         import traceback
 
         self.errors += 1
         self.last_error = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         self._log(repr(error), error=True)
-        if self.errors > 5:  # something is badly wrong: fall back to plain Textual
-            self._log("too many errors, turning glass off", error=True)
-            self.deactivate()
+        now = self.clock()
+        times = self._error_times
+        times.append(now)
+        while now - times[0] > ERROR_WINDOW:
+            times.popleft()
+        if self.active and len(times) > ERROR_LIMIT:
+            self._give_up(now, len(times))
+
+    def _give_up(self, now: float, count: int) -> None:
+        """Too many errors: plain Textual for now, and a retry after the next delay."""
+        self._error_times.clear()
+        if self._retried_at is not None and now - self._retried_at >= HEALTHY:
+            self._retries = 0  # the last retry stayed healthy: this is a new problem
+        self._deactivate()
+        why = f"{count} errors within {ERROR_WINDOW:g} s"
+        if self._retries >= len(RETRY_DELAYS):
+            self.retry_in = None
+            self._log(f"{why}, turning glass off for good ({len(RETRY_DELAYS)} retries failed)", error=True)
+            return
+        delay = RETRY_DELAYS[self._retries]
+        self._retries += 1
+        self.retry_in = delay
+        self._log(f"{why}, turning glass off; trying again in {delay:g} s "
+                  f"(retry {self._retries} of {len(RETRY_DELAYS)})", error=True)
+        self._retry_timer = self.app.set_timer(delay, self._retry, name="textual-glass retry")
+
+    def _retry(self) -> None:
+        self._retry_timer = None
+        self.retry_in = None
+        if self.active or not self.supported:
+            return
+        self._log(f"trying glass again (retry {self._retries} of {len(RETRY_DELAYS)})")
+        self._retried_at = self.clock()
+        self._activate(self._forced)
+
+    def _cancel_retry(self) -> None:
+        if self._retry_timer is not None:
+            self._retry_timer.stop()
+            self._retry_timer = None
+        self.retry_in = None
 
     def _from_worker(self, session: int, callback: Callable[..., None], *args: Any) -> None:
         """Every callback from the worker thread runs through here, on the app's
         thread and in its context (rule 13). Results from before glass last
-        turned off are dropped."""
+        turned off are dropped; an exception counts like any other glass error
+        (asyncio would otherwise just log it)."""
         if session != self._session:
             return
         self.pending_jobs -= 1
-        callback(*args)
+        try:
+            callback(*args)
+        except Exception as error:  # noqa: BLE001
+            self._failed(error)
 
     def _post(self, loop: asyncio.AbstractEventLoop, context: contextvars.Context, session: int,
               callback: Callable[..., None], *args: Any) -> None:
@@ -1153,4 +1230,5 @@ class GlassEngine:
         return dict(bytes_sent=self.writer.bytes_sent, commands=self.writer.commands, images=len(self.ids.live),
                     layers=sorted(self.layers), pages=len(self.page_cache), sprites=len(self.sprites),
                     frames=self.frames_synced, motion=self.motion, render_ms=dict(self.render_ms),
-                    support=self.support.reason if self.support else None, active=self.active)
+                    support=self.support.reason if self.support else None, active=self.active,
+                    errors=self.errors, retry_in=self.retry_in)
