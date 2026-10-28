@@ -274,6 +274,7 @@ class GlassEngine:
         self.last_scene: Scene | None = None
         self.last_error: str | None = None
         self.errors = 0
+        self._session = 0  # bumped whenever glass turns off: worker results from before are dropped
         self.render_ms: dict[str, float] = {}
         self.pending_jobs = 0  # renders and jobs running in the worker thread
         self.frames_synced = 0
@@ -352,6 +353,8 @@ class GlassEngine:
             return
         self._delete_everything()
         self.active = False
+        self._session += 1
+        self.pending_jobs = 0  # queued jobs are cancelled below; a running one is dropped when it lands
         hooks.remove_filter_provider(self.app)
         self._borders.restore()
         self.app.remove_class("-textual-glass")
@@ -372,6 +375,7 @@ class GlassEngine:
         if self.active:
             self._delete_everything()
             self.active = False
+            self._session += 1
             hooks.remove_filter_provider(self.app)
             self._borders.restore()
             if self._executor is not None:
@@ -452,8 +456,10 @@ class GlassEngine:
         self.writer.drain_into_frame()
 
     def tick(self) -> None:
-        """60 Hz while something animates (pill slides, fades); paused when idle."""
+        """60 Hz while something animates (pill slides, fades); paused when idle or off."""
         if not self.active:
+            if self._timer is not None:
+                self._timer.pause()
             return
         now = time.monotonic()
         busy = False
@@ -467,8 +473,9 @@ class GlassEngine:
             self._timer.pause()
 
     def kick(self) -> None:
-        """Run the 60 Hz tick until animations finish."""
-        if self._timer is not None:
+        """Run the 60 Hz tick until animations finish (never while glass is off: a
+        render that lands after ``deactivate`` must not start it again)."""
+        if self.active and self._timer is not None:
             self._timer.resume()
 
     def _log(self, text: str, error: bool = False) -> None:
@@ -480,10 +487,27 @@ class GlassEngine:
 
         self.errors += 1
         self.last_error = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        self.app.log.error(f"textual-glass: {error!r}")
+        self._log(repr(error), error=True)
         if self.errors > 5:  # something is badly wrong: fall back to plain Textual
-            self.app.log.error("textual-glass: too many errors, turning glass off")
+            self._log("too many errors, turning glass off", error=True)
             self.deactivate()
+
+    def _from_worker(self, session: int, callback: Callable[..., None], *args: Any) -> None:
+        """Every callback from the worker thread runs through here, on the app's
+        thread and in its context (rule 13). Results from before glass last
+        turned off are dropped."""
+        if session != self._session:
+            return
+        self.pending_jobs -= 1
+        callback(*args)
+
+    def _post(self, loop: asyncio.AbstractEventLoop, context: contextvars.Context, session: int,
+              callback: Callable[..., None], *args: Any) -> None:
+        """From the worker thread: run ``callback(*args)`` on the app's thread (see ``_from_worker``)."""
+        try:
+            loop.call_soon_threadsafe(self._from_worker, session, callback, *args, context=context.copy())
+        except RuntimeError:  # the loop has closed
+            pass
 
     # -- syncing the scene -------------------------------------------------------------
 
@@ -818,7 +842,7 @@ class GlassEngine:
         self.pending_jobs += 1
         generation, grid, rect, static = layer.generation, layer.grid, layer.rect, layer.static
         bg = self._background_for(grid)
-        loop, context = self._loop, self._app_context
+        loop, context, session = self._loop, self._app_context, self._session
 
         def work() -> None:
             try:
@@ -826,15 +850,11 @@ class GlassEngine:
                 paint(Canvas(data, rect[0], rect[1]), grid, static)
             except Exception as error:  # noqa: BLE001
                 data = error
-            try:
-                loop.call_soon_threadsafe(self._rebased, layer, generation, data, context=context.copy())
-            except RuntimeError:  # the loop has closed
-                pass
+            self._post(loop, context, session, self._rebased, layer, generation, data)
 
         self._executor.submit(work)
 
     def _rebased(self, layer: Layer, generation: int, base: Any) -> None:
-        self.pending_jobs -= 1
         if generation != layer.generation:
             self.kick()
             return
@@ -855,7 +875,8 @@ class GlassEngine:
         if self._executor is None:
             return
         layer.busy = True
-        self.pending_jobs += 1
+        if not sync:
+            self.pending_jobs += 1
         generation = layer.generation
         rect = self._cells_to_rect(cells, grid) if (new_image or rects is None) else layer.rect
         rgba, palette = layer.rgba, self.palette
@@ -868,7 +889,7 @@ class GlassEngine:
             else:
                 bg = self._bgs.get((grid, palette))
                 missing = [g for g in dict.fromkeys((grid, self._quick_grid())) if (g, palette) not in self._bgs]
-        loop, context = self._loop, self._app_context
+        loop, context, session = self._loop, self._app_context, self._session
 
         def work() -> None:
             nonlocal bg
@@ -902,11 +923,8 @@ class GlassEngine:
                                catch_up=False)
                 return
             if loop is not None:
-                try:
-                    loop.call_soon_threadsafe(self._job_done, layer, generation, grid, cells, rect, static, dynamic,
-                                              new_image, result, ms, True, palette, drawn, context=context.copy())
-                except RuntimeError:  # the loop has closed
-                    pass
+                self._post(loop, context, session, self._job_done, layer, generation, grid, cells, rect, static,
+                           dynamic, new_image, result, ms, True, palette, drawn)
 
         if sync:
             work()
@@ -917,7 +935,6 @@ class GlassEngine:
                   static: tuple[Item, ...], dynamic: tuple[Item, ...], new_image: bool, result: Any,
                   ms: float, catch_up: bool = True, palette: Palette | None = None,
                   drawn: dict[Grid, np.ndarray] | None = None) -> None:
-        self.pending_jobs -= 1
         if self.active and palette is not None:
             for g, data in (drawn or {}).items():
                 self._keep_background(g, palette, data)
@@ -973,7 +990,7 @@ class GlassEngine:
         """Run ``work()`` in the worker thread, then ``done(result)`` on the app's
         thread, in the app's context (Textual's ``active_app`` is set there),
         followed by a flush of whatever ``done`` queued."""
-        executor, loop, context = self._executor, self._loop, self._app_context
+        executor, loop, context, session = self._executor, self._loop, self._app_context, self._session
         if executor is None or loop is None:
             return
 
@@ -982,16 +999,12 @@ class GlassEngine:
                 result = work()
             except Exception as error:  # noqa: BLE001
                 result = error
-            try:
-                loop.call_soon_threadsafe(self._background_done, done, result, context=context.copy())
-            except RuntimeError:  # the loop has closed
-                pass
+            self._post(loop, context, session, self._background_done, done, result)
 
         self.pending_jobs += 1
         executor.submit(run)
 
     def _background_done(self, done: Callable[[Any], None], result: Any) -> None:
-        self.pending_jobs -= 1
         if not self.active:
             return
         if isinstance(result, Exception):

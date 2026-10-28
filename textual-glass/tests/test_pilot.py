@@ -738,3 +738,58 @@ async def test_cached_image_is_reused_across_popups(output: Output) -> None:
         assert app.screen.query_one(GlassImage)._image_id == first
         assert not re.search(rf"a=t,i={first}\b", output.since(mark)), "the second popup uploads no picture"
         assert not output.model().errors
+
+
+# -- a long day: the timer, the error budget, sprite churn, suspend and resume ----------------------
+
+
+def _ticking(app: Any) -> bool:
+    """Is the 60 Hz timer running? (Textual's ``Timer`` keeps that in a private event.)"""
+    timer = app.glass._timer
+    return timer is not None and timer._active.is_set()
+
+
+async def test_timer_stays_paused_after_deactivate_when_a_render_lands_late(output: Output,
+                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker render still running when glass turns off lands afterwards: it must
+    not wake the 60 Hz timer (``kick`` does nothing while glass is off), and a tick
+    that was already due pauses it again."""
+    import threading
+
+    import textual_glass.engine as engine_mod
+
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        gate, running = threading.Event(), threading.Event()
+        real_paint = engine_mod.paint
+
+        def slow_paint(*args: Any) -> None:
+            if threading.current_thread() is not threading.main_thread():
+                running.set()
+                gate.wait(5)
+            real_paint(*args)
+
+        monkeypatch.setattr(engine_mod, "paint", slow_paint)
+        await pilot.resize_terminal(90, 28)  # a new backdrop size: rendered in the worker
+        await pilot.pause()
+        engine.on_frame()
+        assert running.wait(5), "a worker render is in progress"
+        executor = engine._executor
+        assert executor is not None
+        engine.deactivate()
+        assert not _ticking(app)
+        mark = output.mark()
+        gate.set()
+        executor.shutdown(wait=True)  # the render finishes and calls back to the app thread
+        await asyncio.sleep(0.05)
+        await pilot.pause()
+        assert engine.pending_jobs == 0
+        assert not _ticking(app), "the late render did not wake the timer"
+        assert "\x1b_G" not in output.since(mark), "and its result was dropped"
+        engine.kick()
+        assert not _ticking(app), "kick does nothing while glass is off"
+        engine._timer.resume()  # a resume that slipped through anyway
+        engine.tick()
+        assert not _ticking(app), "the next tick pauses it again"
