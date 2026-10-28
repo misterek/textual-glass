@@ -22,7 +22,7 @@ from rules import INCIDENT, RELEASE_FAILED
 from textual.app import App, ComposeResult
 from textual.strip import Strip
 
-from textual_glass import Glass, GlassImage, GlassPanel, SpriteView, kitty
+from textual_glass import Glass, GlassImage, GlassPanel, SpriteView, StatTile, kitty
 from textual_glass.engine import MAIN, Z0
 from textual_glass.items import Lane, Panel, Pill, Ring
 from textual_glass.palette import rgb
@@ -496,6 +496,53 @@ async def test_page_switch_lands_pixels_with_the_text(output: Output) -> None:
         model = output.model()
         assert model.errors == []
         assert len([p for p in model.placements.values() if p["z"] == Z0]) == 1, "only one backdrop is placed"
+
+
+async def test_the_week_page_steps_back_through_held_and_fetched_weeks(output: Output) -> None:
+    """``[`` and ``]``: last week comes from the snapshot (``Snapshot.week(on)``), older weeks
+    from the provider's ``history`` through ``OrbitalApp.fetch``, once each."""
+    from pages import WeekPage
+
+    from textual_orbital.model import monday_of
+
+    app = make()
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        await pilot.press("3")
+        await idle(app, pilot)
+        page = app.query_one(WeekPage)
+        panel = app.query_one("#log-panel", GlassPanel)
+        this = monday_of(now().astimezone().date())
+        assert str(panel.border_title).startswith("THIS WEEK")
+        calls: list[tuple[Any, ...]] = []
+        history = app.provider.history  # type: ignore[attr-defined]
+        app.provider.history = lambda *args: calls.append(args) or history(*args)  # type: ignore[attr-defined]
+        await pilot.press("left_square_bracket")
+        await idle(app, pilot)
+        assert "last week" in str(panel.border_title) and not calls, "held by the snapshot"
+        log = app.query_one("#events", EventLog)
+        last = timedelta(weeks=1)
+        assert log.rows and all(this - last <= e.when.astimezone().date() < this for e in log.rows)
+        await pilot.press("left_square_bracket")
+        await pilot.pause()
+        assert "2 weeks ago" in str(panel.border_title) and "loading…" in str(panel.border_title)
+        for _ in range(60):
+            if "loading" not in str(panel.border_title):
+                break
+            await asyncio.sleep(0.05)
+        await idle(app, pilot)
+        older = this - 2 * last
+        assert calls == [(older - last, older + timedelta(days=6))], "that week and the one before, in a thread"
+        assert log.rows and all(older <= e.when.astimezone().date() < older + last for e in log.rows)
+        tile = app.query_one("#t-merged", StatTile)
+        assert len(tile.chart.values) == 7, "a past week is whole"
+        await pilot.press("right_square_bracket", "left_square_bracket")  # back and forth: fetched once
+        await idle(app, pilot)
+        assert len(calls) == 1 and "2 weeks ago" in str(panel.border_title)
+        await pilot.press("right_square_bracket", "right_square_bracket", "right_square_bracket")
+        await idle(app, pilot)
+        assert str(panel.border_title).startswith("THIS WEEK") and page.week_on is None, "no further than now"
+        assert not app.errors and output.model().errors == []
 
 
 async def test_alert_pictures_load_on_demand(output: Output, tmp_path: Path) -> None:

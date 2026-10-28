@@ -92,6 +92,7 @@ HELP_KEYS = [
     ("u", "wake everything snoozed"),
     ("z", "what is snoozed"),
     ("space", "fold the be-aware list"),
+    ("[ ]", "older / newer week"),
     ("r", "refresh all sources"),
     ("h", "source health"),
     ("t", "test alert"),

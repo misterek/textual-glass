@@ -26,9 +26,9 @@ Elsewhere in `textual-orbital/`:
 | Path | What it is |
 | --- | --- |
 | `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`. |
-| `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint. |
+| `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`. |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`. |
-| `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world. Only for the demo and the tests; don't import it from real code. |
+| `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, and `history(first, last)`, a slow call for older weeks. Only for the demo and the tests; don't import it from real code. |
 | `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
 ## Build a dashboard
@@ -663,10 +663,79 @@ Write one `Source` per system. A source is a plain object with `key`, `name`, `i
 - **Attention items.** `score` is 0-10 and orders the queue (9+ is red). `why` is a short verb ("review", "respond", "fix build"); add a colour for yours to `WHY_COLORS`. `section="aware"` puts an item in the be-aware list. `ref=("track", key)` or `("entity", id)` links an item to a record, so `enter` can show that record.
 - **Numbers.** For a gauge fed straight from a system (a disk's fill, a queue depth), return `metrics={"name": value}` and read `snapshot.metric("name")`. Round each value to what the screen shows (a fraction shown as a whole percent: `round(x, 2)`): every changed value is a content change and redraws (rule 9). Prefix the names with the source key (`"MD.disk"`) when two sources might use the same one: they merge in source order and the later one wins.
 - **Entities.** `EntityState.WAITING` means "needs you"; `since` is when it entered that state, so a new wait gets a new `since` and therefore a new alert from `WaitingRule`. **Keep `since` stable while the wait lasts**: `since=now()` on every fetch is a new wait on every poll, and the popup comes back every few seconds. Without an API timestamp, remember the first time you saw the wait, as `PipelineSource` does for stages. Pass `WaitingRule(source="XX")` with your source key: its first fetch is the baseline. An entity doesn't need a `BeaconRow` to count: `WAITING` ones drive the title badge and `WaitingRule` either way.
-- **Events.** Emit one `Event` per thing that happened, for at least this week and last week; `Snapshot.week()` counts them by `kind`. There is no separate stats API.
+- **Events.** Emit one `Event` per thing that happened, for at least this week and last week; `Snapshot.week()` counts them by `kind`. There is no separate stats API. For `week(on)` of last week (counted against the week before it), report one more week; older weeks are fetched on demand (below).
 - **Intervals.** Claude Code sessions every 10 s, most APIs every 60 s. Each fetch runs in a daemon thread of its own, and the next one starts `interval` seconds after it ends, so a slow fetch is never re-run at once. A failing source waits twice as long after each failure in a row (timeouts included), up to 15 minutes, which spares rate-limited APIs; `r` (`app.poll_all()`) fetches now anyway.
 - **Timeouts.** Give every network call and subprocess in `fetch()` its own timeout (`subprocess.run(..., timeout=30)`, as `ActionsSource` does): a thread can't be stopped from outside. The app also gives each fetch a deadline, the source's `timeout` attribute or `max(2 * interval, 10)` seconds. Past it the source turns red, "timed out after 20 s", the late result is ignored, and after two such hung fetches the source pauses until one returns (rule 21 in [`../AGENTS.md`](../AGENTS.md)). The next fetch may start while a hung one is still blocked, so keep `fetch()` safe to run twice at once: `PipelineSource` replaces its cache in one assignment.
 - **Test a source without the UI:** `timed_fetch(source)` returns `(data, error, ms)`. For a source that calls a CLI or an API, test the mapping against canned output (monkeypatch `subprocess.run` or your HTTP call).
+
+## Fetching on demand: a past week
+
+Sources are fetched on their interval only. Anything with parameters (a past week, a pull request's comments) is fetched on demand with `OrbitalApp.fetch(func, *args, then=callback, timeout=30.0)`: `func(*args)` runs in a daemon thread of its own with a deadline, and `then(data, error)` runs on the app thread, guarded like every other step (rule 22). Past the deadline `then` gets `(None, TimeoutError)` and the late result is dropped (rule 21). `then` runs even if what asked has moved on, so check there that the result is still wanted.
+
+A Week page that steps back with `[` and `]`: the snapshot holds this week and last (`Snapshot.week(on)`), and older weeks come from your own `history(first, last)` call, fetched once each. The console's `WeekPage` (`examples/console/pages.py`) is the full version, with tiles and a cache of fetched weeks.
+
+```python
+from dataclasses import replace
+from datetime import date, timedelta
+from typing import cast
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+
+from textual_glass import GlassPanel
+from textual_orbital import Event, EventLog, OrbitalApp, Page, Snapshot, WeekStats
+from textual_orbital.model import monday_of
+
+
+def history(first: date, last: date) -> list[Event]:
+    """Events from first to last, from your API (with its own timeouts)."""
+    return []
+
+
+class WeekPage(Page):
+    BINDINGS = [Binding("left_square_bracket", "step(-1)"), Binding("right_square_bracket", "step(1)")]
+    snapshot: Snapshot | None = None
+    week_on: date | None = None  # the Monday shown; None for this week
+
+    def compose(self) -> ComposeResult:
+        with GlassPanel(title="THIS WEEK", id="week-panel"):
+            yield EventLog(id="events")
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+        self.show_week()
+
+    def action_step(self, weeks: int) -> None:
+        if self.snapshot is not None:
+            this = monday_of(self.snapshot.taken_at.astimezone().date())
+            monday = (self.week_on or this) + timedelta(weeks=weeks)
+            self.week_on = None if monday >= this else monday
+            self.show_week()
+
+    def show_week(self) -> None:
+        snapshot, monday = self.snapshot, self.week_on
+        if snapshot is None:
+            return
+        if monday is None or monday >= monday_of(snapshot.taken_at.astimezone().date()) - timedelta(weeks=1):
+            self.show(snapshot.week(monday))  # this week or last: the snapshot holds them
+            return
+        self.query_one("#week-panel", GlassPanel).set_title(f"WEEK OF {monday:%b %d}", ("loading…", "dim"))
+        cast(OrbitalApp, self.app).fetch(history, monday - timedelta(weeks=1), monday + timedelta(days=6),
+                                         then=lambda events, error: self.fetched(monday, events, error))
+
+    def fetched(self, monday: date, events: list[Event] | None, error: BaseException | None) -> None:
+        if monday != self.week_on or self.snapshot is None:
+            return  # the user stepped on: not wanted any more
+        if error is not None or events is None:
+            self.query_one("#week-panel", GlassPanel).set_title(f"WEEK OF {monday:%b %d}", (str(error), "red"))
+            return
+        self.show(replace(self.snapshot, events=tuple(events)).week(monday))  # counted like the snapshot's own
+
+    def show(self, week: WeekStats) -> None:
+        self.query_one("#events", EventLog).set_rows(list(week.events))
+        self.query_one("#week-panel", GlassPanel).set_title(f"WEEK OF {week.start:%b %d}",
+                                                           (f"{len(week.events)} events", "dim"))
+```
 
 ## Adding a widget
 

@@ -14,6 +14,10 @@ need:
 * :meth:`OrbitalApp.show_detail` (what ``jump_to`` shows for a record),
 * :meth:`OrbitalApp.badge_changed` (the "◉ 2 waiting" badge, for a header).
 
+:meth:`OrbitalApp.fetch` runs a one-off call with parameters (a past week, a
+record's comments) the same way as a source's fetch: a daemon thread, a
+deadline, the result back on the app thread.
+
 Cost model: each fetch runs in a daemon thread of its own, and the next one is
 scheduled an interval after it ends (longer while the source fails). A fetch
 whose data equals the last one changes nothing and sends nothing; the UI only
@@ -39,7 +43,7 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 from urllib.parse import urlsplit
 
 from textual import events, on
@@ -56,6 +60,8 @@ from .theme import ORBITAL, ORBITAL_NAVY, now
 from .widgets.screens import AlertScreen
 
 log = logging.getLogger("textual_orbital")
+
+T = TypeVar("T")
 
 #: The Orbital look for panels: a border from the theme's primary colour (left,
 #: top) to its secondary colour (right, bottom), which glass draws as a gradient.
@@ -74,6 +80,11 @@ def _describe(error: BaseException) -> str:
     """An exception as one line: its type and the first line of its text."""
     text = str(error).strip()
     return f"{type(error).__name__}: {text.splitlines()[0]}"[:200] if text else type(error).__name__
+
+
+def _name(callback: Callable[..., Any]) -> str:
+    """What a callback is called, for an error report."""
+    return getattr(callback, "__qualname__", None) or repr(callback)
 
 
 def _read_snoozes(text: str) -> tuple[dict[str, datetime], dict[str, datetime]]:
@@ -190,6 +201,8 @@ class OrbitalApp(Glass, App[None]):
         self._orbital_unshown = 0  # errors since the last toast
         self._orbital_toast_at = -1e9  # time.monotonic() of the last toast
         self._orbital_toast_timer: Timer | None = None
+        self._orbital_calls = 0  # tokens for fetch()
+        self._orbital_waiting: dict[int, tuple[Callable[[Any, BaseException | None], object], Timer]] = {}
         self._alert_screen: AlertScreen | None = None
         self.register_theme(ORBITAL)
         self.register_theme(ORBITAL_NAVY)
@@ -232,7 +245,7 @@ class OrbitalApp(Glass, App[None]):
             try:
                 callback(*args)
             except Exception as error:  # noqa: BLE001 - reported, never lost in the loop's handler (rule 22)
-                self.report_error(getattr(callback, "__qualname__", None) or repr(callback), error)
+                self.report_error(_name(callback), error)
 
         try:
             loop.call_soon_threadsafe(run, context=self._orbital_context.copy())
@@ -383,6 +396,61 @@ class OrbitalApp(Glass, App[None]):
         delay = poll_delay(poll.interval, self.store.status(key).failures)
         poll.timer = self.set_timer(delay, lambda: self._attempt("poll", self._poll, key), name=f"poll-{key}")
         self.store.schedule(key, at + timedelta(seconds=delay))
+
+    # -- one-off fetches -----------------------------------------------------------------
+
+    def fetch(self, func: Callable[..., T], *args: Any, then: Callable[[T | None, BaseException | None], object],
+              timeout: float = 30.0) -> None:
+        """Run ``func(*args)`` once, in a daemon thread of its own, and hand the
+        result to ``then(data, error)`` on the app thread, in the app's context:
+        ``(result, None)``, or ``(None, exception)`` when ``func`` raised (anything,
+        ``SystemExit`` included) or ran past ``timeout`` seconds (a ``TimeoutError``;
+        its late result is dropped). What ``then`` raises goes to :meth:`report_error`.
+
+        This is how to fetch something with parameters on demand (a past week, a
+        record's comments); sources are fetched on their interval only. ``func``
+        must set its own network and subprocess timeouts: a thread can't be
+        stopped (rule 21). ``then`` runs even if what asked has gone (a page
+        switched away, a popup closed): check there whether the result is still wanted.
+        """
+        if self._orbital_closed:
+            return
+        if self._orbital_loop is None:  # called before the app's Mount (from a widget's on_mount)
+            self._orbital_loop = asyncio.get_running_loop()
+            self._orbital_context = contextvars.copy_context()
+        self._orbital_calls += 1
+        token = self._orbital_calls
+
+        def work() -> None:
+            data: T | None = None
+            error: BaseException | None = None
+            try:
+                data = func(*args)
+            except BaseException as problem:  # noqa: BLE001 - handed to then(), never lost (rule 22)
+                error = problem
+            self.call_from_worker(self._fetch_done, token, data, error)
+
+        try:
+            threading.Thread(target=work, daemon=True, name=f"orbital-call-{token}").start()
+        except RuntimeError as problem:  # no more threads
+            self._attempt(_name(then), then, None, problem)
+            return
+        deadline = self.set_timer(timeout, lambda: self._fetch_late(token, timeout), name=f"call-{token}")
+        self._orbital_waiting[token] = (then, deadline)
+
+    def _fetch_done(self, token: int, data: Any, error: BaseException | None) -> None:
+        waiting = self._orbital_waiting.pop(token, None)
+        if waiting is None or self._orbital_closed:  # past its deadline: dropped
+            return
+        then, deadline = waiting
+        deadline.stop()
+        self._attempt(_name(then), then, data, error)
+
+    def _fetch_late(self, token: int, timeout: float) -> None:
+        waiting = self._orbital_waiting.pop(token, None)
+        if waiting is not None and not self._orbital_closed:
+            then, _ = waiting
+            self._attempt(_name(then), then, None, TimeoutError(f"timed out after {timeout:g} s"))
 
     # -- publishing ----------------------------------------------------------------------
 

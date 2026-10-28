@@ -17,6 +17,8 @@ first two minutes:
 ======  ==============================================================
 
 ``speed`` compresses the script and the poll intervals (tests use 10 to 40).
+The sources report events for this week and the two before; older weeks come
+from ``DemoProvider.history``, a slow call the Week page makes on demand.
 Everything is made up: the services, the people, the tickets and the numbers.
 """
 
@@ -27,7 +29,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from textual_orbital import (
     AttentionItem,
@@ -48,6 +50,9 @@ from textual_orbital.model import monday_of
 M = timedelta(minutes=1)
 H = timedelta(hours=1)
 D = timedelta(days=1)
+WEEK = timedelta(weeks=1)
+#: How long ``DemoProvider.history`` takes, like a slow API (seconds).
+HISTORY_DELAY = 0.5
 
 #: The release pipeline, first stage to last.
 STAGES = ("BUILD", "TEST", "STAGE", "CANARY", "PROD")
@@ -156,7 +161,9 @@ class DemoWorld:
             AttentionItem("ss-4", "SS", 2, "secret", "Test token in a fixture", "web-shell", "revoked",
                           t - 30 * D, "aware", f"{SCANNER}/4"),
         )}
-        self.events: list[Event] = _week_events(t, self.rng)
+        #: The first day the sources report events for: the Monday two weeks before this one.
+        self.first_day = monday_of(t.astimezone().date()) - 2 * WEEK
+        self.events: list[Event] = _events(self.first_day, t.astimezone().date(), t)
         self.goals = [
             Goal("G-1", "Q4 reliability", "Dana", 0.72, f"{TICKETS}/G-1"),
             Goal("G-2", "Checkout v5", "Omar", 0.45, f"{TICKETS}/G-2"),
@@ -304,6 +311,17 @@ class DemoWorld:
             title, where = rng.choice(_TICKET_POOL if kind == "ticket closed" else _PR_POOL)
             self.events.append(Event(now(), kind, "TT" if kind == "ticket closed" else "GH", title, where))
 
+    # -- history, on demand --------------------------------------------------------------
+
+    def history(self, first: date, last: date) -> list[Event]:
+        """Every event from ``first`` to ``last`` (local dates), as a slow API would
+        return them: the days the sources report, then older ones, made up the
+        same way each time."""
+        time.sleep(HISTORY_DELAY)
+        with self.lock:
+            held = [e for e in self.events if first <= e.when.astimezone().date() <= last]
+        return _events(first, min(last, self.first_day - timedelta(days=1)), now()) + held
+
     # -- what each source sees -----------------------------------------------------------
 
     def attention_for(self, source: str) -> list[AttentionItem]:
@@ -346,26 +364,26 @@ _SOURCES = {"shipped": "GH", "merged": "GH", "reviewed": "GH", "ticket closed": 
             "incident": "IM"}
 
 
-def _week_events(t: datetime, rng: random.Random) -> list[Event]:
-    """This week (up to now) and last week, at believable rates."""
-    local = t.astimezone()
-    start = monday_of(local.date()) - timedelta(days=7)
+def _events(first: date, last: date, until: datetime) -> list[Event]:
+    """Made-up events for the weekdays from ``first`` to ``last``, up to ``until``.
+    Each day has its own seed, so a day is the same every time it is asked for."""
+    local = until.astimezone()
     out: list[Event] = []
-    day = start
-    while day <= local.date():
+    day = first
+    while day <= last:
+        rng = random.Random(day.toordinal())
         if day.weekday() < 5:
             for kind, rate in _RATES.items():
                 for _ in range(max(0, round(rng.gauss(rate, rate * 0.4)))):
                     when = datetime.combine(day, datetime.min.time(), tzinfo=local.tzinfo) + timedelta(
                         hours=rng.uniform(8, 18.5))
-                    if when > local:
-                        continue
                     pool = _TICKET_POOL if _SOURCES[kind] == "TT" else _PR_POOL
                     title, where = rng.choice(pool)
                     if kind == "incident":
                         title, where = rng.choice([("Checkout error rate high", "prod-us"),
                                                    ("Search latency over budget", "prod-eu")])
-                    out.append(Event(when, kind, _SOURCES[kind], title, where))
+                    if when <= local:
+                        out.append(Event(when, kind, _SOURCES[kind], title, where))
         day += timedelta(days=1)
     return out
 
@@ -432,3 +450,8 @@ class DemoProvider:
 
     def sources(self) -> Sequence[Source]:
         return self._sources
+
+    def history(self, first: date, last: date) -> list[Event]:
+        """Events from ``first`` to ``last``, for weeks older than the sources
+        report: the console's Week page fetches them with ``OrbitalApp.fetch``."""
+        return self.world.history(first, last)

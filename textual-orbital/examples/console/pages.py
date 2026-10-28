@@ -1,16 +1,23 @@
 """The four pages of Mission Console, built only from orbital and glass widgets.
 
 Each page gets ``update_snapshot(snapshot)`` whenever the data changes (and
-when items are snoozed) and ``minute_tick(at)`` for ages and timers.
+when items are snoozed) and ``minute_tick(at)`` for ages and timers. The Week
+page steps through past weeks with ``[`` and ``]``: last week from the
+snapshot (``Snapshot.week(on)``), older ones fetched on demand from the
+provider's ``history(first, last)`` (``OrbitalApp.fetch``).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, ClassVar, cast
 
 from demo import PROD, STAGE, STAGES
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 
 from textual_glass import GlassPanel, InfoCard, ProgressArc, RingGauge, StatTile
@@ -19,7 +26,9 @@ from textual_orbital import (
     BeaconRow,
     DoneList,
     EntityState,
+    Event,
     EventLog,
+    OrbitalApp,
     Page,
     PriorityList,
     Snapshot,
@@ -28,8 +37,10 @@ from textual_orbital import (
     TrackHealth,
     TrackItem,
     TrackTable,
+    WeekStats,
     queue_load,
 )
+from textual_orbital.model import monday_of
 from textual_orbital.theme import PALETTE, fmt_age, health_gradient, load_color, source_color, urgency_color, why_color
 
 TASK_GROUPS = ("Projects", "Ongoing", "Small tasks")
@@ -186,10 +197,25 @@ TILES: list[tuple[str, str, tuple[str, ...], tuple[str, str], str]] = [
 
 
 class WeekPage(Page):
-    """Page 3: this week in brief, as telemetry."""
+    """Page 3: a week in brief, as telemetry. ``[`` and ``]`` step through past weeks."""
 
-    KEYS = [("1-4", "pages"), ("j/k", "move"), ("⏎", "open"), ("o", "browser"), ("?", "help"), ("q", "quit")]
+    KEYS = [("1-4", "pages"), ("j/k", "move"), ("[ ]", "weeks"), ("⏎", "open"), ("o", "browser"), ("?", "help"),
+            ("q", "quit")]
     DEFAULT_FOCUS = "#events"
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("left_square_bracket", "step(-1)", "older week", show=False),
+        Binding("right_square_bracket", "step(1)", "newer week", show=False),
+    ]
+    #: Past weeks the snapshot holds whole, each with the week before it (the demo's sources
+    #: report this week and the two before). Older weeks come from the provider's ``history``.
+    HELD = 1
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.snapshot: Snapshot | None = None
+        self.week_on: date | None = None  # the Monday of the week shown; None for this week
+        self.fetched: dict[date, tuple[Event, ...]] = {}  # a Monday -> that week's events and the week before's
+        self.loading_weeks: set[date] = set()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="tiles"):
@@ -199,8 +225,70 @@ class WeekPage(Page):
             yield EventLog(colors=EVENT_COLORS, id="events")
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
-        week = snapshot.week()
-        today = (snapshot.taken_at.astimezone().date() - week.start).days
+        self.snapshot = snapshot
+        self.show_week()
+
+    def history(self) -> Callable[[date, date], Sequence[Event]] | None:
+        """The provider's ``history(first, last)``, if it has one."""
+        found = getattr(getattr(self.app, "provider", None), "history", None)
+        return found if callable(found) else None
+
+    def action_step(self, weeks: int) -> None:
+        if self.snapshot is None:
+            return
+        this = monday_of(self.snapshot.taken_at.astimezone().date())
+        monday = (self.week_on or this) + timedelta(weeks=weeks)
+        if monday < this - timedelta(weeks=self.HELD) and self.history() is None:
+            self.app.notify("No older weeks: the provider has no history", timeout=2)
+            return
+        self.week_on = None if monday >= this else monday
+        self.show_week()
+
+    def show_week(self) -> None:
+        """This week or a held one from the snapshot; an older one from history,
+        fetched in a thread the first time (``OrbitalApp.fetch``)."""
+        snapshot, monday = self.snapshot, self.week_on
+        if snapshot is None:
+            return
+        this = monday_of(snapshot.taken_at.astimezone().date())
+        if monday is None or monday >= this - timedelta(weeks=self.HELD):
+            self.render_week(snapshot.week(monday), snapshot)
+        elif monday in self.fetched:
+            self.render_week(replace(snapshot, events=self.fetched[monday]).week(monday), snapshot)
+        else:
+            self.set_week_title(monday, this, ("loading…", PALETTE["text_dim"]))
+            history = self.history()
+            if history is not None and monday not in self.loading_weeks:
+                self.loading_weeks.add(monday)
+                cast(OrbitalApp, self.app).fetch(
+                    history, monday - timedelta(weeks=1), monday + timedelta(days=6), timeout=10,
+                    then=lambda events, error: self.fetched_week(monday, events, error))
+
+    def fetched_week(self, monday: date, events: Sequence[Event] | None, error: BaseException | None) -> None:
+        """Back on the app thread: keep the week, and show it if it is still the one asked for."""
+        self.loading_weeks.discard(monday)
+        if error is not None or events is None:
+            if self.week_on == monday and self.snapshot is not None:
+                this = monday_of(self.snapshot.taken_at.astimezone().date())
+                self.set_week_title(monday, this, (f"✕ {type(error).__name__}: {error}", PALETTE["red"]))
+            cast(OrbitalApp, self.app).report_error("Week history", error or ValueError("no events"))
+            return
+        self.fetched[monday] = tuple(events)
+        if self.week_on == monday:
+            self.show_week()
+
+    def set_week_title(self, monday: date, this: date, *extras: tuple[str, str]) -> None:
+        if monday == this:
+            name = f"THIS WEEK · since {monday:%a %b} {monday.day}"
+        else:
+            back = (this - monday).days // 7
+            name = f"WEEK OF {monday:%b} {monday.day} · " + ("last week" if back == 1 else f"{back} weeks ago")
+        self.query_one("#log-panel", GlassPanel).set_title(name, *extras)
+
+    def render_week(self, week: WeekStats, snapshot: Snapshot) -> None:
+        today_date = snapshot.taken_at.astimezone().date()
+        this = monday_of(today_date)
+        today = (today_date - week.start).days if week.start == this else -1  # no "today" bar in a past week
         labels = [d.day.strftime("%a")[:1] for d in week.days]
         for tile_id, _, kinds, _, better in TILES:
             series = [sum(d.counts.get(k, 0) for k in kinds) for d in week.days]
@@ -210,10 +298,8 @@ class WeekPage(Page):
             self.query_one(f"#{tile_id}", StatTile).set(total, total - previous, series, ghost, labels, today,
                                                          better="down" if better == "down" else "up")
         self.query_one("#events", EventLog).set_rows(list(week.events))
-        self.query_one("#log-panel", GlassPanel).set_title(
-            f"THIS WEEK · since {week.start:%a %b} {week.start.day}",
-            (f"{len(week.events)} events", PALETTE["text_soft"]),
-            (f"{week.total('shipped')} shipped", f"bold {PALETTE['green']}"))
+        self.set_week_title(week.start, this, (f"{len(week.events)} events", PALETTE["text_soft"]),
+                            (f"{week.total('shipped')} shipped", f"bold {PALETTE['green']}"))
 
 
 # ==================================================================== board ==

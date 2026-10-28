@@ -178,6 +178,58 @@ async def test_the_fetch_thread_reports_back_even_if_it_dies(monkeypatch: pytest
         assert escaped == [KeyboardInterrupt]
 
 
+# -- one-off fetches with parameters (O13) ----------------------------------------------------
+
+
+async def test_fetch_runs_in_a_thread_with_a_deadline_and_hands_back_on_the_app_thread() -> None:
+    app = Board(Quick("QK", interval=60))
+    got: list[tuple[Any, Any, str]] = []
+
+    def then(data: Any, error: BaseException | None) -> None:
+        got.append((data, error, threading.current_thread().name))
+
+    def add(a: int, b: int) -> int:
+        got.append(("ran in", threading.current_thread().name, ""))
+        return a + b
+
+    def exits() -> None:
+        raise SystemExit(3)
+
+    release = threading.Event()
+    late: list[int] = []
+
+    def hangs() -> int:
+        release.wait(5)
+        late.append(1)
+        return 1
+
+    async with app.run_test() as pilot:
+        app.fetch(add, 3, 4, then=then)
+        await until(lambda: len(got) == 2, what="the result")
+        assert got[0][1].startswith("orbital-call-") and got[1] == (7, None, "MainThread")
+        app.fetch(exits, then=then)
+        await until(lambda: len(got) == 3, what="the error")
+        assert got[2][0] is None and isinstance(got[2][1], SystemExit), "anything raised is handed back"
+        app.fetch(hangs, then=then, timeout=0.2)
+        await until(lambda: len(got) == 4, what="the deadline")
+        assert got[3][0] is None and isinstance(got[3][1], TimeoutError)
+        assert str(got[3][1]) == "timed out after 0.2 s"
+        release.set()
+        await until(lambda: late, what="the hung call to return")
+        await asyncio.sleep(0.1)
+        assert len(got) == 4, "its late result is dropped"
+
+        def pushes(data: Any, error: BaseException | None) -> None:
+            app.push_screen(SourcesScreen(app.store.statuses()))  # in the app's context (rule 13)
+            raise ValueError("then bug")
+
+        app.fetch(add, 1, 1, then=pushes)
+        await until(lambda: app.errors, what="the report")
+        await pilot.pause()
+        assert isinstance(app.screen, SourcesScreen)
+        assert app.errors[-1].message == "ValueError: then bug" and "pushes" in app.errors[-1].where
+
+
 # -- the poll schedule and backoff (O8) ------------------------------------------------------
 
 

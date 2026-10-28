@@ -84,6 +84,24 @@ def test_week_stats_counts_this_week_against_the_same_days_last_week() -> None:
     assert hash(week) == hash(week_stats(events, today))
 
 
+def test_week_on_another_day_is_that_week_whole() -> None:
+    def ev(d: date, kind: str = "merged") -> Event:
+        return Event(datetime(d.year, d.month, d.day, 12).astimezone(), kind, "GH", "x")
+
+    events = (ev(date(2026, 10, 26)), ev(date(2026, 10, 12)), ev(date(2026, 10, 17)), ev(date(2026, 10, 9)),
+              ev(date(2026, 10, 1)))
+    snap = Snapshot(datetime(2026, 10, 27, 12).astimezone(), events=events)  # a Tuesday
+    this = snap.week()
+    assert this.start == date(2026, 10, 26) and len(this.days) == 5 and this.elapsed == 2
+    assert snap.week(on=date(2026, 10, 30)) == this, "any day of this week is this week, up to today"
+    past = snap.week(on=date(2026, 10, 14))  # a Wednesday two weeks back
+    assert past.start == date(2026, 10, 12) and len(past.days) == 7 and past.elapsed == 7, "whole, weekend included"
+    assert past.series("merged") == (1, 0, 0, 0, 0, 1, 0) and past.total("merged") == 2
+    assert past.previous_total("merged") == 1 and past.delta("merged") == 1, "against the whole week before"
+    assert [e.when.date() for e in past.events] == [date(2026, 10, 17), date(2026, 10, 12)], "newest first"
+    assert snap.week(on=date(2026, 11, 2)).total("merged") == 0, "a later week: empty"
+
+
 def test_track_item_stuck() -> None:
     item = TrackItem("r", "GH", "release", stage=2, stage_since=T0 - timedelta(hours=5))
     assert not item.stuck(T0)

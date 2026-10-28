@@ -481,9 +481,16 @@ class Snapshot:
     def item(self, key: str) -> AttentionItem | None:
         return next((i for i in self.attention if i.key == key), None)
 
-    def week(self) -> WeekStats:
-        local = self.taken_at.astimezone()
-        return week_stats(self.events, local.date())
+    def week(self, on: date | None = None) -> WeekStats:
+        """This week (``taken_at``'s, Monday to today), or the week that holds
+        ``on``: another week is counted whole, Monday to Sunday, against the
+        week before it. Counted from ``events``, so the snapshot must hold
+        both weeks; for older ones, fetch their events on demand
+        (``OrbitalApp.fetch``) and count them with ``replace(snapshot, events=...).week(on)``."""
+        today = self.taken_at.astimezone().date()
+        if on is None or monday_of(on) == monday_of(today):
+            return week_stats(self.events, today)
+        return week_stats(self.events, monday_of(on) + timedelta(days=6))
 
 
 #: The queue load that fills the load gauge.
