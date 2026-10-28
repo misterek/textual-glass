@@ -329,6 +329,45 @@ def test_screenshots_are_written_for_the_named_steps(tmp_path: Path) -> None:
     assert os.listdir(out) == ["x_90x28_start.png"]
 
 
+# -- suspend and resume ------------------------------------------------------------------------
+
+SUSPEND = [Step(3.0, "start"), Step(0.0, "pixels", "2"), Step(2.0, "suspend", b"\x1a"), Step(1.5, "fg"),
+           Step(3.0, "back"), Step(0.0, "q", "q")]
+
+
+def test_ctrl_z_and_fg_hand_the_terminal_over_and_back() -> None:
+    """The showcase binds ctrl+Z to Textual's suspend_process (SIGTSTP, then SIGSTOP); the
+    harness plays the shell's ``fg`` with SIGCONT. Before Textual leaves the alternate screen,
+    glass has reset OSC 11 and deleted every image; after it comes back, glass draws
+    everything again. The replay models Ghostty: graphics on the primary screen, or sent
+    to an image the terminal no longer holds, are errors."""
+    def probe(label: str, pid: int) -> None:
+        if label == "fg":
+            os.kill(pid, signal.SIGCONT)
+
+    capture = run_app(SHOWCASE, SUSPEND, size=RESIZED, probe=probe)
+    raw = capture.raw
+    assert capture.code == 0 and b"Traceback" not in raw
+    suspended = capture.between(capture.mark_time("suspend"), capture.mark_time("fg"))
+    leave = suspended.find(b"\x1b[?1049l")
+    assert leave > 0, "Textual left the alternate screen"
+    assert suspended.rfind(b"\x1b]111\x07", 0, leave) >= 0, "OSC 11 was reset before"
+    assert re.search(rb"a=d,d=I", suspended[:leave]) and graphics_in(suspended[leave:]) == 0
+    resumed = capture.between(capture.mark_time("fg"), capture.mark_time("q"))
+    enter = resumed.find(b"\x1b[?1049h")
+    assert enter >= 0 and resumed.find(b"\x1b]11;#", enter) > enter, "back on the alternate screen, OSC 11 again"
+    snaps = {label: rp.snapshot() for label, rp in replay_steps(capture, RESIZED)}
+    for label in ("suspend", "back", "end"):
+        assert not snaps[label].model.errors, (label, snaps[label].model.errors[:3])
+    before, after = snaps["suspend"], snaps["back"]
+    _, backdrop = _backdrop(after)
+    assert (backdrop["c"], backdrop["r"]) == RESIZED, "the backdrop is placed again"
+    (sprite,) = after.placeholder_ids()
+    assert sprite in after.model.images and sprite not in before.model.images, "the sprite is uploaded again"
+    assert after.model.images[sprite]["state"] == 3, "and plays"
+    assert not snaps["end"].model.images
+
+
 # -- hard exits ------------------------------------------------------------------------------
 
 HARD_EXIT_SCRIPT = '''

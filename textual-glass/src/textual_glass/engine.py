@@ -339,6 +339,7 @@ class GlassEngine:
         self._retried_at: float | None = None
         self._retry_timer: Any = None
         self._forced = False  # activated with force=True (kept for retries and resumes)
+        self._resume = False  # glass was on when the app was suspended
         self._session = 0  # bumped whenever glass turns off: worker results from before are dropped
         self.render_ms: dict[str, float] = {}
         self.pending_jobs = 0  # renders and jobs running in the worker thread
@@ -454,6 +455,26 @@ class GlassEngine:
         self._refresh_all()
         for widget in list(self._images.values()):
             widget.glass_changed()
+
+    def app_suspended(self, app: Any = None) -> None:
+        """Textual's suspend signal (``App.suspend``, ctrl+Z bound to ``suspend_process``):
+        Textual is about to hand the terminal over. Reset OSC 11 and delete every
+        image now, while it is still on the alternate screen, so the shell gets a
+        clean terminal; everything is forgotten and drawn again on resume."""
+        if self.active:
+            self._resume = True
+            self._deactivate()
+
+    def app_resumed(self, app: Any = None) -> None:
+        """Textual's resume signal: the app has the terminal again, on an alternate
+        screen that was cleared when it came back (in Ghostty that clear keeps
+        placeholder images, but nothing else). Draw everything from scratch: new
+        images, never edits of old ones. If glass missed the suspend, it starts over too."""
+        resume = self._resume or self.active
+        self._resume = False
+        self._deactivate()
+        if resume:
+            self._activate(self._forced)
 
     def shutdown(self) -> None:
         """The app is exiting: clean the terminal up (deletes, OSC 111)."""

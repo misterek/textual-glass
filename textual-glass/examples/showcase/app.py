@@ -9,7 +9,8 @@ Run it from ``textual-glass/`` under the repository root (in Ghostty, for the gl
 Keys: ``1`` stock widgets, ``2`` textual-glass's pixel widgets, ``enter``
 opens the row under the cursor, ``m`` the "ready to ship" modal (``enter``
 there ships the release), ``r`` restarts a service, ``ctrl+p`` the command
-palette, ``f9`` the motion level, ``shift+f9`` glass off and on, ``q`` quits.
+palette, ``f9`` the motion level, ``shift+f9`` glass off and on, ``ctrl+z``
+suspends to the shell (``fg`` comes back), ``q`` quits.
 """
 
 from __future__ import annotations
@@ -87,6 +88,7 @@ class Showcase(App[None]):
         Binding("m", "ship", "Ship"),
         Binding("r", "restart", "Restart"),
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+z", "suspend_process", "Suspend", show=False),  # Textual's own action: SIGTSTP
     ]
 
     def __init__(self, image: LoadedImage | None = None, **kwargs: Any) -> None:

@@ -1111,3 +1111,47 @@ async def test_a_long_day_keeps_every_table_bounded(output: Output) -> None:
         assert last["images"] <= first["images"] + 8, (first, last)  # full motion adds shimmer, glints and a halo
         model = output.model()
         assert set(model.images) <= engine.ids.live and not model.errors
+
+
+async def test_suspend_hands_over_a_clean_terminal_and_resume_draws_everything_again(output: Output) -> None:
+    """G5: on Textual's suspend signal (ctrl+Z, ``App.suspend``) glass resets OSC 11
+    and deletes every image; on resume it draws everything again with new images,
+    so nothing is sent to an image the terminal no longer has."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        beacon = app.query_one(SpriteView)
+        old = set(output.model().images)
+        assert old and _placeholder_ids(beacon) <= old
+        mark = output.mark()
+        app.app_suspend_signal.publish(app)
+        sent = output.since(mark)
+        model = output.model()
+        assert not engine.active and not model.images and not model.placements, "the shell gets a clean terminal"
+        assert kitty.RESET_DEFAULT_BACKGROUND in sent
+        assert not engine.layers and not engine.sprites and not engine.dimmables and not engine.ids.live
+
+        mark = output.mark()
+        app.app_resume_signal.publish(app)
+        await idle(app, pilot)
+        sent = output.since(mark)
+        model = output.model()
+        assert engine.active and "\x1b]11;#" in sent
+        assert engine.layers[MAIN].image_id in model.images, "the backdrop is drawn again"
+        (sprite,) = _placeholder_ids(beacon)
+        assert sprite in model.images and sprite not in old, "the beacon is a new upload, not an edit of a lost one"
+        assert not set(model.images) & old and not model.errors
+
+        # A resume without a suspend first (glass missed it): the terminal cleared the screen, so start over too.
+        drawn = set(model.images)
+        app.app_resume_signal.publish(app)
+        await idle(app, pilot)
+        model = output.model()
+        assert engine.active and model.images and not set(model.images) & drawn and not model.errors
+
+        engine.deactivate()  # off by hand: a suspend and resume leave it off
+        app.app_suspend_signal.publish(app)
+        app.app_resume_signal.publish(app)
+        await settle(app, pilot)
+        assert not engine.active
