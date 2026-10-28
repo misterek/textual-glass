@@ -334,7 +334,7 @@ async def test_a_failing_source_backs_off_and_poll_all_skips_the_wait() -> None:
         assert status.next_poll == status.last_ok + timedelta(seconds=0.25), "back to its interval"
 
 
-# -- errors are reported, and one step doesn't skip the others (O3, rule 22) ----------------
+# -- errors are reported, and one step doesn't skip the others (O3, rule 26) ----------------
 
 
 class Broken(Page):
@@ -548,13 +548,13 @@ async def test_a_broken_snooze_file_is_reported_and_never_stops_startup(tmp_path
             assert list(json.loads(path.read_text())["items"]) == ["CC:pr"]
 
 
-# -- toasts: every alert view closes through _alert_done (O11, rule 26) -----------------------
+# -- toasts: every alert view closes through _alert_done (O11, rule 30) -----------------------
 
 
 async def test_every_toast_ends_in_alert_done_however_it_goes() -> None:
     """A toast whose screen is popped moves to the screen on top; one removed any other
     way still tells the app; either way the next alert shows. ``finish_alert`` acts on a
-    toast, and on a popup only while it is on top (rule 24)."""
+    toast, and on a popup only while it is on top (rule 28)."""
     app = Board(Quick("QK", interval=60), alert_style="toast")
     async with app.run_test(size=(90, 28)) as pilot:
         assert app.finish_alert("dismiss") is False, "nothing to act on"

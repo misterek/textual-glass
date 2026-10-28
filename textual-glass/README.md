@@ -55,6 +55,7 @@ uv run python examples/showcase/app.py --image ~/cat.gif    # your picture in th
 | `ctrl+p` | The command palette ("Glass: ..." commands, "Show: ...", themes) |
 | `f9` | Next motion level |
 | `shift+f9` | Glass off and on, live |
+| `ctrl+z` | Suspend to the shell (`fg` brings it back) |
 | `q` | Quit (deletes every image and restores the terminal) |
 
 | | |
@@ -90,14 +91,44 @@ At run time `app.glass` is the engine (`GlassEngine`):
 | `active`, `supported` | Glass is on now; the terminal can show it. |
 | `support` | Why: `Support(enabled, reason)`, for example `reason="environment names a kitty-graphics terminal"`. |
 | `motion`, `set_motion(level)` | The motion level. |
-| `activate()`, `deactivate()` | Turn glass on and off live (what `shift+f9` does). |
-| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times. |
+| `activate()`, `deactivate()` | Turn glass on and off live (what `shift+f9` does). Either one cancels a pending retry after errors. |
+| `errors`, `last_error`, `retry_in` | Errors since the app started, the last traceback, and, after glass turned itself off, the seconds until it tries again (`None` otherwise). See [Errors](#errors). |
+| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times, errors. |
 | `palette` | The theme colours glass is using (`textual_glass.palette.Palette`). |
 | `background_job(work, done)` | Run `work()` in glass's worker thread, then `done(result)` on the app thread (rules 3 and 13). |
 | `sprite(key, cols, rows, make, waiter=None)` | A terminal-played animation behind placeholder cells (see [Write your own pixel widget](#write-your-own-pixel-widget)). |
 | `cell_pixels()` | Terminal pixels per cell, `(width, height)`. |
 
-Also exported: `terminal_write(app, data) -> bool` sends other escape sequences (a notification, a window title) through Textual's writer, with glass on or off. `detect(env=None, *, query=True, timeout=0.3)` is the detection on its own.
+Also exported: `terminal_write(app, data) -> bool` sends other escape sequences (a notification, a window title) through Textual's writer, with glass on or off. `on_hard_exit(key, data)` registers what to write to the terminal if the process is killed (see [Suspend, resume and hard exits](#suspend-resume-and-hard-exits)). `detect(env=None, *, query=True, timeout=0.3)` is the detection on its own.
+
+### Errors
+
+A broken hook or a failed render never takes the app down. Glass logs each error (Textual's log, `textual console`) and counts it. More than five errors within 60 seconds turn glass off, and the app carries on as plain Textual. Glass then tries again after 1 minute, 5 minutes and 30 minutes; if the third retry fails as well, it stays off. A retry that stays on for 10 minutes starts the count of retries again. Each step is logged. Turning glass on or off by hand (`shift+f9`) cancels a pending retry, and turning it on starts a fresh count.
+
+## Suspend, resume and hard exits
+
+Glass changes terminal state that outlives the app: the default background (OSC 11) and the images it keeps in the terminal.
+
+- **Quitting** (`app.exit()`) deletes every image and resets the background (OSC 111) while Textual still has the alternate screen.
+- **Suspending.** On Textual's suspend signal (`App.suspend()`, or `ctrl+z` bound to Textual's `suspend_process` action) glass resets the background and deletes every image before Textual hands the terminal over, so the shell gets a clean terminal. On resume it draws everything again from scratch. Textual doesn't bind `ctrl+z` by default; the showcase does: `Binding("ctrl+z", "suspend_process", "Suspend", show=False)`.
+- **Hard exits.** SIGTERM, SIGHUP (the window or the SSH session closed), or an interpreter exit that skipped the app's cleanup. Glass registers its cleanup with `on_hard_exit` while it is on, and removes it on a clean exit.
+
+`on_hard_exit(key: str, data: str | None) -> None` (exported from `textual_glass`; it lives in `textual_glass.hard_exit`) is for any app, with glass on or off. Register an escape sequence to write to the terminal if the process ends without cleaning up; registering the same key again replaces it, and `None` removes it:
+
+```python
+from textual_glass import on_hard_exit
+
+on_hard_exit("my-app.title", "\x1b]2;\x07")  # the window title changed: clear it if we are killed
+...
+on_hard_exit("my-app.title", None)  # on a clean exit, after restoring the title yourself
+```
+
+- What is still registered is written, in the order the keys were first registered, to standard error (where Textual draws). It is written once, from an `atexit` handler and from SIGTERM and SIGHUP handlers.
+- The signal handlers are installed with the first entry, from the main thread. Each one writes, calls the handler that was there before it (if it was a Python function), then ends the process the way the default action would (it sends itself the signal again). A signal that was ignored (`nohup`) stays ignored.
+- Remove your entries on a clean exit: whatever is still registered when the interpreter exits is written.
+- Use your package's name as a prefix for keys. Glass uses `"textual-glass"`.
+
+Glass's own entry deletes every image it may have made: Ghostty's delete-all (`a=d,d=A`) keeps images shown through placeholders, so the range of image ids glass uses is deleted as well (`d=R`). Then OSC 111.
 
 ## Motion levels
 
@@ -120,7 +151,7 @@ Detection runs before Textual starts reading input, so a reply to the terminal q
 3. `TEXTUAL_GLASS=on`: on.
 4. `TERM=dumb` or unset, tmux or GNU screen: off. Glass needs direct kitty graphics, which multiplexers don't pass through by default.
 5. `TERM=xterm-ghostty` or `xterm-kitty`, `TERM_PROGRAM=ghostty` or `kitty`, or `KITTY_WINDOW_ID`: on.
-6. Otherwise, if querying is allowed, glass asks the terminal on `/dev/tty`: a kitty graphics query (`a=q`) followed by a DA1 request as a fence, with a 0.3 s timeout. It turns on only if the graphics reply arrives before the DA1 reply. If nothing answers, the app runs plain.
+6. Otherwise, if querying is allowed, glass asks the terminal on `/dev/tty`: a kitty graphics query (`a=q`) followed by a DA1 request as a fence, with a 0.3 s timeout. It turns on only if the graphics reply arrives before the DA1 reply. If nothing answers, the app runs plain. A late reply is drained so Textual never reads it as key presses: with nothing back at the timeout, glass listens 0.1 s longer; once a reply has started, it waits up to a second more for its fence.
 
 When glass is off, the app is exactly stock Textual: no CSS, filters, patches or escape codes. Layout is identical either way. The look is tuned against Ghostty 1.4. Kitty supports the same protocol features and should work, but it is untested.
 
@@ -155,12 +186,14 @@ Glass only replaces **neutral** backgrounds: the screen, containers, table surfa
 | `RingGauge` | `RingGauge(label="", *, fraction=0.0, text="", sublabel="", colors=None)` | `set(fraction, text, colors=None, sublabel=None)` | A 270° ring lit to `fraction` (0..1) with `text` inside and the label under it. The sublabel goes under the label, only when the widget is at least 8 rows tall. Without glass: a `▰▱` meter under the text. |
 | `Telemetry` | `Telemetry(*, mode="bars", colors=None)` (`"bars"` or `"area"`) | `set_series(values, ghost=(), labels=(), today=-1, colors=None, scale_max=None)` | Glowing bars (with `ghost` values, such as last week's, as faint outlines) or a smooth area chart (`ghost` isn't drawn there). `labels` puts one letter under each bar; `today` is drawn brighter. One scale in both modes, with and without glass (`scale`): `scale_max` fills the height, or else 1 or the largest value or ghost, whichever is bigger; values above `scale_max` are cut at the top. Without glass: eighth blocks (`▁▂▃▄▅▆▇█`). |
 | `StatValue` | `StatValue(*, versus="", color=None)` | `set(value, delta=None, better="up", color=None)` | One line: a big number and its change (`12  ▲3 vs last week`), green when the change is good (`better="up"` or `"down"`), red when bad. Text in both modes. |
-| `StatTile` | `StatTile(title, *, mode="bars", versus="", colors=None)` | `set(value, delta, series, ghost=(), labels=(), today=-1, better="up", scale_max=None)`; its parts are `.stat` (a `StatValue`) and `.chart` (a `Telemetry`) | A `GlassPanel` with a title, a `StatValue` and a `Telemetry` chart. `colors` also sets the border. |
-| `ProgressArc` | `ProgressArc(*, colors=None)` | `set(fraction, label="", sublabel="", detail=())`; `fraction=None` shows nothing | A full ring with the percentage inside and a label, sublabel and a line of `(text, style)` detail parts under it (the detail from 8 rows up). The default arc turns green from `NEARLY_DONE` (0.85). Without glass: a `▰▱` meter. |
-| `SpriteView` | `SpriteView(key, maker, *, fallback="◉", fallback_color=None)` | `set_sprite(key, maker, fallback=None)`; `fallback_color` | An animation the terminal plays, filling the widget. `maker(width_px, height_px)` returns `(rgba_frames, gap_ms)` and runs in the worker thread. The same `key` and size share one terminal image. Without glass (and until the upload lands): the `fallback` glyph. |
+| `StatTile` | `StatTile(title, *, mode="bars", versus="", colors=None)` | `set(value, delta, series, ghost=(), labels=(), today=-1, better="up", scale_max=None, colors=None, color=None)`; its parts are `.stat` (a `StatValue`) and `.chart` (a `Telemetry`) | A `GlassPanel` with a title, a `StatValue` and a `Telemetry` chart. `colors` is the chart's gradient and the border, `color` the number's colour (a grade: green, amber, red); in `set`, `None` keeps what they were. |
+| `ProgressArc` | `ProgressArc(*, colors=None)` | `set(fraction, label="", sublabel="", detail=(), colors=None)`; `fraction=None` shows nothing; `colors=None` keeps the arc's colours | A full ring with the percentage inside and a label, sublabel and a line of `(text, style)` detail parts under it (the detail from 8 rows up). The default arc turns green from `NEARLY_DONE` (0.85). Without glass: a `▰▱` meter. |
+| `SpriteView` | `SpriteView(key, maker, *, fallback="◉", fallback_color=None)` | `set_sprite(key, maker, fallback=None, fallback_color=None)` (`None` keeps the fallback and its colour) | An animation the terminal plays, filling the widget. `maker(width_px, height_px)` returns `(rgba_frames, gap_ms)` and runs in the worker thread. The same `key` and size share one terminal image, deleted once no widget shows it. Without glass (and until the upload lands): the `fallback` glyph. |
 | `InfoCard` | `InfoCard()` | `set_card(headline, fields=(), body="", subtitle="")`: `fields` are `(label, value)` pairs; plain strings take the theme's colours, Rich `Text` keeps its own | A headline, a subtitle, label/value fields and a wrapped paragraph: a preview of whatever is highlighted. Text in both modes. |
 | `GlassImage` | see below | | A picture or animation. |
 | `PixelWidget` | `PixelWidget()` | | The base class for your own (below). |
+
+Every colour can change with the data: the setters take the same colour arguments as the constructors (`RingGauge.set(..., colors=)`, `Telemetry.set_series(..., colors=)`, `StatValue.set(..., color=)`, `StatTile.set(..., colors=, color=)`, `ProgressArc.set(..., colors=)`, `SpriteView.set_sprite(..., fallback_color=)`, `GlassPanel.set_accent(...)`), and `None` keeps the current one.
 
 Default sizes (override in CSS): `RingGauge`, `ProgressArc` and `SpriteView` take `1fr` both ways (`min-height` 3 and 4 for the rings); `Telemetry`, `InfoCard`, `SelectList` and `StatTile` take `height: 1fr`; `StatValue` is one row; `GlassPanel` is `height: auto`.
 
@@ -321,7 +354,7 @@ The rules for a pixel widget:
 - **Same layout in both modes.** Leave blanks where pixels will be when `self.glass_on`, and put a text form there otherwise.
 - **Items.** Give each a stable `ident` (`f"meter:{id(self)}"`, or the row's key) so a change is diffed exactly and sent as a small in-place edit. Pass `clip=self.visible_clip()` so the pixels are cut where the text is in a scrolling container.
 - **Animation.** While something tweens (a sliding pill), call `ctx.animating()`; the engine then ticks at 60 Hz until it settles. `Tween(value, duration=0.14)` eases a value. Otherwise draw only when data changes: call `self.refresh()`.
-- **Sprites.** `self.glass.sprite(key, cols, rows, make, waiter=self)` returns an image id, or `None` while glass is off or until the upload lands (then `waiter.refresh()` is called). `make(width_px, height_px)` returns `(rgba_frames, gap_ms)` and runs in the worker thread; one frame is a still. Sprites with the same key and size are shared, so keep the set of keys small. Frames must be transparent at their border (rule 17): multiply by `sprites.radial_mask` or `sprites.edge_fade`.
+- **Sprites.** `self.glass.sprite(key, cols, rows, make, waiter=self)` returns an image id, or `None` while glass is off or until the upload lands (then `waiter.refresh()` is called). `make(width_px, height_px)` returns `(rgba_frames, gap_ms)` and runs in the worker thread; one frame is a still. Sprites with the same key and size are shared, so keep the set of keys small. Always pass `waiter=self`: a sprite is deleted from the terminal once none of the widgets that asked for it shows it any more (they switched to another key or size, or were removed). A `PixelWidget` is checked line by line from what it renders (any number of sprites per widget); a widget that isn't one holds its sprites until it is removed, and a sprite asked for without a `waiter` stays until glass turns off. If `make` raises, the error is counted, `sprite()` returns `None` (draw your fallback) and a later call tries again after 5 s, 30 s, then every 5 minutes. Frames must be transparent at their border (rule 17): multiply by `sprites.radial_mask` or `sprites.edge_fade`.
 - **No popups code.** Glass dims everything under a modal, text and sprites included.
 
 ### Items
@@ -364,6 +397,7 @@ The layer table is in [`../AGENTS.md`](../AGENTS.md#layers).
 - **The line filter.** For each widget, glass works out which background colours are structural: the widget's own resolved background if it is neutral, plus the table header, cursor, zebra, hover, footer and highlight components. A per-widget Textual line filter, run after Textual's own filters, rewrites exactly those colours to the terminal's default. Everything else stays opaque.
 - **Border glyphs.** While glass is on, the glyphs of the border types above are blanked in Textual's border tables, and the borders are drawn in pixels. Textual still draws the titles, so they line up with the notches.
 - **Modals.** Textual normally dims the screen under a `ModalScreen` by blending a colour into every cell. That would hide the glass and change the colour that carries a placeholder image's id. With glass on, modal backgrounds are made transparent through an `!important` rule scoped to the `-textual-glass` class. The dimming is a pixel scrim, plus a filter that dims the text and badges of the screen below and leaves image cells alone. Sprites and images below switch to their dimmed frame.
+- **Sprites.** Placeholder images are freed once no widget shows them: `PixelMixin` wraps Textual's `render_lines` and tells the engine which image ids each widget's lines hold, cached lines included, and at the end of each frame the engine deletes the sprites nothing shows any more.
 - **The scene.** At the end of every Textual frame, glass walks the visible widgets in paint order and builds a list of small, hashable items in cell units: panels, sheets, header strips, zebra bands, pills, badges, bars and thumbs from the CSS, plus every `PixelMixin` widget's `pixel_items`. It pairs them with the items already in the terminal by `ident`:
   - small changes (the pill moving, a value) are redrawn inside the same synchronized frame as Textual's text, as in-place edits of that rectangle (`a=f,r=1,x,y,X=1`);
   - a view switch or a theme change is rendered at half resolution inside the same frame (a page seen before is placed again at once), then in full in a worker thread; other big changes and a resize are rendered in the worker.
@@ -402,27 +436,27 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 
 | File | Checks |
 | --- | --- |
-| `tests/test_units.py` | Protocol encoding (`q=2`, whole chunks, frames before playing), PNG, grids, palettes and theme variables, backdrops, every item at its box edge (rule 16), every sprite maker at its border (rule 17), panel diffs, dim frames, background jobs on the app thread, every hook failing soft, no shadowed Textual attributes, and detection (including a real pty that answers the query, refuses it, or never answers). |
-| `tests/test_pilot.py` | `tests/sample_app.py` with glass forced on: the scene read from computed styles, the cursor pill through scrolling, which cells the filter makes transparent, modals, partial edits, idle silence, live toggling, motion levels, theme changes, `PixelMixin` items diffed by ident, sprites dimming under popups, page switches in the same frame, `SCOPED_CSS`, cached images across popups. |
+| `tests/test_units.py` | Protocol encoding (`q=2`, whole chunks, frames before playing), PNG, grids, palettes and theme variables, backdrops, every item at its box edge (rule 16), every sprite maker at its border (rule 17), panel diffs, dim frames, background jobs on the app thread, every hook failing soft (a border table of another shape included), no shadowed Textual attributes, `on_hard_exit` and glass's hard-exit sequence, and detection (including a real pty that answers the query, refuses it, never answers, or answers late). |
+| `tests/test_pilot.py` | `tests/sample_app.py` with glass forced on: the scene read from computed styles, the cursor pill through scrolling, which cells the filter makes transparent, modals, partial edits, idle silence, live toggling, motion levels, theme changes, `PixelMixin` items diffed by ident, sprites dimming under popups, page switches in the same frame, `SCOPED_CSS`, cached images across popups. A long day: the timer after glass turns off, the error budget and its retries (with a fake clock), errors in worker callbacks, no sync markers inside Textual's frame, sprite churn (key switches, resizes, removed widgets, several sprites per widget, partial repaints), a sprite maker that raises, every table bounded over hours of use, suspend and resume. |
 | `tests/test_widgets.py` | Every pixel widget in both modes with identical layout, `Telemetry`'s one scale with and without glass, the `SelectList` pill (slides, settles, goes quiet) and its section headers staying in view, `GlassPanel` titles and accents, clipping in scrolling containers, `strip` never cutting a placeholder run. |
 | `tests/test_images.py` | `load_image` and `GlassImage`: GIF compositing, timing and loop counts, PNG transparency, EXIF rotation, limits, bad input, resampling, half blocks, play counts in the terminal, the memory budget. Tests with real pictures run when `GLASS_TEST_ART` points at a folder. |
-| `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
+| `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` (with `textual_glass.testing.screenshots.shoot`). |
 
 ## Limitations
 
 - **Private Textual API.** It is all in `src/textual_glass/_textual_hooks.py` and tested with Textual 8.2.8 (the package pins `textual>=8.2,<9`):
-  - `App._driver.write`, and the writer thread's queue size;
+  - `App._driver.write`;
   - a per-instance wrapper around `App._end_update`;
-  - `textual._border.BORDER_CHARS` and `get_box`;
+  - `textual._border.BORDER_CHARS` and `get_box` (patched only when the table has the shape glass knows; otherwise borders keep their glyphs and one line is logged);
   - a class-level patch of `Widget.get_line_filters`;
   - `Screen._compositor.visible_widgets`;
   - `Widget._border_title` and `_border_subtitle`;
   - `OptionList._lines`;
   - `DataTable._row_label_column_width`.
 
-  Each hook degrades to "do nothing" if it breaks. After repeated errors, glass turns itself off and the app carries on, plain.
+  Each hook degrades to "do nothing" if it breaks. After repeated errors, glass turns itself off and the app carries on, plain, and glass tries again later (see [Errors](#errors)).
 - The border glyph patch and the filter patch are process-wide while glass is on. That is fine for one app per process.
 - Colour-based ownership is a heuristic. If an app paints a deliberately neutral, "structural-looking" background on a cell (a grey swatch the same colour as its panel), glass treats it as glass. Add the widget's class to `GLASS_SKIP` to opt it out.
 - A finite-play animation under a modal plays its run again after the modal closes (`s=3` resets the loop counter).

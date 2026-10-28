@@ -40,6 +40,7 @@ KEYS = {
     "ctrl+p": b"\x10", "pagedown": b"\x1b[6~", "end": b"\x1b[F",
 }
 BOX_GLYPHS = set("╭╮╰╯─│┌┐└┘━┃┏┓┗┛═║╔╗╚╝")
+UNFINISHED = re.compile(rb"\x1b(?:\[[0-9;?$]*|\][^\x07\x1b]*|_)?\Z")  # an escape sequence cut off at the end
 
 
 @dataclass
@@ -184,10 +185,13 @@ class Replay:
         self.screen.resize(rows, cols)
 
     def _feed_text(self, data: bytes) -> None:
-        for match in re.finditer(rb"\x1b\]11;#([0-9a-fA-F]{6})\x07", data):
-            self.default_bg = match.group(1).decode()
-        if b"\x1b]111\x07" in data:
-            self.default_bg = "1d1f21"
+        for match in re.finditer(rb"\x1b\]11;#([0-9a-fA-F]{6})\x07|\x1b\]111\x07|\x1b\[\?1049([hl])", data):
+            if match.group(1):
+                self.default_bg = match.group(1).decode()
+            elif match.group(2):
+                self.model.alt_screen(match.group(2) == b"h")  # Ghostty: entering the alternate screen clears it
+            else:
+                self.default_bg = "1d1f21"
         self.stream.feed(data)
 
     def feed(self, data: bytes) -> None:
@@ -195,7 +199,8 @@ class Replay:
         while True:
             i = self.buf.find(b"\x1b_G")
             if i < 0:
-                cut = len(self.buf) - 2 if self.buf.endswith((b"\x1b", b"\x1b_")) else len(self.buf)
+                unfinished = UNFINISHED.search(self.buf)  # a sequence split across reads waits for the rest
+                cut = unfinished.start() if unfinished else len(self.buf)
                 self._feed_text(self.buf[:cut])
                 self.buf = self.buf[cut:]
                 return

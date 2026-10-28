@@ -298,7 +298,7 @@ def test_notifications_pass_through_tmux() -> None:
 
 
 def test_quitting_never_waits_for_a_hung_fetch() -> None:
-    """Rule 21: a fetch that never returns runs in a daemon thread, so q exits at once. With
+    """Rule 25: a fetch that never returns runs in a daemon thread, so q exits at once. With
     the old thread pool, the interpreter joined its worker at exit and the process hung."""
     steps = [Step(2.5, "start"), Step(0.0, "q", "q")]
     capture = run_app([sys.executable, os.path.join(ROOT, "tests", "hung_app.py")], steps, size=SIZE, timeout=8)

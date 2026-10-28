@@ -295,7 +295,10 @@ class StatValue(PixelWidget):
 class StatTile(GlassPanel):
     """A panel with a title, a big number with its change, and a chart of recent values.
 
-    ``set(value, delta, series, ghost=(), labels=(), today=-1, better="up", scale_max=None)``.
+    ``set(value, delta, series, ghost=(), labels=(), today=-1, better="up",
+    scale_max=None, colors=None, color=None)``: ``colors`` is the chart's
+    gradient and the border, ``color`` the number's colour (a grade: green,
+    amber, red); ``None`` keeps what they were.
 
     Args:
         mode: The chart's mode (see :class:`Telemetry`).
@@ -317,18 +320,21 @@ class StatTile(GlassPanel):
 
     def set(self, value: str | float, delta: float | None, series: Sequence[float], ghost: Sequence[float] = (),
             labels: Sequence[str] = (), today: int = -1, better: Literal["up", "down"] = "up",
-            scale_max: float | None = None) -> None:
-        self.stat.set(str(value), delta, better)
-        self.chart.set_series(series, ghost, labels, today, scale_max=scale_max)
+            scale_max: float | None = None, colors: Pair | None = None, color: Colour | None = None) -> None:
+        self.stat.set(str(value), delta, better, color)
+        self.chart.set_series(series, ghost, labels, today, colors, scale_max=scale_max)
+        if colors is not None:
+            self.set_accent(colors[0], colors[1])
 
 
 class ProgressArc(PixelWidget):
     """Progress as a full ring with the percentage inside, and a label, an
     optional sublabel and optional detail parts underneath.
 
-    ``set(fraction, label, sublabel="", detail=())``: ``fraction`` None shows
-    nothing; ``detail`` is a line of ``(text, style)`` parts ("2 open · 1
-    blocked"), shown from 8 rows up. Without glass the ring is a row of blocks.
+    ``set(fraction, label, sublabel="", detail=(), colors=None)``: ``fraction``
+    None shows nothing; ``detail`` is a line of ``(text, style)`` parts ("2
+    open · 1 blocked"), shown from 8 rows up; ``colors`` None keeps the arc's
+    colours. Without glass the ring is a row of blocks.
 
     Args:
         colors: The arc's gradient (default: the theme's primary colour,
@@ -351,10 +357,11 @@ class ProgressArc(PixelWidget):
         self.sublabel = ""
         self.detail: tuple[Part, ...] = ()
 
-    def set(self, fraction: float | None, label: str = "", sublabel: str = "", detail: Sequence[Part] = ()) -> None:
-        new = (fraction, label, sublabel, tuple(detail))
-        if new != (self.fraction, self.label, self.sublabel, self.detail):
-            self.fraction, self.label, self.sublabel, self.detail = new
+    def set(self, fraction: float | None, label: str = "", sublabel: str = "", detail: Sequence[Part] = (),
+            colors: Pair | None = None) -> None:
+        new = (fraction, label, sublabel, tuple(detail), colors or self.tones)
+        if new != (self.fraction, self.label, self.sublabel, self.detail, self.tones):
+            self.fraction, self.label, self.sublabel, self.detail, self.tones = new
             self.refresh()
 
     def arc_colours(self, palette: Palette) -> Pair:
@@ -438,11 +445,14 @@ class SpriteView(PixelWidget):
         self.fallback = fallback
         self.fallback_color = fallback_color
 
-    def set_sprite(self, key: tuple[Any, ...], maker: SpriteMaker, fallback: str | None = None) -> None:
-        """Show another sprite (``key`` names it; the same key is the same picture)."""
+    def set_sprite(self, key: tuple[Any, ...], maker: SpriteMaker, fallback: str | None = None,
+                   fallback_color: Colour | None = None) -> None:
+        """Show another sprite (``key`` names it; the same key is the same picture).
+        ``fallback`` and ``fallback_color`` stay as they were when None."""
         fallback = self.fallback if fallback is None else fallback
-        if (key, fallback) != (self.key, self.fallback):
-            self.key, self.maker, self.fallback = key, maker, fallback
+        colour = self.fallback_color if fallback_color is None else fallback_color
+        if (key, fallback, colour) != (self.key, self.fallback, self.fallback_color):
+            self.key, self.maker, self.fallback, self.fallback_color = key, maker, fallback, colour
             self.refresh()
 
     def render_line(self, y: int) -> Strip:

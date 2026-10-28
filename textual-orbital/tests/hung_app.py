@@ -1,6 +1,6 @@
 """A dashboard whose only source never returns, like an HTTP call with no
 timeout whose socket died while the laptop slept. ``test_pty.py`` runs it in a
-real pty and presses ``q``: the process must exit at once (rule 21)."""
+real pty and presses ``q``: the process must exit at once (rule 25)."""
 
 from __future__ import annotations
 

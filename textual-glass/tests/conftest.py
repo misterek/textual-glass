@@ -8,7 +8,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pytest  # noqa: E402
 
 import textual_glass._textual_hooks as hooks  # noqa: E402
+from textual_glass import hard_exit  # noqa: E402
 from textual_glass.testing.pilot_helpers import Output  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_hard_exit_leftovers() -> Iterator[None]:
+    """Whatever is registered with ``on_hard_exit`` is written to the terminal when the
+    interpreter exits: a test must not leave anything for pytest's own exit to write."""
+    yield
+    left = sorted(hard_exit._entries)
+    hard_exit._entries.clear()
+    assert not left, f"on_hard_exit entries left registered: {left}"
 
 
 @pytest.fixture

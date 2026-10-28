@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from textual.color import Color
 from textual.screen import ModalScreen, Screen
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from textual.app import App
     from textual.geometry import Region
     from textual.scrollbar import ScrollBar
+    from textual.strip import Strip
     from textual.widgets import DataTable, OptionList
     from textual.widgets._footer import FooterKey
 
@@ -341,10 +342,21 @@ class PixelMixin:
     stable ``ident`` (``f"ring:{id(self)}"``) so a change is diffed precisely.
     Nothing calls it while glass is off, so ``render_line`` should always draw a
     sensible text fallback (:attr:`glass_on` says which mode is current).
+
+    It also tells the engine which sprites the widget's rendered lines show,
+    so a sprite is deleted from the terminal once no widget shows it.
     """
 
     def pixel_items(self, ctx: PixelContext) -> Iterable[Item]:
         return ()
+
+    def render_lines(self, crop: Region) -> list[Strip]:
+        """Textual's ``Widget.render_lines``, noting the sprites the lines show (see ``GlassEngine.sprite``)."""
+        strips: list[Strip] = cast(Any, super()).render_lines(crop)
+        engine = self.glass
+        if engine is not None and engine.active:
+            engine._note_lines(self, crop, strips)
+        return strips
 
     @property
     def glass(self) -> GlassEngine | None:

@@ -212,7 +212,7 @@ class AlertToast(GlassPanel):
     ``"jump"`` (a click), ``"resolved"`` (:meth:`close_resolved`), or whatever
     the app passes (``OrbitalApp.finish_alert``: ``"snooze"``, ``"dismiss"``,
     ``"open"``), and then calls ``done(action)``. Removed any other way, it
-    calls ``done("dismiss")``, so the app always hears (rule 26).
+    calls ``done("dismiss")``, so the app always hears (rule 30).
     ``OrbitalApp`` shows it for alerts whose style is ``"toast"``, and moves it
     to the screen on top when a popup opens or closes (:meth:`withdraw` takes
     the old one away quietly).

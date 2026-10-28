@@ -738,3 +738,420 @@ async def test_cached_image_is_reused_across_popups(output: Output) -> None:
         assert app.screen.query_one(GlassImage)._image_id == first
         assert not re.search(rf"a=t,i={first}\b", output.since(mark)), "the second popup uploads no picture"
         assert not output.model().errors
+
+
+# -- a long day: the timer, the error budget, sprite churn, suspend and resume ----------------------
+
+
+def _ticking(app: Any) -> bool:
+    """Is the 60 Hz timer running? (Textual's ``Timer`` keeps that in a private event.)"""
+    timer = app.glass._timer
+    return timer is not None and timer._active.is_set()
+
+
+async def test_timer_stays_paused_after_deactivate_when_a_render_lands_late(output: Output,
+                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker render still running when glass turns off lands afterwards: it must
+    not wake the 60 Hz timer (``kick`` does nothing while glass is off), and a tick
+    that was already due pauses it again."""
+    import threading
+
+    import textual_glass.engine as engine_mod
+
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        gate, running = threading.Event(), threading.Event()
+        real_paint = engine_mod.paint
+
+        def slow_paint(*args: Any) -> None:
+            if threading.current_thread() is not threading.main_thread():
+                running.set()
+                gate.wait(5)
+            real_paint(*args)
+
+        monkeypatch.setattr(engine_mod, "paint", slow_paint)
+        await pilot.resize_terminal(90, 28)  # a new backdrop size: rendered in the worker
+        await pilot.pause()
+        engine.on_frame()
+        assert running.wait(5), "a worker render is in progress"
+        executor = engine._executor
+        assert executor is not None
+        engine.deactivate()
+        assert not _ticking(app)
+        mark = output.mark()
+        gate.set()
+        executor.shutdown(wait=True)  # the render finishes and calls back to the app thread
+        await asyncio.sleep(0.05)
+        await pilot.pause()
+        assert engine.pending_jobs == 0
+        assert not _ticking(app), "the late render did not wake the timer"
+        assert "\x1b_G" not in output.since(mark), "and its result was dropped"
+        engine.kick()
+        assert not _ticking(app), "kick does nothing while glass is off"
+        engine._timer.resume()  # a resume that slipped through anyway
+        engine.tick()
+        assert not _ticking(app), "the next tick pauses it again"
+
+
+class FakeClock:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_errors_count_in_a_sliding_window_and_glass_comes_back(output: Output,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """More than five errors within a minute turn glass off; scattered errors never
+    do. After turning itself off, glass tries again with a growing delay, at most
+    three times, then stays off; a retry that stays healthy resets the count."""
+    import textual_glass.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "RETRY_DELAYS", (0.05, 0.1, 0.15))
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        clock = engine.clock = FakeClock()
+        notes: list[str] = []
+        monkeypatch.setattr(engine, "_log", lambda text, error=False: notes.append(text))
+        boom = RuntimeError("boom")
+
+        for _ in range(12):  # twelve errors over eight hours: harmless
+            engine._failed(boom)
+            clock.now += 8 * 3600 / 12
+        assert engine.active and engine.errors == 12
+
+        async def burst() -> None:
+            for _ in range(6):
+                engine._failed(boom)
+                clock.now += 5
+            assert not engine.active, "six errors in half a minute turn glass off"
+            assert not output.model().images, "and every image is deleted"
+
+        async def comes_back() -> None:
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if engine.active:
+                    break
+            assert engine.active, "glass tried again"
+            await idle(app, pilot)
+            assert engine.layers[MAIN].image_id in output.model().images, "and drew everything again"
+
+        delays = engine_mod.RETRY_DELAYS
+        await burst()
+        assert engine.retry_in == delays[0]
+        await comes_back()
+        clock.now += engine_mod.HEALTHY + 1  # the retry stayed healthy: the next problem is a new one
+        await burst()
+        assert engine.retry_in == delays[0], "the count of retries starts again"
+        await comes_back()
+        for attempt in (2, 3):
+            clock.now += 60  # back on for only a minute: these retries are in a row
+            await burst()
+            assert engine.retry_in == delays[attempt - 1]
+            await comes_back()
+        clock.now += 60
+        await burst()
+        assert engine.retry_in is None, "after three retries in a row, glass stays off"
+        await asyncio.sleep(0.4)
+        assert not engine.active
+        assert sum("trying again in" in n for n in notes) == 4, notes
+        assert sum("trying glass again" in n for n in notes) == 4, notes
+        assert any("for good" in n for n in notes), notes
+
+        engine.activate(force=True)  # by hand: a fresh budget
+        await idle(app, pilot)
+        await burst()
+        assert engine.retry_in == delays[0]
+        engine.deactivate()  # turning glass off by hand cancels the retry
+        assert engine.retry_in is None
+        await asyncio.sleep(0.2)
+        assert not engine.active
+        assert not output.model().errors
+
+
+async def test_errors_in_worker_callbacks_reach_the_error_budget(output: Output) -> None:
+    """A callback from the worker thread that raises is counted (and logged), not lost in asyncio."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+
+        def done(result: int) -> None:
+            raise ValueError("broken done")
+
+        app.glass.background_job(lambda: 1, done)
+        await idle(app, pilot)
+        assert app.glass.errors == 1 and "broken done" in (app.glass.last_error or "")
+        assert app.glass.pending_jobs == 0 and app.glass.active
+
+
+async def test_turning_off_inside_a_frame_writes_no_sync_markers(output: Output,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the error budget runs out inside Textual's frame, the deletes are written
+    inside that frame: sync markers of glass's own would end Textual's update early."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        for _ in range(5):
+            engine._failed(RuntimeError("almost"))
+
+        def broken(now: float) -> bool:
+            raise RuntimeError("the last straw")
+
+        monkeypatch.setattr(engine, "_sync", broken)
+        mark = output.mark()
+        engine.on_frame()
+        assert not engine.active
+        sent = output.since(mark)
+        assert kitty.RESET_DEFAULT_BACKGROUND in sent and "a=d" in sent
+        assert kitty.SYNC_START not in sent and kitty.SYNC_END not in sent
+
+
+class Dots(PixelWidget):
+    """A row of sprites on its first line (like a row of status beacons), a caption on the second."""
+
+    DEFAULT_CSS = "Dots { height: 2; width: 30; }"
+
+    def __init__(self, colours: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.colours = colours
+
+    def render_line(self, y: int) -> Strip:
+        from textual_glass.sprites import pulse_frames
+        from textual_glass.widgets import placeholder_parts, strip
+
+        width = self.size.width
+        if y or self.glass is None:
+            return strip([(f"{len(self.colours)} dots", "")], width)
+        parts = []
+        for colour in self.colours:
+            image_id = self.glass.sprite(("dot", colour), 2, 1, lambda w, h, c=colour: pulse_frames(w, h, c, frames=3),
+                                         waiter=self)
+            parts += [placeholder_parts(image_id, 0, 2) if image_id is not None else ("o ", colour), (" ", "")]
+        return strip(parts, width)
+
+
+def _churn_app() -> Any:
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal
+
+    from textual_glass import Glass
+    from textual_glass.sprites import beacon_frames
+
+    class Churn(Glass, App[None]):
+        CSS = "Horizontal { height: 4; } SpriteView { width: 1fr; } Static { width: 1fr; }"
+
+        def compose(self) -> ComposeResult:
+            from textual.widgets import Static
+
+            with Horizontal():
+                yield SpriteView(("beacon", "waiting", "#ffc24b"),
+                                 lambda w, h: beacon_frames(w, h, "waiting", "#ffc24b"), id="view")
+                yield Static("x")
+            yield Dots(["#ff0000", "#00ff00", "#0000ff"], id="dots")
+
+    return Churn()
+
+
+def _sprite_images(model: Any) -> set[int]:
+    return {i for (i, _), p in model.placements.items() if p["virtual"]}
+
+
+async def test_sprites_are_freed_when_no_widget_shows_them(output: Output) -> None:
+    """G1: switching keys, resizing and removing widgets never piles up sprites:
+    the engine's tables and the terminal's images stay bounded, a sprite another
+    widget still shows stays, and nothing is uploaded twice."""
+    from textual_glass.sprites import beacon_frames
+
+    app = _churn_app()
+    async with app.run_test(size=(90, 28)) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        view, dots = app.query_one("#view", SpriteView), app.query_one("#dots", Dots)
+
+        def check(most: int) -> None:
+            ready = {s.image_id for s in engine.sprites.values() if s.ready}
+            assert len(engine.sprites) <= most, len(engine.sprites)
+            assert set(engine.dimmables) == ready, "only live sprites are dimmable"
+            model = output.model()
+            assert _sprite_images(model) == ready, "the terminal holds exactly the sprites in use"
+            assert set(model.images) <= engine.ids.live and not model.errors
+
+        await idle(app, pilot)
+        check(4)
+        colours = [f"#{r:02x}80c0" for r in range(0, 250, 8)]  # 32 keys
+        for colour in colours:
+            view.set_sprite(("beacon", "waiting", colour), lambda w, h, c=colour: beacon_frames(w, h, "waiting", c))
+            await idle(app, pilot)
+        check(4)
+        for cols, rows in [(80, 24), (100, 30), (110, 32), (84, 26)] * 4:  # the view's size, and so its key, changes
+            await pilot.resize_terminal(cols, rows)
+            await idle(app, pilot)
+        check(4)
+        assert len(engine.ids.live) <= 12, len(engine.ids.live)
+
+        # a widget with several sprites: dropping one keeps the others, without uploading them again
+        red, green, blue = (_placeholder_ids_in(dots, 0, engine, colour) for colour in dots.colours)
+        mark = output.mark()
+        dots.colours = ["#ff0000", "#00ff00"]
+        dots.refresh(Region(0, 1, dots.size.width, 1))  # only the caption line: the cached first line still shows blue
+        await idle(app, pilot)
+        assert blue in output.model().images, "a sprite still on screen (a cached line) stays"
+        dots.refresh()
+        await idle(app, pilot)
+        model = output.model()
+        assert blue not in model.images and {red, green} <= set(model.images)
+        assert not re.search(rf"a=t,i=({red}|{green}),", output.since(mark)), "the others are not uploaded again"
+        check(3)
+
+        await view.remove()
+        await idle(app, pilot)
+        check(2)
+        assert len(engine.sprites) == 2, "the removed view's sprite is gone"
+
+
+def _placeholder_ids_in(widget: Widget, y: int, engine: Any, colour: str) -> int:
+    return engine.sprites[("dot", colour, 2, 1, *_sprite_px(engine, 2, 1))].image_id
+
+
+def _sprite_px(engine: Any, cols: int, rows: int) -> tuple[int, int]:
+    from textual_glass.engine import SPRITE_MAX_PX
+
+    cell_w, cell_h = engine.cell_pixels()
+    scale = min(1.0, SPRITE_MAX_PX / max(cols * cell_w, rows * cell_h))
+    return max(2, round(cols * cell_w * scale)), max(2, round(rows * cell_h * scale))
+
+
+async def test_a_sprite_whose_maker_raises_is_tried_again_later(output: Output) -> None:
+    """G8: the error is counted, the widget keeps its fallback glyph, nothing is
+    retried in a hot loop, and a later render after the delay tries again."""
+    from textual.app import App, ComposeResult
+
+    from textual_glass import Glass
+    from textual_glass.sprites import beacon_frames
+
+    calls: list[int] = []
+
+    def flaky(width: int, height: int) -> tuple[list[bytes], int]:
+        calls.append(width)
+        if len(calls) == 1:
+            raise RuntimeError("the maker broke")
+        return beacon_frames(width, height, "idle", "#38e1ff")
+
+    class One(Glass, App[None]):
+        CSS = "SpriteView { width: 4; height: 2; }"
+
+        def compose(self) -> ComposeResult:
+            yield SpriteView(("flaky",), flaky, id="view")
+
+    app = One()
+    clock = app.glass.clock = FakeClock()
+    async with app.run_test(size=(40, 10)) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        view = app.query_one(SpriteView)
+        assert engine.errors == 1 and "the maker broke" in (engine.last_error or "")
+        assert not engine.sprites and any("◉" in view.render_line(y).text for y in range(2)), "the fallback shows"
+        for _ in range(5):
+            view.refresh()
+            await settle(app, pilot)
+        assert len(calls) == 1 and not engine.sprites and engine.pending_jobs == 0, "no new try before the delay"
+        clock.now += 6
+        view.refresh()
+        await idle(app, pilot)
+        assert len(calls) == 2 and engine.errors == 1
+        (sprite,) = engine.sprites.values()
+        assert sprite.ready and _placeholder_ids(view) == {sprite.image_id}
+        assert engine.active and not output.model().errors
+
+
+async def test_a_long_day_keeps_every_table_bounded(output: Output) -> None:
+    """Hours of resizes, page switches, popups, theme changes and the odd error:
+    glass stays on and nothing it keeps grows."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        clock = engine.clock = FakeClock()
+        sizes = [(100, 32), (90, 28), (120, 36), (84, 26)]
+        themes = ["nord", "gruvbox", "textual-dark"]
+
+        def tables() -> dict[str, int]:
+            return dict(images=len(engine.ids.live), sprites=len(engine.sprites), dimmables=len(engine.dimmables),
+                        pages=len(engine.page_cache), cached=len(engine.image_cache), layers=len(engine.layers),
+                        halos=len(engine.effects.ambient.halos), showing=len(engine._showing), bgs=len(engine._bgs),
+                        tweens=len(engine.tweens._state), scrims=len(engine.effects.scrims))
+
+        seen: list[dict[str, int]] = []
+        for hour in range(8):
+            await pilot.resize_terminal(*sizes[hour % len(sizes)])
+            await idle(app, pilot)
+            for key in ("2", "1", "d", "escape", "down"):
+                await pilot.press(key)
+                await idle(app, pilot)
+            if hour % 3 == 2:
+                app.theme = themes[hour // 3]
+                await idle(app, pilot)
+            if hour == 4:
+                app.action_glass_motion("full")
+                await idle(app, pilot)
+            engine._failed(RuntimeError("a hiccup"))
+            clock.now += 3600
+            seen.append(tables())
+        assert engine.active and engine.errors == 8, "an error an hour never turns glass off"
+        first, last = seen[1], seen[-1]
+        peak = {key: max(t[key] for t in seen) for key in first}
+        assert peak["sprites"] <= 1 and peak["pages"] <= 4 and peak["cached"] <= 4 and peak["bgs"] <= 2, peak
+        assert peak["halos"] <= 4 and peak["scrims"] <= 1 and peak["layers"] <= 2, peak
+        assert last["images"] <= first["images"] + 8, (first, last)  # full motion adds shimmer, glints and a halo
+        model = output.model()
+        assert set(model.images) <= engine.ids.live and not model.errors
+
+
+async def test_suspend_hands_over_a_clean_terminal_and_resume_draws_everything_again(output: Output) -> None:
+    """G5: on Textual's suspend signal (ctrl+Z, ``App.suspend``) glass resets OSC 11
+    and deletes every image; on resume it draws everything again with new images,
+    so nothing is sent to an image the terminal no longer has."""
+    app = GlassSample()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        beacon = app.query_one(SpriteView)
+        old = set(output.model().images)
+        assert old and _placeholder_ids(beacon) <= old
+        mark = output.mark()
+        app.app_suspend_signal.publish(app)
+        sent = output.since(mark)
+        model = output.model()
+        assert not engine.active and not model.images and not model.placements, "the shell gets a clean terminal"
+        assert kitty.RESET_DEFAULT_BACKGROUND in sent
+        assert not engine.layers and not engine.sprites and not engine.dimmables and not engine.ids.live
+
+        mark = output.mark()
+        app.app_resume_signal.publish(app)
+        await idle(app, pilot)
+        sent = output.since(mark)
+        model = output.model()
+        assert engine.active and "\x1b]11;#" in sent
+        assert engine.layers[MAIN].image_id in model.images, "the backdrop is drawn again"
+        (sprite,) = _placeholder_ids(beacon)
+        assert sprite in model.images and sprite not in old, "the beacon is a new upload, not an edit of a lost one"
+        assert not set(model.images) & old and not model.errors
+
+        # A resume without a suspend first (glass missed it): the terminal cleared the screen, so start over too.
+        drawn = set(model.images)
+        app.app_resume_signal.publish(app)
+        await idle(app, pilot)
+        model = output.model()
+        assert engine.active and model.images and not set(model.images) & drawn and not model.errors
+
+        engine.deactivate()  # off by hand: a suspend and resume leave it off
+        app.app_suspend_signal.publish(app)
+        app.app_resume_signal.publish(app)
+        await settle(app, pilot)
+        assert not engine.active

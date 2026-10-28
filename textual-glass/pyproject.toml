@@ -1,6 +1,6 @@
 [project]
 name = "textual-glass"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pixel glass chrome for stock Textual apps through the kitty graphics protocol (tuned for Ghostty), plus a pixel engine and pixel widgets."
 readme = "README.md"
 license = "MIT-0"

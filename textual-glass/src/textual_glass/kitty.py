@@ -174,6 +174,17 @@ def delete(image_id: int) -> str:
     return command(dict(a="d", d="I", i=image_id))
 
 
+def delete_all() -> str:
+    """Delete every visible placement and free the images left without one. Ghostty 1.4 keeps
+    virtual placements (Unicode placeholders) and their images: use :func:`delete_range` for those."""
+    return command(dict(a="d", d="A"))
+
+
+def delete_range(first: int, last: int) -> str:
+    """Delete every image with an id from ``first`` to ``last``, placeholders included, and free them."""
+    return command(dict(a="d", d="R", x=first, y=last))
+
+
 def set_default_background(hex_color: str) -> str:
     """OSC 11: the window padding then matches the backdrop."""
     return f"\x1b]11;{hex_color}\x07"

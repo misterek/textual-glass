@@ -125,6 +125,9 @@ class Glass(App):
 
     @on(events.Mount)
     def _glass_mount(self) -> None:
+        # Immediate: the suspend signal comes just before Textual leaves the alternate screen.
+        self.app_suspend_signal.subscribe(self, self.glass.app_suspended, immediate=True)
+        self.app_resume_signal.subscribe(self, self.glass.app_resumed, immediate=True)
         self.glass.start()
 
     def exit(self, *args: Any, **kwargs: Any) -> None:

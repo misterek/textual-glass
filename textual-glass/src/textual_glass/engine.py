@@ -43,7 +43,7 @@ import sys
 import termios
 import time
 import weakref
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -56,6 +56,7 @@ from . import backdrop, kitty
 from .detection import Support, detect
 from .effects import Effects
 from .filter import NO_RULES, GlassFilter, Rules
+from .hard_exit import on_hard_exit
 from .palette import Palette, hex_of
 from .render import Box, Canvas, Grid, Item, paint, to_u8
 from .scene import GLASS_EDGES, PixelContext, Scene, Tweens, build, rules_for, visible_screens
@@ -63,7 +64,9 @@ from .sprites import dim_frame
 
 if TYPE_CHECKING:
     from textual.app import App
+    from textual.geometry import Region
     from textual.screen import Screen
+    from textual.strip import Strip
     from textual.widget import Widget
 
 MOTIONS = ("minimal", "subtle", "full")
@@ -80,7 +83,14 @@ MAX_PIXELS = 2_400_000  # the backdrop is rendered at most this big; the termina
 SYNC_FRACTION = 0.16    # static changes smaller than this are redrawn inside the frame
 FULL_FRACTION = 0.5     # beyond this, re-render the whole layer
 SPRITE_MAX_PX = 192     # sprite frames are rendered at most this big per side
+SPRITE_HOLD = 2         # Textual frames a new sprite is kept unshown, while its widgets redraw to show it
+SPRITE_RETRY = (5.0, 30.0, 300.0)  # a sprite whose maker raised is tried again after these delays (then every 300 s)
 PAGE_CACHE = 4          # pages whose backdrops stay in the terminal for instant switches
+
+ERROR_LIMIT = 5         # more errors than this within ERROR_WINDOW seconds turn glass off...
+ERROR_WINDOW = 60.0
+RETRY_DELAYS = (60.0, 300.0, 1800.0)  # ...then it tries again after each delay in turn, and stays off after the last
+HEALTHY = 600.0         # a retry that stays on this long starts the count of retries again
 
 Rect = tuple[int, int, int, int]
 
@@ -91,14 +101,16 @@ Rect = tuple[int, int, int, int]
 class Ids:
     """Image ids below 2**24, so a placeholder's 24-bit colour holds a whole id."""
 
+    FIRST, LAST = 1 << 20, (1 << 24) - 1  # every id glass hands out is in this range
+
     def __init__(self) -> None:
-        self._next = random.randrange(1 << 20, (1 << 24) - (1 << 20))
+        self._next = random.randrange(self.FIRST, self.LAST + 1 - self.FIRST)
         self.live: set[int] = set()
 
     def new(self) -> int:
         self._next += 1
-        if self._next >= (1 << 24) - 1:
-            self._next = 1 << 20
+        if self._next >= self.LAST:
+            self._next = self.FIRST
         self.live.add(self._next)
         return self._next
 
@@ -114,6 +126,9 @@ class Writer:
         self.pending: list[str] = []
         self.bytes_sent = 0
         self.commands = 0
+        #: Set while glass runs inside Textual's synchronized frame (``on_frame``):
+        #: a flush then writes without markers of its own, which would end Textual's update early.
+        self.in_frame = False
 
     def queue(self, data: str) -> None:
         if data:
@@ -129,15 +144,32 @@ class Writer:
         self._write(self._take())
 
     def flush(self) -> None:
-        """Write queued commands as their own synchronized update."""
+        """Write queued commands as their own synchronized update (or straight into Textual's, inside one)."""
         data = self._take()
         if data:
-            self._write(kitty.SYNC_START + data + kitty.SYNC_END)
+            self._write(data if self.in_frame else kitty.SYNC_START + data + kitty.SYNC_END)
 
     def _write(self, data: str) -> None:
         if data and hooks.driver_write(self.app, data):
             self.bytes_sent += len(data)
             self.commands += data.count("\x1b_G")
+
+
+EXIT_KEY = "textual-glass"  # glass's entry in on_hard_exit
+
+
+def hard_exit_sequence(terminal_background: bool) -> str:
+    """What glass leaves for a hard exit (``on_hard_exit``): every image it may have
+    made deleted, and the default background reset (OSC 111).
+
+    It starts with a string terminator, which ends an escape sequence the writer
+    thread may have left half-written, and sends delete-all twice: the first
+    graphics command after an unfinished chunked transfer is taken as its last
+    chunk (rule 3). Ghostty's delete-all keeps images behind placeholders (sprites,
+    ``GlassImage``), so the range of ids glass uses is deleted as well.
+    """
+    data = "\x1b\\" + kitty.delete_all() * 2 + kitty.delete_range(Ids.FIRST, Ids.LAST)
+    return data + (kitty.RESET_DEFAULT_BACKGROUND if terminal_background else "")
 
 
 def terminal_cell_pixels() -> tuple[float, float, bool]:
@@ -193,6 +225,30 @@ def _within(items: tuple[Item, ...], rect: Rect, grid: Grid) -> list[Item]:
     return [item for item in items if _overlaps(item.visible_bbox(grid), rect)]
 
 
+NO_IDS: frozenset[int] = frozenset()
+
+
+def placeholder_ids(strip: Strip) -> frozenset[int]:
+    """The image ids of the placeholder cells in a line (each run's id is its foreground colour)."""
+    ids: set[int] | None = None
+    for text, style, _ in strip:
+        if kitty.PLACEHOLDER in text and style is not None and style.color is not None:  # a run may share a segment
+            rgb = style.color.triplet
+            if rgb is not None:
+                if ids is None:
+                    ids = set()
+                ids.add(rgb[0] << 16 | rgb[1] << 8 | rgb[2])
+    return frozenset(ids) if ids else NO_IDS
+
+
+def _attached(user: Any) -> bool:
+    """Is ``user`` (a widget, usually) still in the app? Objects that can't tell count as attached."""
+    try:
+        return bool(getattr(user, "is_attached", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ================================================================ layers ==
 
 
@@ -224,8 +280,9 @@ class Sprite:
     cols: int
     rows: int
     ready: bool = False
-    waiters: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
-    users: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
+    hold: int = 0  # Textual frames to keep it although nothing shows it yet (it just landed)
+    waiters: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)  # refreshed when it lands
+    users: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)    # every widget that asked for it
 
 
 @dataclass
@@ -273,12 +330,26 @@ class GlassEngine:
         self.size: tuple[int, int] = (0, 0)
         self.last_scene: Scene | None = None
         self.last_error: str | None = None
-        self.errors = 0
+        self.errors = 0  # every error since the app started
+        #: Glass turned itself off after too many errors and tries again in this many seconds.
+        self.retry_in: float | None = None
+        self.clock: Callable[[], float] = time.monotonic  # for the error budget and retries
+        self._error_times: deque[float] = deque()  # errors within the last ERROR_WINDOW seconds
+        self._retries = 0  # automatic retries in a row
+        self._retried_at: float | None = None
+        self._retry_timer: Any = None
+        self._forced = False  # activated with force=True (kept for retries and resumes)
+        self._resume = False  # glass was on when the app was suspended
+        self._session = 0  # bumped whenever glass turns off: worker results from before are dropped
         self.render_ms: dict[str, float] = {}
         self.pending_jobs = 0  # renders and jobs running in the worker thread
         self.frames_synced = 0
         #: Small terminal-played images behind placeholder cells (see :meth:`sprite`).
         self.sprites: dict[tuple[Any, ...], Sprite] = {}
+        #: Which sprite images each pixel widget's lines show: widget -> {line: image ids}.
+        self._showing: weakref.WeakKeyDictionary[Any, dict[int, frozenset[int]]] = weakref.WeakKeyDictionary()
+        #: Sprites whose maker raised: full key -> (failures in a row, when to try again).
+        self._sprite_failures: dict[tuple[Any, ...], tuple[int, float]] = {}
         #: Uploads kept for reuse (``GlassImage(cache_key=...)``): key -> image id.
         self.image_cache: dict[tuple[Any, ...], int] = {}
         #: Backdrops of other pages, unplaced but kept in the terminal (page key -> layer).
@@ -320,11 +391,19 @@ class GlassEngine:
             self.activate()
 
     def activate(self, force: bool = False) -> None:
-        """Turn glass on. ``force`` also allows it under Textual's headless driver
-        (pilot tests); output then goes nowhere unless a test captures it."""
+        """Turn glass on, with a fresh error budget. ``force`` also allows it under
+        Textual's headless driver (pilot tests); output then goes nowhere unless
+        a test captures it."""
+        self._cancel_retry()
+        self._retries = 0
+        self._activate(force)
+
+    def _activate(self, force: bool) -> None:
         app = self.app
-        if (app.is_headless and not force) or app.is_inline or not hooks.has_driver(app):
+        if self.active or (app.is_headless and not force) or app.is_inline or not hooks.has_driver(app):
             return
+        self._forced = force
+        self._error_times.clear()
         self._loop = asyncio.get_running_loop()
         self._app_context = contextvars.copy_context()  # Textual's active_app is set here
         self._filters = weakref.WeakKeyDictionary()
@@ -334,23 +413,34 @@ class GlassEngine:
         self._generation += 1
         self.active = True
         hooks.add_filter_provider(app, self.filter_for)
-        self._borders.blank(GLASS_EDGES)
+        if not self._borders.blank(GLASS_EDGES) and not self._borders.active:
+            self._log("Textual's border table is missing or has an unexpected shape; borders keep their glyphs")
         app.add_class("-textual-glass")
         self._unwrap = hooks.wrap_end_update(app, self.on_frame)
         if self._timer is None:
             self._timer = app.set_interval(1 / 60, self.tick, pause=True, name="textual-glass")
         if self.options.terminal_background:
             self.writer.queue(kitty.set_default_background(hex_of(self.palette.mid_background)))
+        if not app.is_headless:  # a real terminal: clean it up even if the process is killed
+            on_hard_exit(EXIT_KEY, hard_exit_sequence(self.options.terminal_background))
         self._refresh_all()
         for widget in list(self._images.values()):
             widget.glass_changed()
 
     def deactivate(self) -> None:
-        """Turn glass off: delete every image and give Textual its plain look back."""
+        """Turn glass off: delete every image and give Textual its plain look back
+        (and forget a retry after errors that was pending)."""
+        self._cancel_retry()
+        self._deactivate()
+
+    def _deactivate(self) -> None:
         if not self.active:
             return
         self._delete_everything()
         self.active = False
+        on_hard_exit(EXIT_KEY, None)
+        self._session += 1
+        self.pending_jobs = 0  # queued jobs are cancelled below; a running one is dropped when it lands
         hooks.remove_filter_provider(self.app)
         self._borders.restore()
         self.app.remove_class("-textual-glass")
@@ -366,11 +456,34 @@ class GlassEngine:
         for widget in list(self._images.values()):
             widget.glass_changed()
 
+    def app_suspended(self, app: Any = None) -> None:
+        """Textual's suspend signal (``App.suspend``, ctrl+Z bound to ``suspend_process``):
+        Textual is about to hand the terminal over. Reset OSC 11 and delete every
+        image now, while it is still on the alternate screen, so the shell gets a
+        clean terminal; everything is forgotten and drawn again on resume."""
+        if self.active:
+            self._resume = True
+            self._deactivate()
+
+    def app_resumed(self, app: Any = None) -> None:
+        """Textual's resume signal: the app has the terminal again, on an alternate
+        screen that was cleared when it came back (in Ghostty that clear keeps
+        placeholder images, but nothing else). Draw everything from scratch: new
+        images, never edits of old ones. If glass missed the suspend, it starts over too."""
+        resume = self._resume or self.active
+        self._resume = False
+        self._deactivate()
+        if resume:
+            self._activate(self._forced)
+
     def shutdown(self) -> None:
         """The app is exiting: clean the terminal up (deletes, OSC 111)."""
+        self._cancel_retry()
         if self.active:
             self._delete_everything()
             self.active = False
+            on_hard_exit(EXIT_KEY, None)
+            self._session += 1
             hooks.remove_filter_provider(self.app)
             self._borders.restore()
             if self._executor is not None:
@@ -388,6 +501,8 @@ class GlassEngine:
         self.layers.clear()
         self.page_cache.clear()
         self.sprites.clear()
+        self._showing.clear()
+        self._sprite_failures.clear()
         self.image_cache.clear()
         self.dimmables.clear()
         self.dimmed.clear()
@@ -444,15 +559,22 @@ class GlassEngine:
         """At the end of each Textual frame: update the glass inside the same frame."""
         if not self.active or self._in_sync:
             return
+        self.writer.in_frame = True
         try:
-            self._sync(time.monotonic())
-        except Exception as error:  # noqa: BLE001
-            self._failed(error)
-        self.writer.drain_into_frame()
+            try:
+                self._sync(time.monotonic())
+                self._sweep_sprites()
+            except Exception as error:  # noqa: BLE001
+                self._failed(error)  # may turn glass off: its deletes go into this frame too
+            self.writer.drain_into_frame()
+        finally:
+            self.writer.in_frame = False
 
     def tick(self) -> None:
-        """60 Hz while something animates (pill slides, fades); paused when idle."""
+        """60 Hz while something animates (pill slides, fades); paused when idle or off."""
         if not self.active:
+            if self._timer is not None:
+                self._timer.pause()
             return
         now = time.monotonic()
         busy = False
@@ -466,19 +588,84 @@ class GlassEngine:
             self._timer.pause()
 
     def kick(self) -> None:
-        """Run the 60 Hz tick until animations finish."""
-        if self._timer is not None:
+        """Run the 60 Hz tick until animations finish (never while glass is off: a
+        render that lands after ``deactivate`` must not start it again)."""
+        if self.active and self._timer is not None:
             self._timer.resume()
 
+    def _log(self, text: str, error: bool = False) -> None:
+        log = self.app.log
+        (log.error if error else log.warning)(f"textual-glass: {text}")
+
     def _failed(self, error: BaseException) -> None:
+        """Count an error. More than ERROR_LIMIT within ERROR_WINDOW seconds turn
+        glass off (the app carries on, plain); it then tries again later."""
         import traceback
 
         self.errors += 1
         self.last_error = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        self.app.log.error(f"textual-glass: {error!r}")
-        if self.errors > 5:  # something is badly wrong: fall back to plain Textual
-            self.app.log.error("textual-glass: too many errors, turning glass off")
-            self.deactivate()
+        self._log(repr(error), error=True)
+        now = self.clock()
+        times = self._error_times
+        times.append(now)
+        while now - times[0] > ERROR_WINDOW:
+            times.popleft()
+        if self.active and len(times) > ERROR_LIMIT:
+            self._give_up(now, len(times))
+
+    def _give_up(self, now: float, count: int) -> None:
+        """Too many errors: plain Textual for now, and a retry after the next delay."""
+        self._error_times.clear()
+        if self._retried_at is not None and now - self._retried_at >= HEALTHY:
+            self._retries = 0  # the last retry stayed healthy: this is a new problem
+        self._deactivate()
+        why = f"{count} errors within {ERROR_WINDOW:g} s"
+        if self._retries >= len(RETRY_DELAYS):
+            self.retry_in = None
+            self._log(f"{why}, turning glass off for good ({len(RETRY_DELAYS)} retries failed)", error=True)
+            return
+        delay = RETRY_DELAYS[self._retries]
+        self._retries += 1
+        self.retry_in = delay
+        self._log(f"{why}, turning glass off; trying again in {delay:g} s "
+                  f"(retry {self._retries} of {len(RETRY_DELAYS)})", error=True)
+        self._retry_timer = self.app.set_timer(delay, self._retry, name="textual-glass retry")
+
+    def _retry(self) -> None:
+        self._retry_timer = None
+        self.retry_in = None
+        if self.active or not self.supported:
+            return
+        self._log(f"trying glass again (retry {self._retries} of {len(RETRY_DELAYS)})")
+        self._retried_at = self.clock()
+        self._activate(self._forced)
+
+    def _cancel_retry(self) -> None:
+        if self._retry_timer is not None:
+            self._retry_timer.stop()
+            self._retry_timer = None
+        self.retry_in = None
+
+    def _from_worker(self, session: int, callback: Callable[..., None], *args: Any) -> None:
+        """Every callback from the worker thread runs through here, on the app's
+        thread and in its context (rule 13). Results from before glass last
+        turned off are dropped; an exception counts like any other glass error
+        (asyncio would otherwise just log it)."""
+        if session != self._session:
+            return
+        self.pending_jobs -= 1
+        try:
+            callback(*args)
+        except Exception as error:  # noqa: BLE001
+            self._failed(error)
+
+    def _post(self, loop: asyncio.AbstractEventLoop, context: contextvars.Context, session: int,
+              callback: Callable[..., None], *args: Any) -> None:
+        """From the worker thread: run ``callback(*args)`` on the app's thread (see ``_from_worker``)."""
+        try:
+            loop.call_soon_threadsafe(self._from_worker, session, callback, *args, context=context.copy())
+        except RuntimeError:  # the loop has closed
+            pass
 
     # -- syncing the scene -------------------------------------------------------------
 
@@ -813,7 +1000,7 @@ class GlassEngine:
         self.pending_jobs += 1
         generation, grid, rect, static = layer.generation, layer.grid, layer.rect, layer.static
         bg = self._background_for(grid)
-        loop, context = self._loop, self._app_context
+        loop, context, session = self._loop, self._app_context, self._session
 
         def work() -> None:
             try:
@@ -821,15 +1008,11 @@ class GlassEngine:
                 paint(Canvas(data, rect[0], rect[1]), grid, static)
             except Exception as error:  # noqa: BLE001
                 data = error
-            try:
-                loop.call_soon_threadsafe(self._rebased, layer, generation, data, context=context.copy())
-            except RuntimeError:  # the loop has closed
-                pass
+            self._post(loop, context, session, self._rebased, layer, generation, data)
 
         self._executor.submit(work)
 
     def _rebased(self, layer: Layer, generation: int, base: Any) -> None:
-        self.pending_jobs -= 1
         if generation != layer.generation:
             self.kick()
             return
@@ -850,7 +1033,8 @@ class GlassEngine:
         if self._executor is None:
             return
         layer.busy = True
-        self.pending_jobs += 1
+        if not sync:
+            self.pending_jobs += 1
         generation = layer.generation
         rect = self._cells_to_rect(cells, grid) if (new_image or rects is None) else layer.rect
         rgba, palette = layer.rgba, self.palette
@@ -863,7 +1047,7 @@ class GlassEngine:
             else:
                 bg = self._bgs.get((grid, palette))
                 missing = [g for g in dict.fromkeys((grid, self._quick_grid())) if (g, palette) not in self._bgs]
-        loop, context = self._loop, self._app_context
+        loop, context, session = self._loop, self._app_context, self._session
 
         def work() -> None:
             nonlocal bg
@@ -897,11 +1081,8 @@ class GlassEngine:
                                catch_up=False)
                 return
             if loop is not None:
-                try:
-                    loop.call_soon_threadsafe(self._job_done, layer, generation, grid, cells, rect, static, dynamic,
-                                              new_image, result, ms, True, palette, drawn, context=context.copy())
-                except RuntimeError:  # the loop has closed
-                    pass
+                self._post(loop, context, session, self._job_done, layer, generation, grid, cells, rect, static,
+                           dynamic, new_image, result, ms, True, palette, drawn)
 
         if sync:
             work()
@@ -912,7 +1093,6 @@ class GlassEngine:
                   static: tuple[Item, ...], dynamic: tuple[Item, ...], new_image: bool, result: Any,
                   ms: float, catch_up: bool = True, palette: Palette | None = None,
                   drawn: dict[Grid, np.ndarray] | None = None) -> None:
-        self.pending_jobs -= 1
         if self.active and palette is not None:
             for g, data in (drawn or {}).items():
                 self._keep_background(g, palette, data)
@@ -968,7 +1148,7 @@ class GlassEngine:
         """Run ``work()`` in the worker thread, then ``done(result)`` on the app's
         thread, in the app's context (Textual's ``active_app`` is set there),
         followed by a flush of whatever ``done`` queued."""
-        executor, loop, context = self._executor, self._loop, self._app_context
+        executor, loop, context, session = self._executor, self._loop, self._app_context, self._session
         if executor is None or loop is None:
             return
 
@@ -977,16 +1157,12 @@ class GlassEngine:
                 result = work()
             except Exception as error:  # noqa: BLE001
                 result = error
-            try:
-                loop.call_soon_threadsafe(self._background_done, done, result, context=context.copy())
-            except RuntimeError:  # the loop has closed
-                pass
+            self._post(loop, context, session, self._background_done, done, result)
 
         self.pending_jobs += 1
         executor.submit(run)
 
     def _background_done(self, done: Callable[[Any], None], result: Any) -> None:
-        self.pending_jobs -= 1
         if not self.active:
             return
         if isinstance(result, Exception):
@@ -1020,6 +1196,15 @@ class GlassEngine:
         frame (gapless, so playback skips it) for while a popup covers it.
         Write ``kitty.placeholder_row(row, cols)`` in ``kitty.id_color(image_id)``
         to show it; returns None while glass is off.
+
+        Pass the widget that shows it as ``waiter``: the sprite is deleted from
+        the terminal once no such widget shows it any more (it switched to
+        another key or size, or it was removed). A ``PixelMixin`` widget is
+        checked line by line, from what it renders; any other widget holds its
+        sprites until it is removed. A sprite asked for without a ``waiter`` is
+        kept until glass turns off. If ``make`` raises, the error is counted
+        and the sprite is tried again on a later call, after 5 s, 30 s, then
+        every 5 minutes (``None`` until then, so the widget's fallback shows).
         """
         if not self.active or cols < 1 or rows < 1 or cols > len(kitty.DIACRITICS) or rows > len(kitty.DIACRITICS):
             return None
@@ -1036,6 +1221,9 @@ class GlassEngine:
             if waiter is not None:
                 found.waiters.add(waiter)
             return None
+        failure = self._sprite_failures.get(full_key)
+        if failure is not None and self.clock() < failure[1]:
+            return None  # its maker raised a moment ago
         image_id = self.ids.new()
         sprite = self.sprites[full_key] = Sprite(image_id, cols, rows)
         if waiter is not None:
@@ -1043,23 +1231,31 @@ class GlassEngine:
             sprite.users.add(waiter)
         factor = self.dim_factor
 
-        def work() -> tuple[str, int]:
-            frames, gap = make(width, height)
-            dim = dim_frame(frames[0], factor)  # gapless: playback never shows it
-            if len(frames) == 1:
-                body = kitty.transmit_raw(image_id, width, height, frames[0])
-                body += kitty.add_frame(image_id, width, height, dim, gap_ms=-1)
-            else:
-                body = kitty.animation(image_id, width, height, frames, gap, gapless=[dim])
-            return body + kitty.place_virtual(image_id, cols, rows), len(frames)
+        def work() -> tuple[str, int] | tuple[None, Exception]:
+            try:
+                frames, gap = make(width, height)
+                dim = dim_frame(frames[0], factor)  # gapless: playback never shows it
+                if len(frames) == 1:
+                    body = kitty.transmit_raw(image_id, width, height, frames[0])
+                    body += kitty.add_frame(image_id, width, height, dim, gap_ms=-1)
+                else:
+                    body = kitty.animation(image_id, width, height, frames, gap, gapless=[dim])
+                return body + kitty.place_virtual(image_id, cols, rows), len(frames)
+            except Exception as error:  # noqa: BLE001 - the app's maker: retried later (see done)
+                return None, error
 
-        def done(result: tuple[str, int]) -> None:
-            commands, count = result
+        def done(result: tuple[str, int] | tuple[None, Exception]) -> None:
             if self.sprites.get(full_key) is not sprite:
                 return
+            if result[0] is None:
+                self._sprite_failed(full_key, sprite, result[1])
+                return
+            commands, count = result
+            self._sprite_failures.pop(full_key, None)
             self.writer.queue(commands)
             self.dimmables[image_id] = Dimmable(count + 1, count > 1, sprite.users)
             sprite.ready = True
+            sprite.hold = SPRITE_HOLD
             for widget in list(sprite.waiters):
                 try:
                     widget.refresh()
@@ -1069,6 +1265,65 @@ class GlassEngine:
 
         self.background_job(work, done)
         return None
+
+    def _sprite_failed(self, full_key: tuple[Any, ...], sprite: Sprite, error: Exception) -> None:
+        """Its maker raised: drop it (nothing was uploaded) and allow a new try after a delay."""
+        del self.sprites[full_key]
+        self.ids.free(sprite.image_id)
+        failures = self._sprite_failures.pop(full_key, (0, 0.0))[0] + 1
+        delay = SPRITE_RETRY[min(failures, len(SPRITE_RETRY)) - 1]
+        self._sprite_failures[full_key] = (failures, self.clock() + delay)
+        while len(self._sprite_failures) > 64:
+            del self._sprite_failures[next(iter(self._sprite_failures))]
+        self._failed(error)
+
+    def _note_lines(self, widget: Any, crop: Region, strips: list[Strip]) -> None:
+        """What ``widget`` just rendered (``PixelMixin.render_lines``): which sprite
+        images its lines show. Lines outside ``crop`` keep what they showed before
+        (Textual still has them cached), and so does a line cropped narrower than
+        the widget: its hidden part may still hold a placeholder."""
+        lines = self._showing.get(widget)
+        if lines is None:
+            lines = self._showing[widget] = {}
+        width, height = widget.outer_size
+        whole = crop.x == 0 and crop.width >= width
+        for y, line in enumerate(strips, crop.y):
+            ids = placeholder_ids(line)
+            if not whole:
+                ids |= lines.get(y, NO_IDS)
+            if ids:
+                lines[y] = ids
+            else:
+                lines.pop(y, None)
+        for y in [y for y in lines if y >= height]:
+            del lines[y]
+
+    def _shown(self, sprite: Sprite) -> bool:
+        """Does a widget that asked for ``sprite`` still show it (or wait for it)?"""
+        if not sprite.users:
+            return True  # asked for without a waiter: kept until glass turns off
+        for user in list(sprite.users):
+            if not _attached(user):
+                continue
+            lines = self._showing.get(user)
+            if not sprite.ready or lines is None:  # waiting for the upload, or a widget that doesn't report lines
+                return True
+            if any(sprite.image_id in ids for ids in lines.values()):
+                return True
+        return False
+
+    def _sweep_sprites(self) -> None:
+        """At the end of each Textual frame: delete the sprites no widget shows any more."""
+        for full_key, sprite in list(self.sprites.items()):
+            if sprite.hold > 0:
+                sprite.hold -= 1
+            elif not self._shown(sprite):
+                del self.sprites[full_key]
+                if sprite.ready:  # uploaded (an upload still in the worker is dropped when it lands)
+                    self.writer.queue(kitty.delete(sprite.image_id))
+                self.ids.free(sprite.image_id)
+                self.dimmables.pop(sprite.image_id, None)
+                self.dimmed.discard(sprite.image_id)
 
     # -- dimming placeholder images under popups (rule 18) ------------------------------------
 
@@ -1089,8 +1344,13 @@ class GlassEngine:
         top = screens[-1] if len(screens) > 1 else None
         want: set[int] = set()
         if top is not None:
+            live = self.ids.live
             for image_id, dimmable in self.dimmables.items():
+                if image_id not in live:
+                    continue
                 for user in list(dimmable.users):
+                    if not _attached(user):
+                        continue
                     try:
                         screen = user.screen
                     except Exception:  # noqa: BLE001 - detached
@@ -1135,4 +1395,5 @@ class GlassEngine:
         return dict(bytes_sent=self.writer.bytes_sent, commands=self.writer.commands, images=len(self.ids.live),
                     layers=sorted(self.layers), pages=len(self.page_cache), sprites=len(self.sprites),
                     frames=self.frames_synced, motion=self.motion, render_ms=dict(self.render_ms),
-                    support=self.support.reason if self.support else None, active=self.active)
+                    support=self.support.reason if self.support else None, active=self.active,
+                    errors=self.errors, retry_in=self.retry_in)

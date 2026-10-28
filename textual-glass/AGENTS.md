@@ -8,10 +8,11 @@ Modules in `src/textual_glass/`:
 
 | Module | What it does |
 | --- | --- |
-| `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `detect`, `MOTIONS`. |
-| `glass.py` | The `Glass` mixin (`class MyApp(Glass, App)`): the `GLASS_*` options, `f9`/`shift+f9`, the palette's "Glass: ..." commands, detection before the driver starts, `GLASS_CSS` (transparent modals), `terminal_write`. |
-| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites, dimming placeholder images under popups, the image cache, `background_job`. The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`...). |
-| `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin`, `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
+| `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `on_hard_exit`, `detect`, `MOTIONS`. |
+| `glass.py` | The `Glass` mixin (`class MyApp(Glass, App)`): the `GLASS_*` options, `f9`/`shift+f9`, the palette's "Glass: ..." commands, detection before the driver starts, the suspend and resume subscriptions, `GLASS_CSS` (transparent modals), `terminal_write`. |
+| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites (freed once no widget shows them, rule 21), dimming placeholder images under popups, the image cache, `background_job` and the one path every worker callback takes (`_from_worker`, rule 22), the error budget and its retries, suspend and resume, glass's hard-exit sequence. The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`...). |
+| `hard_exit.py` | `on_hard_exit(key, data)`: escape sequences written to the terminal on SIGTERM, SIGHUP or an unclean interpreter exit (rule 24). No Textual imports; works with glass on or off. |
+| `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin` (whose `render_lines` reports the sprites a widget's lines show), `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
 | `render.py` | The drawing model, no Textual imports: `Grid` (cells to layer pixels), `Canvas`, the `Item` base class (`bbox`, `draw`, `window`, `diff_boxes`, `dynamic`, `edge`), `paint`, `to_u8`, colour and shape helpers. |
 | `items.py` | Every item, no Textual imports. Stock chrome: `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Pill`, `Badge`, `Progress`, `Thumb`. Instruments: `HeaderBar`, `Rule`, `Ring`, `Signal`, `Meter`, `Area`, `Bars`, `Lane`, `Dot`, `Spine`. |
 | `sprites.py` | Frame makers, no Textual imports: scrims (`solid`, `solid_frames`), `beacon_frames`, `pulse_frames`, the `full` motion effects (`halo_frames`, `glint_frames`, `shimmer_frames`), `radial_mask`, `edge_fade`, `dim_frame`. |
@@ -19,7 +20,7 @@ Modules in `src/textual_glass/`:
 | `palette.py` | `Palette.from_app`: the theme's colours and glass's theme variables as RGB; colour helpers (`mix`, `lighten`, `hue_shift`, `border_pair`, `hex_of`, `rgb`). |
 | `filter.py` | `GlassFilter` and `Rules`: the per-widget line filter that turns structural backgrounds into the terminal default, blanks pixel-drawn scrollbars and bars, and dims the screen under a modal (leaving placeholder colours alone). |
 | `effects.py` | Popup scrims (fades, recolouring) and the `full` motion ambient effects. |
-| `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation`, edits, placements, placeholders, delete, OSC 11. |
+| `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation`, edits, placements, placeholders, deletes (one id, delete-all, an id range), OSC 11. |
 | `detection.py` | Whether to use glass. Runs before Textual's driver reads input. |
 | `images.py` | `load_image` and `LoadedImage` (Pillow, the `images` extra). |
 | `_textual_hooks.py` | **Every** use of Textual's private API, each failing soft (rule 7). Nothing else may touch private Textual attributes. |
@@ -56,7 +57,7 @@ Elsewhere in `textual-glass/`:
 
 For a widget in an app, follow "Write your own pixel widget" in the README. To add one to the library:
 
-1. Subclass `PixelWidget` (or `SelectList`) in `widgets/instruments.py` or a new module under `widgets/`. Colours are constructor arguments that default to the theme (`ctx.palette` in `pixel_items`, `self.theme_palette` in `render_line`); never a module-level palette.
+1. Subclass `PixelWidget` (or `SelectList`) in `widgets/instruments.py` or a new module under `widgets/`. Colours are constructor arguments that default to the theme (`ctx.palette` in `pixel_items`, `self.theme_palette` in `render_line`); never a module-level palette. The setters take them too, so an update can change a colour (a grade turning amber); `None` keeps the current one.
 2. Draw a text fallback with the same layout (`self.glass_on` says which mode is current). Give every item a stable `ident` and `clip=self.visible_clip()`.
 3. Don't add attributes Textual already has (rule 14): `test_widgets_add_no_attribute_textual_has` lists the widget classes; add yours.
 4. Export it from `widgets/__init__.py` and `textual_glass/__init__.py` (both `__all__` lists).
@@ -136,7 +137,7 @@ uv run python textual-glass/tests/screenshots.py                    # regenerate
 GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # with real pictures, if the user has some
 ```
 
-The README's [Tests](README.md#tests) section says what each file checks. Rules 1 to 19 in `../AGENTS.md` each have a guarding test; when you change the code a rule protects, run that test first.
+The README's [Tests](README.md#tests) section says what each file checks. Rules 1 to 19 and 21 to 24 (glass's own; 25 to 30 are orbital's) in `../AGENTS.md` each have a guarding test; when you change the code a rule protects, run that test first.
 
 ## Known gaps
 
@@ -144,3 +145,4 @@ The README's [Tests](README.md#tests) section says what each file checks. Rules 
 - An app with no bordered or backgrounded widgets gets no backdrop image: a layer is only created when it has items. The terminal's default background (OSC 11) still matches the theme.
 - Colour-based ownership is a heuristic (see the README's Limitations).
 - Items defined outside `items.py` are not covered by the rule 16 test.
+- A sprite used by a widget that isn't a `PixelMixin` is freed only when that widget is removed (rule 21).

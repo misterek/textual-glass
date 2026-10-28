@@ -241,7 +241,7 @@ class OrbitalApp(Glass, App[None]):
         self._arm_minute()
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
-        # Fetch threads are daemons: quitting never waits for one (rule 21).
+        # Fetch threads are daemons: quitting never waits for one (rule 25).
         self._orbital_closed = True
         self.notifier.restore()
         super().exit(*args, **kwargs)
@@ -266,7 +266,7 @@ class OrbitalApp(Glass, App[None]):
         def run() -> None:
             try:
                 callback(*args)
-            except Exception as error:  # noqa: BLE001 - reported, never lost in the loop's handler (rule 22)
+            except Exception as error:  # noqa: BLE001 - reported, never lost in the loop's handler (rule 26)
                 self.report_error(_name(callback), error)
 
         try:
@@ -320,7 +320,7 @@ class OrbitalApp(Glass, App[None]):
         self._toast_errors()
 
     def _attempt(self, where: str, step: Callable[..., object], *args: Any) -> bool:
-        """Run one step; report what it raises (rule 22). False if it raised."""
+        """Run one step; report what it raises (rule 26). False if it raised."""
         try:
             step(*args)
         except Exception as error:  # noqa: BLE001 - reported
@@ -432,7 +432,7 @@ class OrbitalApp(Glass, App[None]):
         This is how to fetch something with parameters on demand (a past week, a
         record's comments); sources are fetched on their interval only. ``func``
         must set its own network and subprocess timeouts: a thread can't be
-        stopped (rule 21). ``then`` runs even if what asked has gone (a page
+        stopped (rule 25). ``then`` runs even if what asked has gone (a page
         switched away, a popup closed): check there whether the result is still wanted.
         """
         if self._orbital_closed:
@@ -448,7 +448,7 @@ class OrbitalApp(Glass, App[None]):
             error: BaseException | None = None
             try:
                 data = func(*args)
-            except BaseException as problem:  # noqa: BLE001 - handed to then(), never lost (rule 22)
+            except BaseException as problem:  # noqa: BLE001 - handed to then(), never lost (rule 26)
                 error = problem
             self.call_from_worker(self._fetch_done, token, data, error)
 
@@ -479,7 +479,7 @@ class OrbitalApp(Glass, App[None]):
     def _publish(self, at: datetime) -> None:
         """After every fetch: a snapshot taken at ``at``; the pages get it if the
         content changed; then health, alerts and the badge. Each step is guarded
-        on its own, so one that raises doesn't skip the others (rule 22)."""
+        on its own, so one that raises doesn't skip the others (rule 26)."""
         try:
             snapshot: Snapshot | None = self.store.snapshot(at)
         except Exception as error:  # noqa: BLE001 - reported; health and the badge still update
@@ -626,7 +626,7 @@ class OrbitalApp(Glass, App[None]):
     def _load_snoozes(self) -> None:
         """Read the snooze file, if there is one, and keep the snoozes that
         haven't ended. One that can't be read or parsed is reported and treated
-        as empty: it never stops startup (rule 25)."""
+        as empty: it never stops startup (rule 29)."""
         path = self.snooze_file
         if path is None:
             return
@@ -732,7 +732,7 @@ class OrbitalApp(Glass, App[None]):
         """The alert's condition went away. Forget its view at once, so a second
         publish can't close it again (O10). A popup closes only while it is on
         the screen stack: now if it is on top, else once it is on top again
-        (rule 24); a toast closes now."""
+        (rule 28); a toast closes now."""
         view, self._alert_view = self._alert_view, None
         self.alert_queue.dismiss()
         if isinstance(view, AlertToast) or (view is not None and view in self.screen_stack):
@@ -752,7 +752,7 @@ class OrbitalApp(Glass, App[None]):
         """Act on the alert on screen as the popup's keys do: ``"jump"``,
         ``"open"``, ``"snooze"`` or ``"dismiss"``. Bind your own keys to it for
         toasts, which take none. A popup is acted on only while it is on top
-        (rule 24). False when no alert is showing, or its popup is covered."""
+        (rule 28). False when no alert is showing, or its popup is covered."""
         view = self._alert_view
         if isinstance(view, AlertToast):
             view.finish(action)
@@ -811,7 +811,7 @@ class OrbitalApp(Glass, App[None]):
         self.call_later(self._mount_toast, moved)  # after the new screen is set up
 
     def _alert_done(self, view: AlertScreen | AlertToast, alert: Alert, action: str | None) -> None:
-        """Every alert view ends here, whatever closed it (rule 26)."""
+        """Every alert view ends here, whatever closed it (rule 30)."""
         if self._orbital_closed or not self.is_running:
             return  # quitting: the toast's widgets are being removed
         if self._alert_view is view:  # else it was resolved, and the queue knows already

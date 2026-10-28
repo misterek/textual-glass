@@ -7,6 +7,7 @@ import inspect
 import io
 import os
 import re
+import select
 import threading
 import time
 from collections.abc import Callable
@@ -571,6 +572,21 @@ async def test_background_job_runs_done_on_the_app_thread() -> None:
     engine._executor.shutdown()
 
 
+def test_placeholder_ids_finds_every_run_in_a_line() -> None:
+    """What the sprite sweep reads from a widget's rendered line (rule 21)."""
+    from rich.segment import Segment
+    from rich.style import Style
+    from textual.strip import Strip
+
+    from textual_glass.engine import placeholder_ids
+
+    run = kitty.placeholder_row(0, 2)
+    line = Strip([Segment("ab", Style(color="#ffffff")), Segment(run, Style(color=kitty.id_color(0x123456))),
+                  Segment(" " + run, Style(color=kitty.id_color(0x10ABCD))), Segment(run)])
+    assert placeholder_ids(line) == {0x123456, 0x10ABCD}, "a run sharing a segment counts; one with no colour can't"
+    assert placeholder_ids(Strip([Segment("plain")])) == frozenset()
+
+
 def test_dim_rules_leave_placeholder_cells_alone() -> None:
     """Rule 6: under a modal the filter dims text, but a placeholder cell's
     foreground colour is an image id and must come through untouched."""
@@ -629,19 +645,30 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     bare = Bare()
     assert hooks.has_driver(bare) is False  # type: ignore[arg-type]
     assert hooks.driver_write(bare, "x") is False  # type: ignore[arg-type]
-    assert hooks.writer_backlog(SimpleNamespace(_driver=SimpleNamespace())) == 0  # type: ignore[arg-type]
     hooks.wrap_end_update(bare, lambda: None)()  # type: ignore[arg-type]
     assert hooks.option_lines(bare) == []  # type: ignore[arg-type]
     assert hooks.row_label_width(bare) == 0  # type: ignore[arg-type]
     assert hooks.border_label_length(SimpleNamespace(border_title="[b]Hi[/b]", border_subtitle=None)) == 2  # type: ignore[arg-type]
     screen = SimpleNamespace(_compositor=SimpleNamespace(), walk_children=lambda kind: [])
     assert hooks.visible_widgets(screen) == []  # type: ignore[arg-type]
+    reshaped = SimpleNamespace(_compositor=SimpleNamespace(visible_widgets={"widget": "no (region, clip) pair"}),
+                               walk_children=lambda kind: [])
+    assert hooks.visible_widgets(reshaped) == [], "a mapping of another shape falls back too"  # type: ignore[arg-type]
     with monkeypatch.context() as m:
         m.setattr(textual, "_border", SimpleNamespace())
         glyphs = hooks.BorderGlyphs()
-        glyphs.blank(["round"])
+        assert glyphs.blank(["round"]) is False
         glyphs.restore()
         assert not glyphs.active
+    from textual import _border
+
+    for odd in ((("+", "-", "+", "!"),) * 3, (("+", "-", "+"),) * 4, ((1, 2, 3),) * 3, "+-+|||+-+"):
+        with monkeypatch.context() as m:  # Textual reads this table outside any try: never write a wrong shape
+            table = {**_border.BORDER_CHARS, "round": odd}
+            m.setattr(_border, "BORDER_CHARS", table)
+            glyphs = hooks.BorderGlyphs()
+            assert glyphs.blank(["round", "heavy"]) is False, odd
+            assert not glyphs.active and table["round"] == odd and table["heavy"] == _border.BORDER_CHARS["heavy"]
     with monkeypatch.context() as m:
         m.delattr(Widget, "get_line_filters")
         hooks.add_filter_provider(bare, lambda widget: None)  # type: ignore[arg-type]
@@ -666,6 +693,22 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
         assert app.glass.active and app.glass.errors == 0, app.glass.last_error
         assert app.glass.layers, "the scene is still drawn (from the public widget tree)"
     assert not hasattr(App, "_glass_never_there")
+
+    # A border table Textual can still read but glass can't patch safely: skipped, with a log line.
+    import types
+
+    monkeypatch.undo()
+    from textual import _border
+
+    monkeypatch.setattr(_border, "BORDER_CHARS", types.MappingProxyType(dict(_border.BORDER_CHARS)))
+    app = GlassSample()
+    notes: list[str] = []
+    app.glass._log = lambda text, error=False: notes.append(text)  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 32)) as pilot:
+        await start(app, pilot)
+        assert app.glass.active and app.glass.errors == 0, app.glass.last_error
+        assert _border.BORDER_CHARS["round"][0][0] == "╭", "the borders keep their glyphs"
+        assert any("border" in note for note in notes), notes
 
 
 def test_terminal_write_sends_through_textual_s_writer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -715,8 +758,70 @@ def test_mixins_add_no_attribute_textual_has() -> None:
     instance = set(vars(GlassSample())) - set(vars(Sample()))
     assert instance == {"glass"} and not hasattr(App, "glass")
     pixel = {name for name in vars(PixelMixin) if not dunder.match(name)}
-    assert pixel == {"pixel_items", "glass", "glass_on"}
-    assert not any(hasattr(Widget, name) for name in pixel)
+    assert pixel == {"pixel_items", "glass", "glass_on", "render_lines"}
+    assert not any(hasattr(Widget, name) for name in pixel - {"render_lines"}), "render_lines is wrapped on purpose"
+
+
+# -- hard exits ----------------------------------------------------------------------------
+
+
+def test_hard_exit_entries_are_keyed_replaced_removed_and_written_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from textual_glass import hard_exit, on_hard_exit
+
+    written: list[bytes] = []
+    monkeypatch.setattr(hard_exit, "_write", written.append)
+    monkeypatch.setattr(hard_exit, "_install", lambda: None)
+    monkeypatch.setattr(hard_exit, "_entries", {})
+    on_hard_exit("t.one", "1")
+    on_hard_exit("t.two", "2")
+    on_hard_exit("t.one", "3")  # replaced in place: it keeps its turn
+    on_hard_exit("t.three", "4")
+    on_hard_exit("t.three", None)  # removed
+    on_hard_exit("t.never", None)  # removing a key that isn't there is fine
+    hard_exit._write_entries()
+    hard_exit._write_entries()
+    assert written == [b"32"], "in registration order, and only once"
+
+
+def test_hard_exit_signal_handler_writes_chains_then_ends_like_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    from textual_glass import hard_exit
+
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(hard_exit, "_write", lambda data: calls.append(("write", data)))
+    monkeypatch.setattr(hard_exit, "_entries", {"k": "x"})
+    previous = {signal.SIGTERM: lambda signum, frame: calls.append(("previous", signum)), signal.SIGHUP: signal.SIG_DFL}
+    monkeypatch.setattr(hard_exit, "_previous", previous)
+    monkeypatch.setattr(hard_exit.signal, "signal", lambda signum, handler: calls.append(("handler", signum, handler)))
+    monkeypatch.setattr(hard_exit.os, "kill", lambda pid, signum: calls.append(("kill", signum)))
+    monkeypatch.setattr(hard_exit.os, "_exit", lambda code: calls.append(("exit", code)))
+    hard_exit._on_signal(signal.SIGTERM, None)
+    assert calls == [("write", b"x"), ("previous", signal.SIGTERM), ("handler", signal.SIGTERM, signal.SIG_DFL),
+                     ("kill", signal.SIGTERM), ("exit", 128 + signal.SIGTERM)]
+    calls.clear()
+    hard_exit._on_signal(signal.SIGHUP, None)
+    assert calls == [("handler", signal.SIGHUP, signal.SIG_DFL), ("kill", signal.SIGHUP), ("exit", 128 + signal.SIGHUP)]
+
+
+def test_glass_hard_exit_sequence_deletes_every_glass_image_and_resets_osc_11() -> None:
+    """Ghostty's delete-all keeps images behind placeholders, so the id range glass uses goes too."""
+    from textual_glass.engine import Ids, hard_exit_sequence
+    from textual_glass.testing.kitty_emu import KittyModel
+
+    model = KittyModel()
+    ids = Ids()
+    backdrop, sprite = ids.new(), ids.new()
+    for body in (f"a=t,i={backdrop},f=24,s=1,v=1,q=2;AAAA", f"a=p,i={backdrop},p=1,c=4,r=2,C=1,q=2",
+                 f"a=t,i={sprite},f=24,s=1,v=1,q=2;AAAA", f"a=p,U=1,i={sprite},p=1,c=2,r=1,q=2",
+                 "a=t,i=7,f=24,s=1,v=1,q=2;AAAA", "a=p,U=1,i=7,p=1,c=2,r=1,q=2"):  # 7: another program's image
+        model.apc(body.encode(), (0, 0))
+    data = hard_exit_sequence(terminal_background=True)
+    for body in re.findall(r"\x1b_G([^\x1b]*)\x1b\\", data):
+        model.apc(body.encode(), (0, 0))
+    assert set(model.images) == {7} and not model.errors
+    assert data.endswith(kitty.RESET_DEFAULT_BACKGROUND)
+    assert kitty.RESET_DEFAULT_BACKGROUND not in hard_exit_sequence(terminal_background=False)
 
 
 # -- detection ---------------------------------------------------------------------------
@@ -753,7 +858,9 @@ def test_no_tty_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not detect_mod.detect({"TERM": "xterm-ghostty"}).enabled
 
 
-def _answering_pty(reply: bytes | None) -> tuple[str, threading.Thread, int]:
+def _answering_pty(reply: bytes | None, *later: tuple[float, bytes]) -> tuple[str, threading.Thread, int]:
+    """A pty whose other end answers the query with ``reply`` at once, then each
+    ``(delay, data)`` in ``later``, ``delay`` seconds after the query arrived."""
     master, slave = os.openpty()
     path = os.ttyname(slave)
 
@@ -765,12 +872,29 @@ def _answering_pty(reply: bytes | None) -> tuple[str, threading.Thread, int]:
                 data += os.read(master, 1024)
             except OSError:
                 return
+        asked = time.monotonic()
         if reply is not None:
             os.write(master, reply)
+        for delay, more in later:
+            time.sleep(max(0.0, asked + delay - time.monotonic()))
+            os.write(master, more)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return path, thread, slave
+
+
+def _unread(slave: int) -> bytes:
+    """What is still waiting to be read on the tty (what Textual would read as keys)."""
+    import termios
+
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~termios.ICANON
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    data = b""
+    while select.select([slave], [], [], 0.2)[0]:
+        data += os.read(slave, 1024)
+    return data
 
 
 @pytest.mark.parametrize("reply, expected", [
@@ -784,9 +908,34 @@ def test_query(reply: bytes | None, expected: bool | None) -> None:
     answer = detect_mod.query_terminal(path, timeout=0.3)
     elapsed = time.monotonic() - t0
     thread.join(1)
+    assert _unread(slave) == b""
     os.close(slave)
     assert answer is expected
     assert elapsed < 0.6  # never hangs, even when nothing answers
+
+
+def test_a_late_reply_is_read_by_the_query_not_left_for_textual() -> None:
+    """A reply that comes just after the timeout is drained (and still counts),
+    instead of reaching Textual's input as key presses."""
+    path, thread, slave = _answering_pty(None, (0.36, b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c"))
+    answer = detect_mod.query_terminal(path, timeout=0.3)
+    thread.join(1)
+    left = _unread(slave)
+    os.close(slave)
+    assert answer is True and left == b""
+
+
+def test_a_reply_that_has_started_is_read_to_its_fence() -> None:
+    """The graphics reply came in time, the DA1 fence late: the terminal is answering,
+    so the query waits for the fence (up to a second more) instead of giving up."""
+    path, thread, slave = _answering_pty(b"\x1b_Gi=31;OK\x1b\\", (0.8, b"\x1b[?62;22c"))
+    t0 = time.monotonic()
+    answer = detect_mod.query_terminal(path, timeout=0.3)
+    elapsed = time.monotonic() - t0
+    thread.join(1)
+    left = _unread(slave)
+    os.close(slave)
+    assert answer is True and left == b"" and elapsed < 1.4
 
 
 def test_query_falls_back_when_nothing_answers(tty: None, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,9 +11,10 @@ Hooks:
   single writer thread, so they never interleave with Textual's own output.
 * ``App._end_update``: wrapped per instance, so graphics are written inside
   Textual's synchronized-update frame, just before ``SYNC_END``.
-* ``Driver._writer_thread._queue``: its size, to avoid flooding the writer.
 * ``textual._border.BORDER_CHARS`` and ``get_box``: border glyphs are made
-  blank while glass is on (Textual still draws border titles).
+  blank while glass is on (Textual still draws border titles). Textual reads
+  that table outside any glass code, so it is only patched when it has the
+  shape glass expects (three rows of three glyphs per border type).
 * ``Widget.get_line_filters``: patched on the class so each widget gets its
   own glass line filter (the public ``App.get_line_filters`` cannot tell
   which widget it is filtering).
@@ -65,16 +66,6 @@ def driver_write(app: App, data: str) -> bool:
     return True
 
 
-def writer_backlog(app: App) -> int:
-    """How many writes are waiting in Textual's writer thread (0 if unknown)."""
-    thread = getattr(getattr(app, "_driver", None), "_writer_thread", None)
-    queue = getattr(thread, "_queue", None)
-    try:
-        return int(queue.qsize()) if queue is not None else 0
-    except Exception:  # noqa: BLE001
-        return 0
-
-
 def wrap_end_update(app: App, before: Callable[[], None]) -> Callable[[], None]:
     """Call ``before()`` at the end of every Textual frame, before ``SYNC_END``.
 
@@ -116,19 +107,29 @@ class BorderGlyphs:
     def active(self) -> bool:
         return bool(self._saved)
 
-    def blank(self, types: Iterable[str]) -> None:
-        """Without the private table, borders keep their glyphs (drawn over the glass)."""
+    def blank(self, types: Iterable[str]) -> bool:
+        """Blank the glyphs of these border types. Returns False, and changes
+        nothing, when Textual's table is missing or not the shape glass knows
+        (a dict of three rows of three glyphs): the borders then keep their
+        glyphs, drawn over the glass. Types the table doesn't have are skipped."""
         try:
             from textual import _border
 
+            table = _border.BORDER_CHARS
+            clear = _border.get_box.cache_clear
+            if not isinstance(table, dict) or not callable(clear):
+                return False
+            names = [name for name in types if name in table and name not in self._saved]
+            if not all(_is_box(table[name]) for name in names):
+                return False
             blank_row = (" ", " ", " ")
-            for name in types:
-                if name in _border.BORDER_CHARS and name not in self._saved:
-                    self._saved[name] = _border.BORDER_CHARS[name]
-                    _border.BORDER_CHARS[name] = (blank_row, blank_row, blank_row)
-            _border.get_box.cache_clear()
+            for name in names:
+                self._saved[name] = table[name]
+                table[name] = (blank_row, blank_row, blank_row)
+            clear()
+            return True
         except Exception:  # noqa: BLE001
-            return
+            return False
 
     def restore(self) -> None:
         if not self._saved:
@@ -142,6 +143,13 @@ class BorderGlyphs:
             _border.get_box.cache_clear()
         except Exception:  # noqa: BLE001
             return
+
+
+def _is_box(entry: object) -> bool:
+    """Three rows of three one-character glyphs, as in Textual 8."""
+    return (isinstance(entry, tuple) and len(entry) == 3
+            and all(isinstance(row, tuple) and len(row) == 3
+                    and all(isinstance(glyph, str) and len(glyph) == 1 for glyph in row) for row in entry))
 
 
 # -- per-widget line filters ---------------------------------------------------------
@@ -189,22 +197,22 @@ def remove_filter_provider(app: App) -> None:
 
 
 def visible_widgets(screen: Screen) -> list[tuple[Widget, Region]]:
-    """Widgets on screen in paint order (bottom first), with their clipped regions."""
-    mapping = None
+    """Widgets on screen in paint order (bottom first), with their clipped regions.
+
+    Without the compositor's map (or with one of another shape), every widget
+    with a region, in tree order."""
     compositor = getattr(screen, "_compositor", None)
     if compositor is not None:
         try:
-            mapping = compositor.visible_widgets  # topmost first
+            out = []
+            for widget, (region, clip) in reversed(list(compositor.visible_widgets.items())):  # topmost first
+                visible = region.intersection(clip)
+                if visible:
+                    out.append((widget, visible))
+            return out
         except Exception:  # noqa: BLE001
-            mapping = None
-    if mapping is None:
-        return [(w, w.region) for w in screen.walk_children(Widget) if w.region]
-    out = []
-    for widget, (region, clip) in reversed(list(mapping.items())):
-        visible = region.intersection(clip)
-        if visible:
-            out.append((widget, visible))
-    return out
+            pass
+    return [(w, w.region) for w in screen.walk_children(Widget) if w.region]
 
 
 def visible_region(widget: Widget) -> Region:
