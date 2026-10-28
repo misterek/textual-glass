@@ -20,6 +20,7 @@ from .model import (
     DoneTask,
     Entity,
     EntityState,
+    ErrorReport,
     Event,
     Goal,
     Health,
@@ -34,7 +35,16 @@ from .model import (
     week_stats,
 )
 from .notify import Notifier
-from .provider import Provider, Source, SourceData, StaticProvider, Store, timed_fetch
+from .provider import (
+    Provider,
+    Source,
+    SourceData,
+    StaticProvider,
+    Store,
+    fetch_timeout,
+    poll_delay,
+    timed_fetch,
+)
 from .theme import (
     ORBITAL,
     ORBITAL_NAVY,
@@ -81,9 +91,9 @@ __all__ = [
     "TaskBoard", "Track", "TrackTable",
     "ENTITY_URGENCY", "ORBITAL", "ORBITAL_NAVY", "PALETTE", "SOURCE_COLORS", "SOURCE_NAMES", "WHY_COLORS",
     "Alert", "AlertQueue", "AlertRules", "AttentionItem", "Condition", "DayCount", "DoneTask", "Entity",
-    "EntityState", "Event", "Goal", "Health", "Metrics", "Notifier", "Provider", "Rule", "Snapshot", "Source",
-    "SourceData", "SourceStatus", "StaticProvider", "Store", "Task", "TrackHealth", "TrackItem", "WaitingRule",
-    "WeekStats",
-    "alert_color", "ellipsize", "fmt_age", "fmt_interval", "health_gradient", "load_color", "now", "queue_load",
-    "source_color", "timed_fetch", "urgency_color", "week_stats", "why_color",
+    "EntityState", "ErrorReport", "Event", "Goal", "Health", "Metrics", "Notifier", "Provider", "Rule", "Snapshot",
+    "Source", "SourceData", "SourceStatus", "StaticProvider", "Store", "Task", "TrackHealth", "TrackItem",
+    "WaitingRule", "WeekStats",
+    "alert_color", "ellipsize", "fetch_timeout", "fmt_age", "fmt_interval", "health_gradient", "load_color", "now",
+    "poll_delay", "queue_load", "source_color", "timed_fetch", "urgency_color", "week_stats", "why_color",
 ]

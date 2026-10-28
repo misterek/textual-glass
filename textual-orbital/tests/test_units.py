@@ -195,19 +195,24 @@ def test_store_merges_metrics_and_versions_their_changes() -> None:
     assert Snapshot(T0, metrics={"x": 1.0}) == Snapshot(T0, metrics={"x": 1.0}) and hash(Snapshot(T0, metrics={}))
 
 
-async def test_rules_run_after_every_fetch_and_pages_keep_the_last_change() -> None:
-    """Rules see a fresh snapshot after every fetch, changed or not, taken at that fetch;
-    ``app.snapshot`` (what pages get) keeps the time of the last content change."""
+async def test_rules_run_after_every_fetch_and_every_publish_restamps_the_snapshot() -> None:
+    """Rules see a fresh snapshot after every fetch, changed or not, taken at that fetch.
+    ``app.snapshot`` is re-stamped too (O5), but the pages only get it when the content changed."""
     import asyncio
 
     from textual_orbital import OrbitalApp
 
     seen: list[Snapshot] = []
+    delivered: list[Snapshot] = []
 
     class Record:
         def conditions(self, snapshot: Snapshot) -> Iterator[Condition]:
             seen.append(snapshot)
             return iter(())
+
+    class Board(OrbitalApp):
+        def snapshot_changed(self, snapshot: Snapshot) -> None:
+            delivered.append(snapshot)
 
     async def until(count: int) -> None:
         for _ in range(100):
@@ -216,17 +221,19 @@ async def test_rules_run_after_every_fetch_and_pages_keep_the_last_change() -> N
             await asyncio.sleep(0.02)
         raise AssertionError(f"{len(seen)} rule runs, not {count}")
 
-    app = OrbitalApp(StaticProvider([Src("DK", SourceData(metrics={"disk": 0.5}))]), rules=(Record(),),
-                     glass=False, notify="off")
+    app = Board(StaticProvider([Src("DK", SourceData(metrics={"disk": 0.5}))]), rules=(Record(),),
+                glass=False, notify="off")
     async with app.run_test(size=(40, 10)):
         await until(1)
         first = app.snapshot
         assert first is not None and first.metric("disk") == 0.5 and seen[0].taken_at == first.taken_at
+        version = app.store.content_version
         await asyncio.sleep(0.01)
         app.poll_all()  # the same data again
         await until(2)
         assert seen[1].taken_at > first.taken_at, "the rules ran again, on a snapshot taken at this fetch"
-        assert app.snapshot is not None and app.snapshot.taken_at == first.taken_at, "no change: pages keep theirs"
+        assert app.snapshot is not None and app.snapshot.taken_at == seen[1].taken_at, "re-stamped"
+        assert app.store.content_version == version and delivered == [first], "no change: not delivered again"
 
 
 def test_store_names_sources_without_one() -> None:

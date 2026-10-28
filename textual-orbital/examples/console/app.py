@@ -169,8 +169,11 @@ class MissionConsole(OrbitalApp):
         parts: list[tuple[str, str]] = []
         if self.snoozed:
             parts.append((f"{len(self.snoozed)} snoozed  ", PALETTE["text_faint"]))
-        if self.snapshot is not None:
-            parts.append((f"updated {self.snapshot.taken_at.astimezone():%H:%M}", PALETTE["text_faint"]))
+        # The last good fetch of any source (not the last change, nor the last attempt): it stops
+        # moving when everything fails. At minute resolution, so the minute tick keeps it current.
+        last_ok = max((s.last_ok for s in self.store.statuses() if s.last_ok), default=None)
+        if last_ok is not None:
+            parts.append((f"updated {last_ok.astimezone():%H:%M}", PALETTE["text_faint"]))
         self.query_one("#keys", KeyBar).set_status(parts)
 
     # -- actions -------------------------------------------------------------------------
@@ -205,7 +208,7 @@ class MissionConsole(OrbitalApp):
         self.notify("Refreshing every source", timeout=2)
 
     def action_sources(self) -> None:
-        self.push_screen(SourcesScreen(self.store.statuses()))
+        self.push_screen(SourcesScreen(self.store.statuses(), errors=self.errors))
 
     def on_source_health_clicked(self, message: SourceHealth.Clicked) -> None:
         self.action_sources()

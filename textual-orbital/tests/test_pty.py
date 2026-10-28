@@ -250,6 +250,31 @@ def test_demo_dynamics_raise_every_alert_kind_with_notifications() -> None:
     assert not rp.model.errors and not rp.model.images
 
 
+def test_notifications_pass_through_tmux() -> None:
+    """Under tmux (glass is off there), OSC 777 goes out wrapped in DCS passthrough, inner ESCs
+    doubled, through Textual's writer in one piece; the bell and the title are not wrapped."""
+    steps = [Step(3.0, "start"), Step(0.0, "q", "q")]
+    env = {"TMUX": "/tmp/tmux-501/default,1,0", "TERM_PROGRAM": "tmux", "GHOSTTY_RESOURCES_DIR": "/opt/ghostty"}
+    capture = run_app([*APP, "--static"], steps, size=SIZE, env=env, term="tmux-256color")
+    raw = capture.raw
+    assert capture.code == 0 and b"Traceback" not in raw
+    note = re.search(rb"\x1bPtmux;\x1b\x1b\]777;notify;Mission Console: Needs you;([^\x07]*)\x07\x1b\\", raw)
+    assert note and b"fix-flaky-checkout-test" in note.group(1), "Claude waits at startup: notified through tmux"
+    assert raw[note.end():note.end() + 1] == b"\x07", "then the bell, for tmux itself"
+    assert b"\x1b]777;" not in raw.replace(note.group(0), b""), "never unwrapped"
+    assert b"\x1b]2;\xe2\x97\x89 1 waiting \xc2\xb7 Mission Console\x07" in raw, "the title badge, unwrapped"
+
+
+def test_quitting_never_waits_for_a_hung_fetch() -> None:
+    """Rule 21: a fetch that never returns runs in a daemon thread, so q exits at once. With
+    the old thread pool, the interpreter joined its worker at exit and the process hung."""
+    steps = [Step(2.5, "start"), Step(0.0, "q", "q")]
+    capture = run_app([sys.executable, os.path.join(ROOT, "tests", "hung_app.py")], steps, size=SIZE, timeout=8)
+    assert capture.code == 0, capture.code
+    assert capture.wall - capture.mark_time("q") < 4.0
+    assert b"Traceback" not in capture.raw and b"STUCK" in capture.raw
+
+
 # -- idle cost -------------------------------------------------------------------------------
 
 

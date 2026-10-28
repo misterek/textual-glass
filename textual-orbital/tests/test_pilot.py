@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from textual_orbital import (
     Event,
     EventLog,
     PriorityList,
+    SourceData,
     Track,
     TrackHealth,
     TrackItem,
@@ -53,13 +55,14 @@ def make(speed: float = 1.0, dynamics: bool = False, alerts: bool = False, **kw:
 
 
 async def ready(app: console.MissionConsole, pilot: Any) -> None:
-    """Glass on, every source fetched once, everything settled."""
+    """Glass on, every source fetched once, everything settled, nothing reported."""
     await start(app, pilot)
     for _ in range(60):
         if app.snapshot is not None and all(s.last_ok for s in app.store.statuses()):
             break
         await asyncio.sleep(0.05)
     await idle(app, pilot)
+    assert not app.errors, list(app.errors)
 
 
 def world(app: console.MissionConsole) -> Any:
@@ -308,6 +311,24 @@ async def test_snooze_hides_a_row(output: Output) -> None:
         await pilot.press("u")
         await settle(app, pilot)
         assert first.key in [getattr(r, "key", None) for r in queue.rows]
+
+
+async def test_updated_is_the_last_good_fetch(output: Output) -> None:
+    """The key bar's "updated HH:MM" is the last good fetch of any source: a publish
+    after failed fetches re-stamps the snapshot (O5) but doesn't move it."""
+    app = make()
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        earlier = now() - timedelta(hours=2)
+        for status in app.store.statuses():
+            app.store.apply(status.key, SourceData(), earlier)  # their last good fetch, two hours ago
+            app.store.fail(status.key, "HTTP 503")
+        app._publish(now())
+        app.minute_tick(now())
+        await settle(app, pilot)
+        assert app.snapshot is not None and app.snapshot.taken_at > earlier + timedelta(hours=1)
+        keys = app.query_one("#keys").render_line(0).text
+        assert f"updated {earlier.astimezone():%H:%M}" in keys, keys
 
 
 async def test_detail_help_sources_and_jump(output: Output) -> None:

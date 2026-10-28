@@ -24,7 +24,7 @@ from textual_glass import GlassImage, GlassPanel, LoadedImage, SpriteView
 from textual_glass.sprites import beacon_frames
 
 from ..alerts import alert_color
-from ..model import Alert, SourceStatus
+from ..model import Alert, ErrorReport, SourceStatus
 from ..theme import PALETTE, SOURCE_NAMES, ellipsize, fmt_age, fmt_interval, now
 from .header import HEALTH_COLORS, HEALTH_GLYPHS
 
@@ -66,8 +66,9 @@ class AlertScreen(OrbitalModal):
     """The big popup for an :class:`~textual_orbital.model.Alert`.
 
     Dismisses with the action taken: ``"jump"`` (enter), ``"open"`` (o, only with a ``url``),
-    ``"snooze"`` (s) or ``"dismiss"`` (escape). The hint line offers ``o`` only
-    when the alert has a ``url``.
+    ``"snooze"`` (s) or ``"dismiss"`` (escape), or with ``"resolved"`` when the app
+    closes it (:meth:`close_resolved`). The hint line offers ``o`` only when the
+    alert has a ``url``.
 
     Args:
         alert: What to show.
@@ -112,6 +113,7 @@ class AlertScreen(OrbitalModal):
         self.queued = queued
         self.beacon = beacon
         self.raised = alert.raised_at or now()
+        self.resolved = False  # close as soon as this popup is on top again
 
     def picture(self) -> Widget:
         if self.image is not None:
@@ -166,6 +168,20 @@ class AlertScreen(OrbitalModal):
         if action == "open" and not self.alert.url:
             return  # nothing to open: keep the alert up, as the hint offers no "o"
         self.dismiss(action)
+
+    def close_resolved(self) -> None:
+        """The alert's condition went away: dismiss with ``"resolved"`` now if
+        this popup is on top, or as soon as it is again. (Textual's ``dismiss``
+        on a screen that is not on top pops the one that is.)"""
+        if self.is_active:
+            self.dismiss("resolved")
+        else:
+            self.resolved = True
+
+    def on_screen_resume(self) -> None:
+        if self.resolved:
+            self.resolved = False
+            self.dismiss("resolved")
 
 
 # ==================================================================== detail ==
@@ -309,7 +325,18 @@ class HelpScreen(OrbitalModal):
 
 class SourcesScreen(OrbitalModal):
     """Every data source: health, when it last worked, how often it polls, and
-    the error if it is failing."""
+    the error if it is failing (with when it is tried again); then the app's
+    most recent errors, newest first (pass ``app.errors``).
+
+    Args:
+        statuses: The sources' statuses (``app.store.statuses()``).
+        at: Now (for the ages).
+        errors: What ``OrbitalApp.report_error`` caught (``app.errors``); the
+            newest ``ERRORS_SHOWN`` are listed.
+    """
+
+    #: How many of ``errors`` are listed.
+    ERRORS_SHOWN: ClassVar[int] = 5
 
     BINDINGS: ClassVar[list[BindingType]] = [Binding("escape,h,q,enter", "close", show=False)]
 
@@ -318,10 +345,12 @@ class SourcesScreen(OrbitalModal):
     SourcesScreen.-narrow #sources { width: 96%; }
     """
 
-    def __init__(self, statuses: Sequence[SourceStatus], at: datetime | None = None) -> None:
+    def __init__(self, statuses: Sequence[SourceStatus], at: datetime | None = None,
+                 errors: Sequence[ErrorReport] = ()) -> None:
         super().__init__()
         self.statuses = list(statuses)
         self.at = at or now()
+        self.errors = list(errors)
 
     def compose(self) -> ComposeResult:
         out = Text()
@@ -337,7 +366,20 @@ class SourcesScreen(OrbitalModal):
             out.append(f"every {fmt_interval(s.interval)}  ", style=PALETTE["text_faint"])
             out.append(f"{s.items} items\n" if s.last_ok else "\n", style=PALETTE["text_faint"])
             if s.error:
-                out.append(f"    {s.error}\n", style=PALETTE["red"])
+                out.append(f"    {s.error}", style=PALETTE["red"])
+                if s.next_poll is not None:
+                    tries = f"{s.failures} failures" if s.failures > 1 else "1 failure"
+                    out.append(f"  · {tries}, next try in {fmt_age(s.next_poll - self.at)}",
+                               style=PALETTE["text_faint"])
+                out.append("\n")
+        if self.errors:
+            newest = self.errors[::-1][:self.ERRORS_SHOWN]
+            out.append(f"\nAPP ERRORS ({len(self.errors)})\n", style=f"bold {PALETTE['red']}")
+            for report in newest:
+                out.append(f"  {report.at.astimezone():%H:%M}  ", style=PALETTE["text_dim"])
+                out.append(f"{report.where}  ", style=f"bold {PALETTE['text']}")
+                out.append(report.message, style=PALETTE["text_soft"])
+                out.append(f"  ×{report.count}\n" if report.count > 1 else "\n", style=PALETTE["text_faint"])
         with GlassPanel(title="● SOURCE HEALTH", accent=PALETTE["green"], accent_2=PALETTE["accent_2"], dialog=True,
                         id="sources"):
             yield Static(out)
