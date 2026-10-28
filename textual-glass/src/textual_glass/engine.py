@@ -63,7 +63,9 @@ from .sprites import dim_frame
 
 if TYPE_CHECKING:
     from textual.app import App
+    from textual.geometry import Region
     from textual.screen import Screen
+    from textual.strip import Strip
     from textual.widget import Widget
 
 MOTIONS = ("minimal", "subtle", "full")
@@ -80,6 +82,8 @@ MAX_PIXELS = 2_400_000  # the backdrop is rendered at most this big; the termina
 SYNC_FRACTION = 0.16    # static changes smaller than this are redrawn inside the frame
 FULL_FRACTION = 0.5     # beyond this, re-render the whole layer
 SPRITE_MAX_PX = 192     # sprite frames are rendered at most this big per side
+SPRITE_HOLD = 2         # Textual frames a new sprite is kept unshown, while its widgets redraw to show it
+SPRITE_RETRY = (5.0, 30.0, 300.0)  # a sprite whose maker raised is tried again after these delays (then every 300 s)
 PAGE_CACHE = 4          # pages whose backdrops stay in the terminal for instant switches
 
 ERROR_LIMIT = 5         # more errors than this within ERROR_WINDOW seconds turn glass off...
@@ -201,6 +205,30 @@ def _within(items: tuple[Item, ...], rect: Rect, grid: Grid) -> list[Item]:
     return [item for item in items if _overlaps(item.visible_bbox(grid), rect)]
 
 
+NO_IDS: frozenset[int] = frozenset()
+
+
+def placeholder_ids(strip: Strip) -> frozenset[int]:
+    """The image ids of the placeholder cells in a line (each run's id is its foreground colour)."""
+    ids: set[int] | None = None
+    for text, style, _ in strip:
+        if text and text[0] == kitty.PLACEHOLDER and style is not None and style.color is not None:
+            rgb = style.color.triplet
+            if rgb is not None:
+                if ids is None:
+                    ids = set()
+                ids.add(rgb[0] << 16 | rgb[1] << 8 | rgb[2])
+    return frozenset(ids) if ids else NO_IDS
+
+
+def _attached(user: Any) -> bool:
+    """Is ``user`` (a widget, usually) still in the app? Objects that can't tell count as attached."""
+    try:
+        return bool(getattr(user, "is_attached", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ================================================================ layers ==
 
 
@@ -232,8 +260,9 @@ class Sprite:
     cols: int
     rows: int
     ready: bool = False
-    waiters: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
-    users: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
+    hold: int = 0  # Textual frames to keep it although nothing shows it yet (it just landed)
+    waiters: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)  # refreshed when it lands
+    users: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)    # every widget that asked for it
 
 
 @dataclass
@@ -284,7 +313,7 @@ class GlassEngine:
         self.errors = 0  # every error since the app started
         #: Glass turned itself off after too many errors and tries again in this many seconds.
         self.retry_in: float | None = None
-        self.clock: Callable[[], float] = time.monotonic  # the error budget's clock
+        self.clock: Callable[[], float] = time.monotonic  # for the error budget and retries
         self._error_times: deque[float] = deque()  # errors within the last ERROR_WINDOW seconds
         self._retries = 0  # automatic retries in a row
         self._retried_at: float | None = None
@@ -296,6 +325,10 @@ class GlassEngine:
         self.frames_synced = 0
         #: Small terminal-played images behind placeholder cells (see :meth:`sprite`).
         self.sprites: dict[tuple[Any, ...], Sprite] = {}
+        #: Which sprite images each pixel widget's lines show: widget -> {line: image ids}.
+        self._showing: weakref.WeakKeyDictionary[Any, dict[int, frozenset[int]]] = weakref.WeakKeyDictionary()
+        #: Sprites whose maker raised: full key -> (failures in a row, when to try again).
+        self._sprite_failures: dict[tuple[Any, ...], tuple[int, float]] = {}
         #: Uploads kept for reuse (``GlassImage(cache_key=...)``): key -> image id.
         self.image_cache: dict[tuple[Any, ...], int] = {}
         #: Backdrops of other pages, unplaced but kept in the terminal (page key -> layer).
@@ -423,6 +456,8 @@ class GlassEngine:
         self.layers.clear()
         self.page_cache.clear()
         self.sprites.clear()
+        self._showing.clear()
+        self._sprite_failures.clear()
         self.image_cache.clear()
         self.dimmables.clear()
         self.dimmed.clear()
@@ -483,6 +518,7 @@ class GlassEngine:
         try:
             try:
                 self._sync(time.monotonic())
+                self._sweep_sprites()
             except Exception as error:  # noqa: BLE001
                 self._failed(error)  # may turn glass off: its deletes go into this frame too
             self.writer.drain_into_frame()
@@ -1115,6 +1151,15 @@ class GlassEngine:
         frame (gapless, so playback skips it) for while a popup covers it.
         Write ``kitty.placeholder_row(row, cols)`` in ``kitty.id_color(image_id)``
         to show it; returns None while glass is off.
+
+        Pass the widget that shows it as ``waiter``: the sprite is deleted from
+        the terminal once no such widget shows it any more (it switched to
+        another key or size, or it was removed). A ``PixelMixin`` widget is
+        checked line by line, from what it renders; any other widget holds its
+        sprites until it is removed. A sprite asked for without a ``waiter`` is
+        kept until glass turns off. If ``make`` raises, the error is counted
+        and the sprite is tried again on a later call, after 5 s, 30 s, then
+        every 5 minutes (``None`` until then, so the widget's fallback shows).
         """
         if not self.active or cols < 1 or rows < 1 or cols > len(kitty.DIACRITICS) or rows > len(kitty.DIACRITICS):
             return None
@@ -1131,6 +1176,9 @@ class GlassEngine:
             if waiter is not None:
                 found.waiters.add(waiter)
             return None
+        failure = self._sprite_failures.get(full_key)
+        if failure is not None and self.clock() < failure[1]:
+            return None  # its maker raised a moment ago
         image_id = self.ids.new()
         sprite = self.sprites[full_key] = Sprite(image_id, cols, rows)
         if waiter is not None:
@@ -1138,23 +1186,31 @@ class GlassEngine:
             sprite.users.add(waiter)
         factor = self.dim_factor
 
-        def work() -> tuple[str, int]:
-            frames, gap = make(width, height)
-            dim = dim_frame(frames[0], factor)  # gapless: playback never shows it
-            if len(frames) == 1:
-                body = kitty.transmit_raw(image_id, width, height, frames[0])
-                body += kitty.add_frame(image_id, width, height, dim, gap_ms=-1)
-            else:
-                body = kitty.animation(image_id, width, height, frames, gap, gapless=[dim])
-            return body + kitty.place_virtual(image_id, cols, rows), len(frames)
+        def work() -> tuple[str, int] | tuple[None, Exception]:
+            try:
+                frames, gap = make(width, height)
+                dim = dim_frame(frames[0], factor)  # gapless: playback never shows it
+                if len(frames) == 1:
+                    body = kitty.transmit_raw(image_id, width, height, frames[0])
+                    body += kitty.add_frame(image_id, width, height, dim, gap_ms=-1)
+                else:
+                    body = kitty.animation(image_id, width, height, frames, gap, gapless=[dim])
+                return body + kitty.place_virtual(image_id, cols, rows), len(frames)
+            except Exception as error:  # noqa: BLE001 - the app's maker: retried later (see done)
+                return None, error
 
-        def done(result: tuple[str, int]) -> None:
-            commands, count = result
+        def done(result: tuple[str, int] | tuple[None, Exception]) -> None:
             if self.sprites.get(full_key) is not sprite:
                 return
+            if result[0] is None:
+                self._sprite_failed(full_key, sprite, result[1])
+                return
+            commands, count = result
+            self._sprite_failures.pop(full_key, None)
             self.writer.queue(commands)
             self.dimmables[image_id] = Dimmable(count + 1, count > 1, sprite.users)
             sprite.ready = True
+            sprite.hold = SPRITE_HOLD
             for widget in list(sprite.waiters):
                 try:
                     widget.refresh()
@@ -1164,6 +1220,65 @@ class GlassEngine:
 
         self.background_job(work, done)
         return None
+
+    def _sprite_failed(self, full_key: tuple[Any, ...], sprite: Sprite, error: Exception) -> None:
+        """Its maker raised: drop it (nothing was uploaded) and allow a new try after a delay."""
+        del self.sprites[full_key]
+        self.ids.free(sprite.image_id)
+        failures = self._sprite_failures.pop(full_key, (0, 0.0))[0] + 1
+        delay = SPRITE_RETRY[min(failures, len(SPRITE_RETRY)) - 1]
+        self._sprite_failures[full_key] = (failures, self.clock() + delay)
+        while len(self._sprite_failures) > 64:
+            del self._sprite_failures[next(iter(self._sprite_failures))]
+        self._failed(error)
+
+    def _note_lines(self, widget: Any, crop: Region, strips: list[Strip]) -> None:
+        """What ``widget`` just rendered (``PixelMixin.render_lines``): which sprite
+        images its lines show. Lines outside ``crop`` keep what they showed before
+        (Textual still has them cached), and so does a line cropped narrower than
+        the widget: its hidden part may still hold a placeholder."""
+        lines = self._showing.get(widget)
+        if lines is None:
+            lines = self._showing[widget] = {}
+        width, height = widget.outer_size
+        whole = crop.x == 0 and crop.width >= width
+        for y, line in enumerate(strips, crop.y):
+            ids = placeholder_ids(line)
+            if not whole:
+                ids |= lines.get(y, NO_IDS)
+            if ids:
+                lines[y] = ids
+            else:
+                lines.pop(y, None)
+        for y in [y for y in lines if y >= height]:
+            del lines[y]
+
+    def _shown(self, sprite: Sprite) -> bool:
+        """Does a widget that asked for ``sprite`` still show it (or wait for it)?"""
+        if not sprite.users:
+            return True  # asked for without a waiter: kept until glass turns off
+        for user in list(sprite.users):
+            if not _attached(user):
+                continue
+            lines = self._showing.get(user)
+            if not sprite.ready or lines is None:  # waiting for the upload, or a widget that doesn't report lines
+                return True
+            if any(sprite.image_id in ids for ids in lines.values()):
+                return True
+        return False
+
+    def _sweep_sprites(self) -> None:
+        """At the end of each Textual frame: delete the sprites no widget shows any more."""
+        for full_key, sprite in list(self.sprites.items()):
+            if sprite.hold > 0:
+                sprite.hold -= 1
+            elif not self._shown(sprite):
+                del self.sprites[full_key]
+                if sprite.ready:  # uploaded (an upload still in the worker is dropped when it lands)
+                    self.writer.queue(kitty.delete(sprite.image_id))
+                self.ids.free(sprite.image_id)
+                self.dimmables.pop(sprite.image_id, None)
+                self.dimmed.discard(sprite.image_id)
 
     # -- dimming placeholder images under popups (rule 18) ------------------------------------
 
@@ -1184,8 +1299,13 @@ class GlassEngine:
         top = screens[-1] if len(screens) > 1 else None
         want: set[int] = set()
         if top is not None:
+            live = self.ids.live
             for image_id, dimmable in self.dimmables.items():
+                if image_id not in live:
+                    continue
                 for user in list(dimmable.users):
+                    if not _attached(user):
+                        continue
                     try:
                         screen = user.screen
                     except Exception:  # noqa: BLE001 - detached

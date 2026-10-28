@@ -742,8 +742,8 @@ def test_mixins_add_no_attribute_textual_has() -> None:
     instance = set(vars(GlassSample())) - set(vars(Sample()))
     assert instance == {"glass"} and not hasattr(App, "glass")
     pixel = {name for name in vars(PixelMixin) if not dunder.match(name)}
-    assert pixel == {"pixel_items", "glass", "glass_on"}
-    assert not any(hasattr(Widget, name) for name in pixel)
+    assert pixel == {"pixel_items", "glass", "glass_on", "render_lines"}
+    assert not any(hasattr(Widget, name) for name in pixel - {"render_lines"}), "render_lines is wrapped on purpose"
 
 
 # -- detection ---------------------------------------------------------------------------
