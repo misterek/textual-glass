@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -108,6 +110,7 @@ def test_clean_exit_and_protocol_hygiene(tour: tuple[Capture, dict[str, Replay]]
     leave = raw.rfind(b"\x1b[?1049l")
     assert leave > raw.rfind(b"\x1b_G"), "graphics after leaving the alt screen"
     assert raw.rfind(b"\x1b]111\x07") > raw.rfind(b"\x1b]11;#"), "the default background is reset"
+    assert b"d=A" not in raw and b"d=R" not in raw, "a clean exit leaves the hard-exit cleanup unused"
 
 
 def test_everything_sits_below_cell_backgrounds(tour: tuple[Capture, dict[str, Replay]]) -> None:
@@ -324,6 +327,101 @@ def test_screenshots_are_written_for_the_named_steps(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="exit code 3"):  # a failed run is an error, not a picture
         shoot([sys.executable, "-c", "raise SystemExit(3)"], ROOT, RESIZED, [Step(0.5, "start")], ("start",), out)
     assert os.listdir(out) == ["x_90x28_start.png"]
+
+
+# -- hard exits ------------------------------------------------------------------------------
+
+HARD_EXIT_SCRIPT = '''
+import os, signal, sys, time
+from textual_glass import on_hard_exit
+mode = sys.argv[1]
+if mode == "chain":
+    signal.signal(signal.SIGTERM, lambda signum, frame: os.write(2, b"<previous>"))
+if mode == "nohup":
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+on_hard_exit("t.one", "<one>")
+on_hard_exit("t.two", "<two>")
+on_hard_exit("t.one", "<ONE>")
+on_hard_exit("t.three", "<three>")
+on_hard_exit("t.three", None)
+if mode == "clean":
+    on_hard_exit("t.one", None)
+    on_hard_exit("t.two", None)
+if mode in ("atexit", "clean"):
+    sys.exit(0)
+open("ready", "w").close()
+time.sleep(20)
+'''
+
+
+@pytest.mark.parametrize("mode, signums, code, expected", [
+    ("plain", [signal.SIGTERM], -signal.SIGTERM, b"<ONE><two>"),
+    ("plain", [signal.SIGHUP], -signal.SIGHUP, b"<ONE><two>"),
+    ("chain", [signal.SIGTERM], -signal.SIGTERM, b"<ONE><two><previous>"),
+    ("nohup", [signal.SIGHUP, signal.SIGTERM], -signal.SIGTERM, b"<ONE><two>"),
+    ("atexit", [], 0, b"<ONE><two>"),
+    ("clean", [], 0, b""),
+])
+def test_on_hard_exit_writes_on_signals_and_at_exit(tmp_path: Path, mode: str, signums: list[int], code: int,
+                                                    expected: bytes) -> None:
+    """No app, no glass: SIGTERM and SIGHUP write the entries, call the handler that was there
+    before, and end the process as the default would; an ignored signal stays ignored; an
+    interpreter exit writes whatever is still registered."""
+    script = tmp_path / "script.py"
+    script.write_text(HARD_EXIT_SCRIPT)
+
+    def probe(label: str, pid: int) -> None:
+        if not signums:
+            return
+        deadline = time.monotonic() + 15
+        while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        for signum in signums:
+            os.kill(pid, signum)
+            time.sleep(0.3)
+
+    capture = harness.run_app([sys.executable, str(script), mode], [Step(0.2, "signal")], str(tmp_path),
+                              size=(40, 10), timeout=20, probe=probe)
+    out = capture.raw
+    assert capture.code == code, (capture.code, out[-300:])
+    assert b"<three>" not in out and b"<one>" not in out
+    if expected:
+        assert expected in out and out.count(b"<ONE>") == 1
+    else:
+        assert b"<ONE>" not in out and b"<two>" not in out
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_hard_exit_still_cleans_the_terminal(signum: int) -> None:
+    """Killed with sprites on screen: OSC 111 and every glass image deleted, the
+    sprites behind placeholders included (Ghostty's delete-all keeps those)."""
+    def probe(label: str, pid: int) -> None:
+        if label == "kill":
+            os.kill(pid, signum)
+
+    steps = [Step(3.0, "start"), Step(0.0, "pixels", "2"), Step(2.0, "kill")]
+    capture = run_app(SHOWCASE, steps, size=RESIZED, timeout=10, probe=probe)
+    raw = capture.raw
+    assert capture.code == -signum, capture.code
+    assert raw.rfind(b"\x1b]111\x07") > raw.rfind(b"\x1b]11;#"), "the default background is reset"
+    rp = Replay(*RESIZED)
+    sprites = set()
+    for _, data in capture.chunks:
+        rp.feed(data)
+        sprites |= {i for (i, _), p in rp.model.placements.items() if p["virtual"]}
+    assert sprites, "a sprite was on screen"
+    assert not rp.model.images and not rp.model.errors, rp.model.errors[:3]
+
+
+def test_a_hard_exit_without_glass_writes_no_graphics() -> None:
+    def probe(label: str, pid: int) -> None:
+        if label == "kill":
+            os.kill(pid, signal.SIGTERM)
+
+    capture = run_app(SHOWCASE, [Step(3.0, "kill")], size=RESIZED, timeout=10, probe=probe,
+                      env={"TEXTUAL_GLASS": "off"})
+    assert capture.code == -signal.SIGTERM
+    assert graphics_in(capture.raw) == 0 and b"\x1b]111" not in capture.raw
 
 
 STRESS = (

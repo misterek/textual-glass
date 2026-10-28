@@ -56,6 +56,7 @@ from . import backdrop, kitty
 from .detection import Support, detect
 from .effects import Effects
 from .filter import NO_RULES, GlassFilter, Rules
+from .hard_exit import on_hard_exit
 from .palette import Palette, hex_of
 from .render import Box, Canvas, Grid, Item, paint, to_u8
 from .scene import GLASS_EDGES, PixelContext, Scene, Tweens, build, rules_for, visible_screens
@@ -100,14 +101,16 @@ Rect = tuple[int, int, int, int]
 class Ids:
     """Image ids below 2**24, so a placeholder's 24-bit colour holds a whole id."""
 
+    FIRST, LAST = 1 << 20, (1 << 24) - 1  # every id glass hands out is in this range
+
     def __init__(self) -> None:
-        self._next = random.randrange(1 << 20, (1 << 24) - (1 << 20))
+        self._next = random.randrange(self.FIRST, self.LAST + 1 - self.FIRST)
         self.live: set[int] = set()
 
     def new(self) -> int:
         self._next += 1
-        if self._next >= (1 << 24) - 1:
-            self._next = 1 << 20
+        if self._next >= self.LAST:
+            self._next = self.FIRST
         self.live.add(self._next)
         return self._next
 
@@ -150,6 +153,23 @@ class Writer:
         if data and hooks.driver_write(self.app, data):
             self.bytes_sent += len(data)
             self.commands += data.count("\x1b_G")
+
+
+EXIT_KEY = "textual-glass"  # glass's entry in on_hard_exit
+
+
+def hard_exit_sequence(terminal_background: bool) -> str:
+    """What glass leaves for a hard exit (``on_hard_exit``): every image it may have
+    made deleted, and the default background reset (OSC 111).
+
+    It starts with a string terminator, which ends an escape sequence the writer
+    thread may have left half-written, and sends delete-all twice: the first
+    graphics command after an unfinished chunked transfer is taken as its last
+    chunk (rule 3). Ghostty's delete-all keeps images behind placeholders (sprites,
+    ``GlassImage``), so the range of ids glass uses is deleted as well.
+    """
+    data = "\x1b\\" + kitty.delete_all() * 2 + kitty.delete_range(Ids.FIRST, Ids.LAST)
+    return data + (kitty.RESET_DEFAULT_BACKGROUND if terminal_background else "")
 
 
 def terminal_cell_pixels() -> tuple[float, float, bool]:
@@ -400,6 +420,8 @@ class GlassEngine:
             self._timer = app.set_interval(1 / 60, self.tick, pause=True, name="textual-glass")
         if self.options.terminal_background:
             self.writer.queue(kitty.set_default_background(hex_of(self.palette.mid_background)))
+        if not app.is_headless:  # a real terminal: clean it up even if the process is killed
+            on_hard_exit(EXIT_KEY, hard_exit_sequence(self.options.terminal_background))
         self._refresh_all()
         for widget in list(self._images.values()):
             widget.glass_changed()
@@ -415,6 +437,7 @@ class GlassEngine:
             return
         self._delete_everything()
         self.active = False
+        on_hard_exit(EXIT_KEY, None)
         self._session += 1
         self.pending_jobs = 0  # queued jobs are cancelled below; a running one is dropped when it lands
         hooks.remove_filter_provider(self.app)
@@ -438,6 +461,7 @@ class GlassEngine:
         if self.active:
             self._delete_everything()
             self.active = False
+            on_hard_exit(EXIT_KEY, None)
             self._session += 1
             hooks.remove_filter_provider(self.app)
             self._borders.restore()

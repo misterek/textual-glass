@@ -746,6 +746,68 @@ def test_mixins_add_no_attribute_textual_has() -> None:
     assert not any(hasattr(Widget, name) for name in pixel - {"render_lines"}), "render_lines is wrapped on purpose"
 
 
+# -- hard exits ----------------------------------------------------------------------------
+
+
+def test_hard_exit_entries_are_keyed_replaced_removed_and_written_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from textual_glass import hard_exit, on_hard_exit
+
+    written: list[bytes] = []
+    monkeypatch.setattr(hard_exit, "_write", written.append)
+    monkeypatch.setattr(hard_exit, "_install", lambda: None)
+    monkeypatch.setattr(hard_exit, "_entries", {})
+    on_hard_exit("t.one", "1")
+    on_hard_exit("t.two", "2")
+    on_hard_exit("t.one", "3")  # replaced in place: it keeps its turn
+    on_hard_exit("t.three", "4")
+    on_hard_exit("t.three", None)  # removed
+    on_hard_exit("t.never", None)  # removing a key that isn't there is fine
+    hard_exit._write_entries()
+    hard_exit._write_entries()
+    assert written == [b"32"], "in registration order, and only once"
+
+
+def test_hard_exit_signal_handler_writes_chains_then_ends_like_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    from textual_glass import hard_exit
+
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(hard_exit, "_write", lambda data: calls.append(("write", data)))
+    monkeypatch.setattr(hard_exit, "_entries", {"k": "x"})
+    previous = {signal.SIGTERM: lambda signum, frame: calls.append(("previous", signum)), signal.SIGHUP: signal.SIG_DFL}
+    monkeypatch.setattr(hard_exit, "_previous", previous)
+    monkeypatch.setattr(hard_exit.signal, "signal", lambda signum, handler: calls.append(("handler", signum, handler)))
+    monkeypatch.setattr(hard_exit.os, "kill", lambda pid, signum: calls.append(("kill", signum)))
+    monkeypatch.setattr(hard_exit.os, "_exit", lambda code: calls.append(("exit", code)))
+    hard_exit._on_signal(signal.SIGTERM, None)
+    assert calls == [("write", b"x"), ("previous", signal.SIGTERM), ("handler", signal.SIGTERM, signal.SIG_DFL),
+                     ("kill", signal.SIGTERM), ("exit", 128 + signal.SIGTERM)]
+    calls.clear()
+    hard_exit._on_signal(signal.SIGHUP, None)
+    assert calls == [("handler", signal.SIGHUP, signal.SIG_DFL), ("kill", signal.SIGHUP), ("exit", 128 + signal.SIGHUP)]
+
+
+def test_glass_hard_exit_sequence_deletes_every_glass_image_and_resets_osc_11() -> None:
+    """Ghostty's delete-all keeps images behind placeholders, so the id range glass uses goes too."""
+    from textual_glass.engine import Ids, hard_exit_sequence
+    from textual_glass.testing.kitty_emu import KittyModel
+
+    model = KittyModel()
+    ids = Ids()
+    backdrop, sprite = ids.new(), ids.new()
+    for body in (f"a=t,i={backdrop},f=24,s=1,v=1,q=2;AAAA", f"a=p,i={backdrop},p=1,c=4,r=2,C=1,q=2",
+                 f"a=t,i={sprite},f=24,s=1,v=1,q=2;AAAA", f"a=p,U=1,i={sprite},p=1,c=2,r=1,q=2",
+                 "a=t,i=7,f=24,s=1,v=1,q=2;AAAA", "a=p,U=1,i=7,p=1,c=2,r=1,q=2"):  # 7: another program's image
+        model.apc(body.encode(), (0, 0))
+    data = hard_exit_sequence(terminal_background=True)
+    for body in re.findall(r"\x1b_G([^\x1b]*)\x1b\\", data):
+        model.apc(body.encode(), (0, 0))
+    assert set(model.images) == {7} and not model.errors
+    assert data.endswith(kitty.RESET_DEFAULT_BACKGROUND)
+    assert kitty.RESET_DEFAULT_BACKGROUND not in hard_exit_sequence(terminal_background=False)
+
+
 # -- detection ---------------------------------------------------------------------------
 
 
