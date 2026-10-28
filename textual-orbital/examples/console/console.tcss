@@ -1,0 +1,59 @@
+/* Mission Console layout.
+   Breakpoints (set on the screen by OrbitalApp):
+     width  -narrow <80, -compact 80-111, -regular 112-139, -wide 140+
+     height -short <25, -mid 25-37, -tall 38+
+   Designed first for a ~90x28 corner window. */
+
+Screen { layout: vertical; }
+#pages { height: 1fr; }
+Page { height: 1fr; }
+
+/* ------------------------------------------------------------- console -- */
+#beacons-panel { height: 4; padding: 0; }
+#beacons { height: 2; }
+#console-main { height: 1fr; }
+#queue-panel { width: 1fr; height: 1fr; }
+#console-side { width: 34; height: 1fr; }
+#gauges-panel { height: 8; }
+#gauges { height: 1fr; }
+#track-panel { height: 1fr; }
+#preview-panel { height: 10; display: none; }
+Screen.-wide.-tall #preview-panel { display: block; }
+#strip-panel { height: 3; display: none; }
+#track-strip { height: 1; }
+
+Screen.-regular #console-side { width: 44; }
+Screen.-wide #console-side { width: 58; }
+Screen.-tall #gauges-panel { height: 11; }
+
+/* narrow: the side column folds into a one-line track strip */
+Screen.-narrow #console-side { display: none; }
+Screen.-narrow #strip-panel { display: block; }
+/* short: one-line beacons */
+Screen.-short #beacons-panel { height: 3; }
+Screen.-short #beacons { height: 1; }
+Screen.-short #gauges-panel { height: 7; }
+
+/* ------------------------------------------------------------ releases -- */
+#release-track-panel { height: 13; }
+#release-table-panel { height: 1fr; }
+Screen.-short #release-track-panel { height: 9; }
+Screen.-tall #release-track-panel { height: 15; }
+
+/* ---------------------------------------------------------------- week -- */
+#tiles { height: 9; }
+#log-panel { height: 1fr; }
+#t-incidents { display: none; }
+Screen.-wide #t-incidents { display: block; }
+Screen.-short #tiles { height: 7; }
+Screen.-tall #tiles { height: 12; }
+
+/* --------------------------------------------------------------- board -- */
+#goals-panel { height: 10; }
+#arcs { height: 1fr; }
+#board-bottom { height: 1fr; }
+#tasks-panel { width: 3fr; height: 1fr; }
+#done-panel { width: 2fr; height: 1fr; }
+Screen.-narrow #done-panel { display: none; }
+Screen.-short #goals-panel { height: 8; }
+Screen.-tall #goals-panel { height: 14; }

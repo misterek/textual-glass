@@ -1,0 +1,146 @@
+# Working on textual-glass
+
+Read [`README.md`](README.md) first: it says what textual-glass does and documents its public API. The rules that keep it working in Ghostty, the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything here. This file covers where things live, how to add support for a stock widget, a pixel widget, an item or a sprite, the theme variables glass reads, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
+
+## Where things live
+
+Modules in `src/textual_glass/`:
+
+| Module | What it does |
+| --- | --- |
+| `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `detect`, `MOTIONS`. |
+| `glass.py` | The `Glass` mixin (`class MyApp(Glass, App)`): the `GLASS_*` options, `f9`/`shift+f9`, the palette's "Glass: ..." commands, detection before the driver starts, `GLASS_CSS` (transparent modals), `terminal_write`. |
+| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites, dimming placeholder images under popups, the image cache, `background_job`. The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`...). |
+| `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin`, `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
+| `render.py` | The drawing model, no Textual imports: `Grid` (cells to layer pixels), `Canvas`, the `Item` base class (`bbox`, `draw`, `window`, `diff_boxes`, `dynamic`, `edge`), `paint`, `to_u8`, colour and shape helpers. |
+| `items.py` | Every item, no Textual imports. Stock chrome: `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Pill`, `Badge`, `Progress`, `Thumb`. Instruments: `HeaderBar`, `Rule`, `Ring`, `Signal`, `Meter`, `Area`, `Bars`, `Lane`, `Dot`, `Spine`. |
+| `sprites.py` | Frame makers, no Textual imports: scrims (`solid`, `solid_frames`), `beacon_frames`, `pulse_frames`, the `full` motion effects (`halo_frames`, `glint_frames`, `shimmer_frames`), `radial_mask`, `edge_fade`, `dim_frame`. |
+| `backdrop.py` | The backdrop painters, no Textual imports: `gradient` and `nebula`; `draw` picks one by `palette.backdrop`. |
+| `palette.py` | `Palette.from_app`: the theme's colours and glass's theme variables as RGB; colour helpers (`mix`, `lighten`, `hue_shift`, `border_pair`, `hex_of`, `rgb`). |
+| `filter.py` | `GlassFilter` and `Rules`: the per-widget line filter that turns structural backgrounds into the terminal default, blanks pixel-drawn scrollbars and bars, and dims the screen under a modal (leaving placeholder colours alone). |
+| `effects.py` | Popup scrims (fades, recolouring) and the `full` motion ambient effects. |
+| `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation`, edits, placements, placeholders, delete, OSC 11. |
+| `detection.py` | Whether to use glass. Runs before Textual's driver reads input. |
+| `images.py` | `load_image` and `LoadedImage` (Pillow, the `images` extra). |
+| `_textual_hooks.py` | **Every** use of Textual's private API, each failing soft (rule 7). Nothing else may touch private Textual attributes. |
+| `widgets/base.py` | `PixelWidget`, `SelectList`, `Tween`, and the text helpers `strip`, `fit`, `placeholder_parts`, `text_meter`, `tone`, `ellipsize`, `hex_colour`. |
+| `widgets/panel.py` | `GlassPanel`. |
+| `widgets/instruments.py` | `RingGauge`, `Telemetry`, `StatValue`, `StatTile`, `ProgressArc`, `SpriteView`, `InfoCard`. |
+| `widgets/image.py` | `GlassImage`: placeholders with glass, half blocks without; `cache_key`; the dimmed gapless frame. |
+| `testing/harness.py` | The pty runner and replay (`run_app`, `Step`, `replay_steps`, `Replay`, `graphics_in`). |
+| `testing/kitty_emu.py` | `KittyModel`, a model of Ghostty 1.4's kitty graphics rules, and `composite`, which draws the approximate PNGs. |
+| `testing/pilot_helpers.py` | `Output`, `start`, `settle`, `idle` for pilot tests. |
+
+Elsewhere in `textual-glass/`:
+
+| Path | What it is |
+| --- | --- |
+| `tests/sample_app.py` | A small stock app with a `RingGauge`, a `SpriteView`, a `GlassImage`, a modal and two "pages". The pilot tests use it; run it with `uv run python tests/sample_app.py`. |
+| `tests/test_*.py`, `tests/conftest.py` | See [Tests](#tests). `conftest.py` has the `output` fixture. |
+| `tests/screenshots.py` | Writes `docs/screenshots/` from the showcase. |
+| `examples/showcase/` | `app.py` (the app, keys, `--plain`, `--image`), `views.py` (view 1 stock widgets, view 2 pixel widgets, with a `SelectList` subclass), `dialogs.py` (the modals), `art.py` (the rocket drawn in numpy), `world.py` (made-up data and colours), `showcase.tcss`. |
+
+## Adding support for a stock widget
+
+1. Reproduce the problem in `tests/sample_app.py` (or a small app of your own). Compare it plain against glass with `TEXTUAL_GLASS=off` or `shift+f9`.
+2. Decide which part is wrong:
+   - which backgrounds become transparent: `scene.rules_for` and `filter.py`;
+   - which chrome is drawn: `scene.py` (`_base_chrome`, `_widget_chrome`) describes the items and `items.py` draws them;
+   - motion: `effects.py`, or the `Tweens` in `scene.py`.
+3. Match widgets by class name with `scene.is_a(widget, "DataTable")`, so the scene imports no widget modules and subclasses count.
+4. If a widget deliberately paints a neutral background that must stay opaque, either tighten the filter rule or tell users about `GLASS_SKIP`.
+5. If you need a private attribute, add an accessor in `_textual_hooks.py` with a safe fallback, and add it to `test_every_hook_fails_soft`.
+6. Add a pilot test in `tests/test_pilot.py` that asserts on the scene items and on `output.model().errors == []`. Add a step to `tests/test_pty.py` if the change affects the byte stream.
+
+## Adding a pixel widget
+
+For a widget in an app, follow "Write your own pixel widget" in the README. To add one to the library:
+
+1. Subclass `PixelWidget` (or `SelectList`) in `widgets/instruments.py` or a new module under `widgets/`. Colours are constructor arguments that default to the theme (`ctx.palette` in `pixel_items`, `self.theme_palette` in `render_line`); never a module-level palette.
+2. Draw a text fallback with the same layout (`self.glass_on` says which mode is current). Give every item a stable `ident` and `clip=self.visible_clip()`.
+3. Don't add attributes Textual already has (rule 14): `test_widgets_add_no_attribute_textual_has` lists the widget classes; add yours.
+4. Export it from `widgets/__init__.py` and `textual_glass/__init__.py` (both `__all__` lists).
+5. In `tests/test_widgets.py`: add it to the `Board` app, assert on its text in both modes and on its scene item in `test_every_widget_renders_in_both_modes_with_identical_layout`, and add its ident prefix to the regex in `test_widget_items_draw_nothing_at_the_edge_of_their_box` (rule 16 for the items it yields).
+6. Add it to the README's widget table, and to the showcase's view 2 if it shows something new.
+
+## Adding an item
+
+An item is a frozen dataclass in `items.py` that subclasses `render.Item`:
+
+- Fields in cell units: the geometry and colours first (`Colour` is `"#rrggbb"` or an RGB tuple), then `ident: str = ""`, `depth: int = 0` and `clip: FRect | None = None` last, like every other item.
+- `dynamic: ClassVar[bool] = True` if it changes often (values, positions): it is then composed over the cached base when a rectangle is edited.
+- `bbox(g)` returns its pixel box (`g.box(rect, pad_x, pad_y)`). Leave room around the light it draws.
+- `draw(c, g)` starts with `win = self.window(c, g)` (the canvas pixels it may touch; this also arms the edge fade), then draws with `c.over(view, colour, alpha)` and `c.glow(view, colour, amount)`. `render.sd_rrect`, `smoothstep` and `x_gradient` help.
+- **Rule 16:** every glow needs a falloff that reaches zero inside the box (multiply an `exp()` glow by a `smoothstep` that ends inside it). Don't rely on the box fade: `edge` (rows of safety fade, default 0.22; 0 for none) is only a safety net, and the test runs both with and without it.
+- `diff_boxes(old, g)` is optional: return the pixel boxes that differ from `old` (an item with the same `ident`) when a change touches only part of it (see `Panel`), or None for "both bounding boxes".
+- No Textual imports in `render.py`, `items.py`, `sprites.py` or `backdrop.py` (`test_render_layer_has_no_textual_imports`).
+
+Then add a sample of it to `EDGE_SAMPLES` in `tests/test_units.py`, in the variant that draws the most light. `test_every_item_class_is_checked_at_its_edges` fails until you do, and `test_items_draw_nothing_at_the_edge_of_their_box` checks it at two cell sizes, with and without the safety fade.
+
+An item defined in an app (outside `items.py`) is not checked by those tests; copy the check into the app's tests, or paint it on a canvas and look at the outermost ring of its box the same way.
+
+## Adding a sprite maker
+
+A maker lives in `sprites.py`, is named `*_frames`, and returns straight-alpha RGBA frames as bytes plus a gap in ms (`(frames, gap_ms)`). Multiply every frame by `radial_mask` (round sprites) or `edge_fade` (sprites that fill their box) so it is transparent at its border (rule 17). Add cases for it to `_sprite_cases()` in `tests/test_units.py`: `test_every_sprite_maker_is_checked_at_several_sizes` wants at least three, and `test_sprite_frames_are_transparent_at_their_border` checks every frame of each.
+
+## Theme variables glass reads
+
+Glass takes every colour from the app's Textual theme (`Palette.from_app`): `background`, `surface`, `panel`, `foreground`, `primary`, `secondary`, `accent`, `success`, `warning`, `error`, and `block-cursor-background` for cursor pills. A theme can also set these variables (`Theme.variables`, all strings):
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `glass-backdrop` | `gradient` | The backdrop painter: `gradient` (from the theme's colours and `GLASS_BACKGROUND`) or `nebula` (deep space, nebulae and stars). Anything else means `gradient`. |
+| `glass-scrim-alpha` | `0.5` on dark themes, `0.3` on light ones | How dark a popup's scrim gets (0 to 1). Sprites and images below a popup dim to `1 - alpha` of their brightness. |
+| `glass-space-top`, `glass-space-bottom` | `#0b1433`, `#03050d` | `nebula`: the space gradient, top to bottom. |
+| `glass-nebula-1`, `glass-nebula-2`, `glass-nebula-3` | `#5b2a9e`, `#0e6a78`, `#1b3d8f` | `nebula`: the top-right nebula, the bottom-left one, and the faint scattered one. |
+| `glass-nebula-strength` | `1.0` | `nebula`: 1 is the default (dim) nebulae, 0 leaves only the space gradient and its stars; higher is brighter. |
+
+```python
+from textual.app import App, ComposeResult
+from textual.theme import Theme
+from textual.widgets import Static
+
+from textual_glass import Glass
+
+DUSK = Theme(name="dusk", primary="#7aa2f7", secondary="#bb9af7", background="#16161e", dark=True,
+             variables={"glass-backdrop": "nebula", "glass-scrim-alpha": "0.6", "glass-nebula-strength": "0.5"})
+
+
+class MyApp(Glass, App):
+    CSS = "Static { border: round $primary; height: 5; }"
+
+    def compose(self) -> ComposeResult:
+        yield Static("over a nebula")
+
+    def on_mount(self) -> None:
+        self.register_theme(DUSK)
+        self.theme = "dusk"
+
+
+if __name__ == "__main__":
+    MyApp().run()
+```
+
+Any other theme works too; without the variables the backdrop is the gradient. textual-orbital's `ORBITAL` and `ORBITAL_NAVY` themes are examples that set all of them.
+
+## Tests
+
+From the repository root:
+
+```sh
+uv run pytest textual-glass/tests                                  # about 1.5 minutes
+uv run pytest textual-glass/tests/test_units.py textual-glass/tests/test_widgets.py   # seconds
+uv run ruff check . && uv run mypy
+uv run python textual-glass/tests/test_pty.py --png /tmp/glass-steps   # a composite per pty step
+uv run python textual-glass/tests/screenshots.py                    # regenerate docs/screenshots
+GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # with real pictures, if the user has some
+```
+
+The README's [Tests](README.md#tests) section says what each file checks. Rules 1 to 19 in `../AGENTS.md` each have a guarding test; when you change the code a rule protects, run that test first.
+
+## Known gaps
+
+- Untested in kitty, tmux and screen. Under tmux glass is off unless forced.
+- An app with no bordered or backgrounded widgets gets no backdrop image: a layer is only created when it has items. The terminal's default background (OSC 11) still matches the theme.
+- Colour-based ownership is a heuristic (see the README's Limitations).
+- Items defined outside `items.py` are not covered by the rule 16 test.

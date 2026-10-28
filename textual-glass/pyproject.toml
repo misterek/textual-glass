@@ -1,0 +1,45 @@
+[project]
+name = "textual-glass"
+version = "0.2.0"
+description = "Pixel glass chrome for stock Textual apps through the kitty graphics protocol (tuned for Ghostty), plus a pixel engine and pixel widgets."
+readme = "README.md"
+license = "MIT-0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["textual", "tui", "terminal", "kitty", "kitty-graphics", "ghostty", "graphics", "theme", "widgets"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Terminals",
+    "Topic :: Software Development :: User Interfaces",
+    "Typing :: Typed",
+]
+dependencies = [
+    "textual>=8.2,<9",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/misterek/textual-glass"
+Documentation = "https://github.com/misterek/textual-glass/tree/main/textual-glass#readme"
+Source = "https://github.com/misterek/textual-glass/tree/main/textual-glass"
+Issues = "https://github.com/misterek/textual-glass/issues"
+
+[project.optional-dependencies]
+images = ["pillow>=10"]  # GlassImage.from_file / load_image: PNG, JPEG, GIF, WebP...
+testing = ["pyte>=0.8", "pillow>=10"]  # textual_glass.testing: pty harness and kitty graphics model
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/textual_glass"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/textual_glass", "tests", "README.md", "LICENSE", "pyproject.toml"]

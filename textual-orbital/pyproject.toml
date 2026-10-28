@@ -1,0 +1,30 @@
+[project]
+name = "textual-orbital"
+version = "0.1.0"
+readme = "README.md"
+description = "Always-on dashboards for Textual: sources, a merged snapshot, alert rules, notifications and dashboard widgets, built on textual-glass."
+license = "MIT-0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["textual", "tui", "terminal", "dashboard", "monitoring", "alerts", "notifications", "kitty", "ghostty"]
+dependencies = ["textual-glass>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/misterek/textual-glass"
+Documentation = "https://github.com/misterek/textual-glass/tree/main/textual-orbital#readme"
+Source = "https://github.com/misterek/textual-glass/tree/main/textual-orbital"
+Issues = "https://github.com/misterek/textual-glass/issues"
+
+[project.optional-dependencies]
+# Alert pictures from files (PNG, JPEG, animated GIF): Pillow, through textual-glass.
+images = ["textual-glass[images]>=0.2"]
+
+[tool.uv.sources]
+textual-glass = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/textual_orbital"]

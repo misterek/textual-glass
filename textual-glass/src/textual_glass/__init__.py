@@ -1,0 +1,45 @@
+"""textual-glass: a pixel glass look for stock Textual apps.
+
+    from textual.app import App
+    from textual_glass import Glass
+
+    class MyApp(Glass, App):
+        ...
+
+    class Gauge(PixelWidget):              # a widget that adds pixels of its own
+        def render_line(self, y): ...      # text, and a fallback without glass
+        def pixel_items(self, ctx: PixelContext): ...
+
+Ready-made widgets with pixels (``GlassPanel``, ``SelectList``, ``RingGauge``,
+``Telemetry``, ``StatTile``, ``ProgressArc``, ``SpriteView``...) live in
+``textual_glass.widgets``.
+
+In terminals with the kitty graphics protocol (Ghostty, kitty) the app gets
+glass panels, gradient borders, a sliding selection pill and more, drawn in
+pixels under the text. Everywhere else it is exactly stock Textual.
+"""
+
+from .detection import Support, detect
+from .engine import MOTIONS, GlassEngine
+from .glass import Glass, PixelContext, PixelMixin, terminal_write
+from .images import LoadedImage, load_image
+from .widgets import (
+    GlassImage,
+    GlassPanel,
+    InfoCard,
+    PixelWidget,
+    ProgressArc,
+    RingGauge,
+    SelectList,
+    SpriteView,
+    StatTile,
+    StatValue,
+    Telemetry,
+)
+
+__version__ = "0.2.0"
+__all__ = [
+    "MOTIONS", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard", "LoadedImage", "PixelContext",
+    "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile", "StatValue",
+    "Support", "Telemetry", "__version__", "detect", "load_image", "terminal_write",
+]

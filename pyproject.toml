@@ -1,0 +1,48 @@
+[project]
+name = "libs"
+version = "0"
+description = "Workspace root for textual-glass and textual-orbital (not a package)."
+requires-python = ">=3.10"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["textual-glass", "textual-orbital"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pyte>=0.8",
+    "pillow>=10",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["textual-glass/tests", "textual-orbital/tests"]
+# Both packages have tests/test_units.py (and later test_pilot.py, test_pty.py): import by path, not by basename.
+addopts = "--import-mode=importlib"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "B", "I", "UP", "SIM"]
+ignore = ["SIM105", "SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["textual_glass", "textual_orbital"]
+known-local-folder = ["sample_app"]
+
+[tool.mypy]
+files = ["textual-glass/src", "textual-orbital/src"]
+python_version = "3.10"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+explicit_package_bases = true
