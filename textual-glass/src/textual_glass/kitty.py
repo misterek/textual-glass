@@ -119,20 +119,28 @@ def add_frame(image_id: int, width: int, height: int, rgba: bytes, gap_ms: int |
 
 
 def animation(image_id: int, width: int, height: int, frames: Sequence[bytes], gap_ms: int | Sequence[int],
-              gapless: Sequence[bytes] = ()) -> str:
+              gapless: Sequence[bytes] = (), start: bool = True) -> str:
     """Upload a looping animation: all frames while it is stopped, then start it.
 
     Ghostty 1.4 could drop chunked a=f sent to an image that is playing, so the
     frames always go up first. ``gapless`` frames are appended with a negative
     gap: playback skips them, but ``a=a,c=N`` can show them (a dimmed copy).
+    With ``start=False`` it stays stopped on frame 1, its gaps set: start it
+    later with :func:`play`.
     """
     gaps = [gap_ms] * len(frames) if isinstance(gap_ms, int) else list(gap_ms)
     out = [transmit_raw(image_id, width, height, frames[0])]
     out += [add_frame(image_id, width, height, f, gaps[k]) for k, f in enumerate(frames[1:], 1)]
     out += [add_frame(image_id, width, height, f, -1) for f in gapless]
     out.append(animate(image_id, r=1, z=gaps[0]))
-    out.append(animate(image_id, s=3, v=1))
+    if start:
+        out.append(play(image_id))
     return "".join(out)
+
+
+def play(image_id: int) -> str:
+    """Loop an uploaded animation for ever (every frame must be up already: rule 2)."""
+    return animate(image_id, s=3, v=1)
 
 
 def frames_stopped(image_id: int, width: int, height: int, frames: Sequence[bytes]) -> str:
@@ -156,6 +164,24 @@ def place(image_id: int, col: int, row: int, cols: int, rows: int, z: int,
         keys["X"] = x_off
     if y_off:
         keys["Y"] = y_off
+    return at(col, row, command(keys))
+
+
+def place_px(image_id: int, col: int, row: int, z: int, x_off: int = 0, y_off: int = 0,
+             crop: tuple[int, int, int, int] | None = None, placement_id: int = 1) -> str:
+    """Place an image at its own pixel size (no ``c``/``r``): at cell (col, row) plus
+    ``x_off``/``y_off`` pixels, each less than the cell's size. ``crop`` shows only
+    that source rectangle (x, y, width, height) of the image, at the same scale. A
+    zero width or height means "to the image's edge", so never crop to nothing:
+    unplace instead."""
+    keys: dict[str, object] = dict(a="p", i=image_id, p=placement_id)
+    if crop is not None:
+        keys["x"], keys["y"], keys["w"], keys["h"] = crop
+    if x_off:
+        keys["X"] = x_off
+    if y_off:
+        keys["Y"] = y_off
+    keys["z"], keys["C"] = z, 1
     return at(col, row, command(keys))
 
 

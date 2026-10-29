@@ -12,6 +12,8 @@ backdrop           Z0                     the bottom screen: the backdrop
                                           badges, bars, ``pixel_items``
 ambient            Z0 + 10M               full motion only: shimmer, glints,
                                           the pulsing focus halo
+scene              Z0 + 15M               ``play_scene()``: actors the app
+                                          moves over a widget, on routes
 flourish           Z0 + 20M               ``flourish()``: one-shot effects the
                                           app plays, over a level's glass
 float              Z0 + 30M               toasts and other overlay widgets
@@ -30,7 +32,8 @@ a page seen before is placed again at once, a new one is rendered at half
 resolution inside the frame and replaced by the full one from the worker.
 Images that Python steps through (scrim fades, flourishes) are uploaded once and
 moved with ``a=a,c=N``; ambient effects and sprites are animations the terminal
-plays by itself, so an idle app sends nothing at all.
+plays by itself, so an idle app sends nothing at all. Scenes (``player.py``) are
+images glass re-places as they move, and send nothing once they hold.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ import termios
 import time
 import weakref
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -73,11 +76,15 @@ if TYPE_CHECKING:
     from textual.strip import Strip
     from textual.widget import Widget
 
+    from .player import Player, Showing
+    from .scenes import SceneMaker
+
 MOTIONS = ("minimal", "subtle", "full")
 
 Z0 = -2_000_000_000
 LEVEL_STEP = 100_000_000
 Z_AMBIENT = 10_000_000
+Z_SCENE = 15_000_000     # scenes: over the ambient effects and the halo, under flourishes
 Z_FLOURISH = 20_000_000  # above the level's glass and ambient effects, below its float layer and the next scrim
 Z_FLOAT = 30_000_000
 Z_SCRIM = -50_000_000
@@ -331,6 +338,7 @@ class GlassEngine:
         self.ids = Ids()
         self.layers: dict[tuple[int, str], Layer] = {}
         self.effects = Effects(self)
+        self._player: Player | None = None  # made by the first play_scene
         self.tweens = Tweens()
         self.grid: Grid | None = None
         self.size: tuple[int, int] = (0, 0)
@@ -513,6 +521,8 @@ class GlassEngine:
         self.dimmables.clear()
         self.dimmed.clear()
         self.effects.reset()
+        if self._player is not None:
+            self._player.reset()  # every scene ends as "off"
         self.grid = None
         self._bgs.clear()
         for widget in list(self._images.values()):
@@ -534,6 +544,8 @@ class GlassEngine:
                 self.effects.clear_ambient()
             if motion == "minimal":
                 self.effects.clear_flourishes()
+            if self._player is not None:
+                self._player.motion_changed()
             self.kick()
 
     # -- the line filter ---------------------------------------------------------------
@@ -592,7 +604,8 @@ class GlassEngine:
         except Exception as error:  # noqa: BLE001
             self._failed(error)
         self.writer.flush()
-        if not (busy or self.tweens.busy(now) or self.effects.animating(now)) and self._timer is not None:
+        moving = self.effects.animating(now) or (self._player is not None and self._player.animating())
+        if not (busy or self.tweens.busy(now) or moving) and self._timer is not None:
             self._timer.pause()
 
     def kick(self) -> None:
@@ -702,6 +715,8 @@ class GlassEngine:
                 if self.options.terminal_background:
                     self.writer.queue(kitty.set_default_background(hex_of(palette.mid_background)))
                 self.effects.recolour()
+                if self._player is not None:
+                    self._player.end_all("theme")
                 for layer in self.layers.values():
                     layer.stale = True
                     if layer.busy:  # its result is out of date: drop it when it lands
@@ -736,6 +751,8 @@ class GlassEngine:
         screens = visible_screens(app)[:MAX_LEVELS]
         self._update_dimming(screens)
         self.effects.update_flourishes(screens, now)
+        if self._player is not None:
+            self._player.update(screens)  # every frame, holding or not: a page switch ends a scene
         self.frames_synced += 1
         if scene.busy:
             self.kick()
@@ -752,6 +769,8 @@ class GlassEngine:
         if layer is not None and layer.image_id is not None:
             self.writer.queue(kitty.place(layer.image_id, 0, 0, cols, rows, layer.z))
         self.effects.stretch()
+        if self._player is not None:
+            self._player.end_all("resized")
 
     # -- one layer ---------------------------------------------------------------------------
 
@@ -1239,6 +1258,40 @@ class GlassEngine:
             return None
         return screen, (region.x, region.y, region.width, region.height)
 
+    # -- scenes: actors the app moves over a widget (textual_glass.scenes, player.py) ------------
+
+    @property
+    def player(self) -> Player:
+        """Plays the scenes (see :meth:`play_scene`); made the first time it is asked for."""
+        if self._player is None:
+            from .player import Player
+
+            self._player = Player(self)
+        return self._player
+
+    def play_scene(self, make: SceneMaker, at: Widget | Region | None = None, start: float = 0.0,
+                   on_cue: Callable[[Hashable], None] | None = None,
+                   on_end: Callable[[str], None] | None = None) -> Showing | None:
+        """Play a scene over ``at``: a widget, a ``Region`` in screen cells (on the top
+        screen), or None for the whole window. ``make(stage) -> Scene`` runs in glass's
+        worker thread (see ``textual_glass.scenes``); the stage is the anchor's visible
+        cells, in terminal pixels. The clock starts when the upload is sent, ``start``
+        seconds in (``math.inf``: show the end now). After its duration the scene holds,
+        and glass sends nothing. ``on_cue(data)`` hears each cue after ``start``, once and
+        in order; ``on_end(reason)`` hears once why the scene went: "stopped", "replaced"
+        (a new scene on the same anchor), "moved" or "hidden" (its anchor), "resized",
+        "theme", "off" (glass off, suspended or reset) or "failed" (the maker raised or
+        broke the limits, which counts as a glass error). Both run on the app thread.
+
+        Returns the :class:`~textual_glass.player.Showing` (``stop()``, ``elapsed``,
+        ``holding``), or None, doing nothing, while glass is off, when the anchor isn't
+        on a visible screen or has no area, and while ``MAX_SCENES`` (2) others show. At
+        ``minimal`` motion it plays as a still: shown at its end, its loops on frame 1.
+        """
+        if not self.active or self.palette is None:
+            return None
+        return self.player.play(make, at, start, on_cue, on_end)
+
     # -- sprites: small terminal-played images behind placeholder cells -----------------------
 
     def cell_pixels(self) -> tuple[float, float]:
@@ -1464,7 +1517,9 @@ class GlassEngine:
                     layers=sorted(self.layers), pages=len(self.page_cache), sprites=len(self.sprites),
                     frames=self.frames_synced, motion=self.motion, render_ms=dict(self.render_ms),
                     support=self.support.reason if self.support else None, active=self.active,
-                    errors=self.errors, retry_in=self.retry_in, flourishes=self.effects.flourishes)
+                    errors=self.errors, retry_in=self.retry_in, flourishes=self.effects.flourishes,
+                    scenes=len(self._player.showings) if self._player is not None else 0,
+                    actors=self._player.actors if self._player is not None else 0)
 
 
 def _flourish_rgb(color: Any) -> RGB:

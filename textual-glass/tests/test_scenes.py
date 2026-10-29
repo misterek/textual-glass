@@ -8,7 +8,7 @@ import re
 import pytest
 
 from textual_glass import scenes
-from textual_glass.scenes import Actor, Route, Scene, Stage, check
+from textual_glass.scenes import Actor, Cue, Route, Scene, Stage, check
 
 STAGE = Stage(900, 380, 100, 20, (9.0, 19.0), {role: (200, 200, 200) for role in scenes.ROLES},
               dark=True, still=False, seed=0)
@@ -54,7 +54,10 @@ def test_check_holds_a_maker_to_the_limits() -> None:
         "more than the stage": Scene([actor(cells=(101, 1))], 1),
         "actors": Scene([actor()] * (scenes.MAX_ACTORS + 1), 1),
         "pixels": Scene([actor(frames=[bytes(400 * 400 * 4)] * 64, width=400, height=400)] * 2, 1),
+        "at least one pixel": Scene([actor(frames=[b""], width=0)], 1),
+        "cues": Scene([actor()], 2, cues=[Cue(2.5, "late")]),
     }
+    check(Scene([actor()], 2, cues=[Cue(0, "first"), Cue(2, "last")]), STAGE)
     for message, scene in bad.items():
         with pytest.raises(ValueError, match=message):
             check(scene, STAGE)

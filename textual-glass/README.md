@@ -11,7 +11,7 @@ class MyApp(Glass, App):
     ...
 ```
 
-It is also a small pixel engine. Your own widgets can add pixel items (rings, meters, charts, glowing dots) and terminal-played animations, and the package ships ready-made pixel widgets that fall back to plain text with the same layout. Your app can also play [flourishes](#flourishes): short celestial animations, such as a comet or a sunburst, when something happens.
+It is also a small pixel engine. Your own widgets can add pixel items (rings, meters, charts, glowing dots) and terminal-played animations, and the package ships ready-made pixel widgets that fall back to plain text with the same layout. Your app can also play [flourishes](#flourishes): short celestial animations, such as a comet or a sunburst, when something happens, and [scenes](#scenes): longer shows of moving pictures over a widget that end on a picture that stays.
 
 ![The showcase's pixel widgets at 140x45 (approximate composite)](docs/screenshots/140x45_pixels.png)
 
@@ -42,6 +42,7 @@ uv run python examples/showcase/app.py                      # with glass
 uv run python examples/showcase/app.py --plain              # stock Textual, for comparison
 uv run python examples/showcase/app.py --image ~/cat.gif    # your picture in the modal (PNG, JPEG, GIF...)
 uv run python examples/flourishes/app.py                    # every flourish, over a small dashboard
+uv run python examples/scenes/app.py                        # a small scene, in placeholder art
 ```
 
 | Key | Action |
@@ -94,12 +95,13 @@ At run time `app.glass` is the engine (`GlassEngine`):
 | `motion`, `set_motion(level)` | The motion level. |
 | `activate()`, `deactivate()` | Turn glass on and off live (what `shift+f9` does). Either one cancels a pending retry after errors. |
 | `errors`, `last_error`, `retry_in` | Errors since the app started, the last traceback, and, after glass turned itself off, the seconds until it tries again (`None` otherwise). See [Errors](#errors). |
-| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times, errors, flourishes playing or rendering. |
+| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times, errors, flourishes playing or rendering, scenes showing and their actors. |
 | `palette` | The theme colours glass is using (`textual_glass.palette.Palette`). |
 | `background_job(work, done)` | Run `work()` in glass's worker thread, then `done(result)` on the app thread (rules 3 and 13). |
 | `sprite(key, cols, rows, make, waiter=None)` | A terminal-played animation behind placeholder cells (see [Write your own pixel widget](#write-your-own-pixel-widget)). |
 | `cell_pixels()` | Terminal pixels per cell, `(width, height)`. |
 | `flourish(name, at=None, to=None, color=None)` | Play a flourish once (see [Flourishes](#flourishes)). |
+| `play_scene(make, at=None, start=0.0, on_cue=None, on_end=None)` | Play a scene over a widget (see [Scenes](#scenes)). |
 
 Also exported: `terminal_write(app, data) -> bool` sends other escape sequences (a notification, a window title) through Textual's writer, with glass on or off. `on_hard_exit(key, data)` registers what to write to the terminal if the process is killed (see [Suspend, resume and hard exits](#suspend-resume-and-hard-exits)). `detect(env=None, *, query=True, timeout=0.3)` is the detection on its own.
 
@@ -136,7 +138,7 @@ Glass's own entry deletes every image it may have made: Ghostty's delete-all (`a
 
 | Level | What moves |
 | --- | --- |
-| `minimal` | Nothing. The glass is static, the pill jumps from row to row, modals and view changes switch instantly, and no flourish plays. |
+| `minimal` | Nothing. The glass is static, the pill jumps from row to row, modals and view changes switch instantly, no flourish plays, and a scene shows its end as a still. |
 | `subtle` (default) | The selection pill slides between rows in about 140 ms, a modal's scrim fades in and out, and the app's [flourishes](#flourishes) play. The focused panel glows (at every level). Nothing moves while the app is idle. |
 | `full` | Everything in `subtle`, plus ambient effects that the terminal plays by itself: a slow sheen sweeping across the glass, small glints on panel corners, and a pulsing halo around the focused panel. |
 
@@ -228,6 +230,63 @@ To see every kind, run the demo in Ghostty, from the repository root: `uv run py
 | `q` | Quit |
 
 To write a kind of your own, see "Adding a flourish" in [`AGENTS.md`](AGENTS.md#adding-a-flourish).
+
+## Scenes
+
+A scene is a longer show than a flourish, made of moving parts: a few small pictures (actors), each moving along its route over a widget, with their own frames. Glass uploads each picture once and moves it by placing it again at pixel offsets inside the cells, so a thirty-second show costs about what its pictures do. A scene ends on a picture that stays: after its duration it holds, its loops (a twinkle, a flame) are played by the terminal, and glass sends nothing at all. So the end can carry information, like a summary. Glass never plays one by itself.
+
+```python
+import numpy as np
+
+from textual_glass.scenes import Actor, Cue, Route, Scene, Stage
+
+
+def dot(size: int, color: tuple[int, int, int]) -> bytes:
+    """A soft round dot as straight-alpha RGBA, fully transparent at its border."""
+    ys, xs = np.mgrid[0:size, 0:size] + 0.5
+    alpha = np.clip(1 - np.hypot(xs - size / 2, ys - size / 2) / (size / 2 - 1), 0, 1) ** 2
+    return np.dstack([np.broadcast_to(color, (size, size, 3)), alpha * 255]).astype(np.uint8).tobytes()
+
+
+def arrival(stage: Stage) -> Scene:  # runs in glass's worker thread
+    size, y = 24, stage.height / 2
+    fly = Route.line((-size, y), (stage.width / 2, y), 0.0, 1.5)  # in from beyond the left edge
+    return Scene([Actor([dot(size, stage.colors["primary"])], size, size, fly)], 2.0, [Cue(1.5, "landed")])
+
+
+# in the app, with glass on and the panel laid out:
+showing = self.glass.play_scene(arrival, at=self.query_one("#panel"), on_cue=self.cue, on_end=self.ended)
+```
+
+`app.glass.play_scene(make, at=None, start=0.0, on_cue=None, on_end=None) -> Showing | None`:
+
+- `make(stage) -> Scene` runs in glass's worker thread, so the app never waits. The `Stage` (in `textual_glass.scenes`) is the anchor's visible cells in terminal pixels: `width`, `height`, `cols`, `rows`, one `cell`, the theme's `colors` by role (`scenes.ROLES`), `dark`, `still` and a `seed`. A maker that raises, or whose scene breaks the limits (`scenes.check`: at most 256 actors, 64 frames each, 16 million pixels in all and 300 seconds), counts as a glass error and ends the scene as `"failed"`.
+- `at` is a widget, a `Region` in screen cells (on the top screen) or `None` for the whole window. The scene plays on the anchor's screen, under the next popup's scrim.
+- A `Scene` has `actors`, a `duration` in seconds and `cues`. An `Actor` has straight-alpha RGBA `frames` (fully transparent at their border, rule 17), its `width` and `height`, a `Route` for its centre (keys of `(t, x, y)` with straight lines between them; `Route.line`, `Route.sample` for curves, `Route.still`), `gaps` in ms, `loop`, `enter` and `leave` times, a `z` from 0 to 99, and `cells`:
+  - with `cells=None` it is drawn at its own pixels, moves smoothly and is cropped at the stage's edge;
+  - with `cells=(cols, rows)` the terminal stretches it over that many cells (a big, soft picture drawn small), placed at whole cells and kept inside the stage.
+- A loop (`loop=True`, the default) is played by the terminal. A one-shot (`loop=False`) is stepped through once by glass from its entrance and holds its last frame.
+- The clock starts when the pictures are sent, `start` seconds in. `start=math.inf` shows the end at once: what an app does to put a summary back after a resize.
+- `on_cue(data)` hears each `Cue(t, data)` once and in order, on the app thread. A cue at or before `start` never comes (one at 0 included): the app shows that state itself.
+- It returns a `Showing` (`textual_glass.player`): `stop()`, `elapsed` (seconds into the scene), `holding` (it has reached its end and stays) and `ended` (why it went, or `None`). It returns `None` and does nothing while glass is off, when the anchor isn't on a visible screen or has no area, and while two (`textual_glass.player.MAX_SCENES`) others are showing or being made (a scene on the same anchor as one of them replaces it instead).
+- At `minimal` motion it plays as a still: `Stage.still` is true, it starts at its end (its cues after `start` come at once) and its loops stay on frame 1. Switching to `minimal` during a show jumps it to its end (the cues not yet heard come at once); switching back up plays the loops again, without replaying.
+
+A scene goes, with every image deleted, and `on_end(reason)` hears why, once, on the app thread:
+
+| Reason | When |
+| --- | --- |
+| `"stopped"` | `showing.stop()` |
+| `"replaced"` | a new `play_scene` on the same anchor |
+| `"moved"` | the anchor's visible cells changed |
+| `"hidden"` | the anchor was hidden or removed, or its screen is no longer visible (a page switch, a full screen over it, its popup closing) |
+| `"resized"` | the window was resized |
+| `"theme"` | the theme changed |
+| `"off"` | glass turned off, the app was suspended, or glass turned itself off after errors |
+| `"failed"` | the maker raised or broke the limits, or the scene raised while it played |
+
+Glass checks the anchor at every frame, holding or not. To put the end back after a resize, a new theme or a move, play the scene again from `on_end` with `start=math.inf` (after a refresh, once the layout has settled). What `on_cue` or `on_end` raises counts as a glass error.
+
+The demo shows six dots flying in from beyond a panel's edge on curves, cropped there, each docking with a flash on a ring around a big soft disc that breathes, and a caption that follows the cues: `uv run python textual-glass/examples/scenes/app.py` from the repository root, in Ghostty. Keys: `r` plays it again, `f9` the motion level, `l` a light theme and back, `q` quits.
 
 ## Supported terminals and fallback
 
@@ -528,6 +587,8 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 | `tests/test_widgets.py` | Every pixel widget in both modes with identical layout, `Telemetry`'s one scale with and without glass, the `SelectList` pill (slides, settles, goes quiet) and its section headers staying in view, `GlassPanel` titles and accents, clipping in scrolling containers, `strip` never cutting a placeholder run. |
 | `tests/test_images.py` | `load_image` and `GlassImage`: GIF compositing, timing and loop counts, PNG transparency, EXIF rotation, limits, bad input, resampling, half blocks, play counts in the terminal, the memory budget. Tests with real pictures run when `GLASS_TEST_ART` points at a folder. |
 | `tests/test_flourishes.py` | Every flourish kind by itself: every frame transparent at the stage's border (rule 17) at five window and cell sizes, the limits, determinism, an `about` line and palette roles, no Textual imports, the stage's geometry. |
+| `tests/test_scenes.py` | The scene contract: routes and the limits `scenes.check` holds a maker to. |
+| `tests/test_scene_pilot.py` | `play_scene()` in a running app, with test actors and a fake clock: every actor uploaded, loops started after their frames, one-shots stepped and holding their last frame; native actors placed at offsets below the cell size (four cell sizes, fractional ones too), cropped at the stage's edge and unplaced outside it; stretched actors on whole cells; entrances, exits and cues; `start`; the hold in silence; every end reason, playing and holding, with images deleted and ids freed; a page switch while holding; the anchor's level; `minimal` motion; broken makers; the limit of two scenes; a long show and thirty replays staying bounded; the kitty model's offsets and source rectangles. The demo plays to its hold at 70x22, 90x28 and 140x45. |
 | `tests/test_flourish_pilot.py` | `flourish()` in a running app: frames uploaded while stopped, placed at the anchor's level, stepped in order and deleted after the last one, then silence; the no-op cases; `MAX_FLOURISHES`; dropped on a resize, a theme change, `minimal` motion, a popup closing, suspend and resume; a broken maker. The demo plays every kind at 70x22, 90x28 and 140x45. |
 | `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |

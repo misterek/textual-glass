@@ -14,6 +14,8 @@ Ready-made widgets with pixels (``GlassPanel``, ``SelectList``, ``RingGauge``,
 ``Telemetry``, ``StatTile``, ``ProgressArc``, ``SpriteView``...) live in
 ``textual_glass.widgets``. ``app.glass.flourish(name, at=widget)`` plays a short
 celestial animation when something happens; ``FLOURISHES`` lists the kinds.
+``app.glass.play_scene(make, at=widget)`` plays a longer show of moving pictures
+that holds at its end (``textual_glass.scenes``).
 
 In terminals with the kitty graphics protocol (Ghostty, kitty) the app gets
 glass panels, gradient borders, a sliding selection pill and more, drawn in

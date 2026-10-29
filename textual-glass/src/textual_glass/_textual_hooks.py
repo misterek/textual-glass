@@ -19,7 +19,8 @@ Hooks:
   own glass line filter (the public ``App.get_line_filters`` cannot tell
   which widget it is filtering).
 * ``Screen._compositor.visible_widgets``: what is on screen, in paint order,
-  and how much of one widget shows (``visible_region``).
+  and how much of one widget shows (``visible_region``, and ``shown_region``,
+  which is empty for a widget the compositor doesn't show).
 * ``Widget._border_title`` / ``_border_subtitle``: rendered label lengths.
 * ``OptionList._lines``: which screen line shows the highlighted option.
 * ``DataTable._row_label_column_width``: x offset of the first column.
@@ -222,6 +223,24 @@ def visible_region(widget: Widget) -> Region:
         return region.intersection(clip)
     except Exception:  # noqa: BLE001 - not on screen, or no compositor
         return widget.region
+
+
+def shown_region(widget: Widget) -> Region:
+    """The part of ``widget`` that is on screen, and nothing when its screen's
+    compositor doesn't show it (hidden, on a page that isn't current, scrolled
+    away, removed). Its whole region if that can't be told."""
+    try:
+        shown = widget.screen._compositor.visible_widgets
+        found = shown.get(widget)
+        if found is None:
+            return Region()
+        region, clip = found
+        return Region(*region).intersection(Region(*clip))
+    except Exception:  # noqa: BLE001 - not on a screen, or a compositor of another shape
+        try:
+            return widget.region
+        except Exception:  # noqa: BLE001
+            return Region()
 
 
 def border_label_length(widget: Widget, title: bool = True) -> int:

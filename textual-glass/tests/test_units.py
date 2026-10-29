@@ -654,6 +654,7 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     reshaped = SimpleNamespace(_compositor=SimpleNamespace(visible_widgets={"widget": "no (region, clip) pair"}),
                                walk_children=lambda kind: [])
     assert hooks.visible_widgets(reshaped) == [], "a mapping of another shape falls back too"  # type: ignore[arg-type]
+    assert hooks.shown_region(bare) == hooks.Region(), "no screen, no region: nothing shown"  # type: ignore[arg-type]
     with monkeypatch.context() as m:
         m.setattr(textual, "_border", SimpleNamespace())
         glyphs = hooks.BorderGlyphs()

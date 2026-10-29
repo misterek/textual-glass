@@ -161,7 +161,7 @@ class Replay:
     def __init__(self, cols: int, rows: int) -> None:
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
-        self.model = KittyModel()
+        self.model = KittyModel(cell=(CW, CH))
         self.buf = b""
         self.default_bg = "1d1f21"
 
