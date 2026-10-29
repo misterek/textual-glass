@@ -285,6 +285,8 @@ async def test_captions_follow_the_cues_and_the_tally_ends_the_show(output: Outp
             assert bottom(replay) == replay.status == f"this week · {n + 1} of 6 landed" and not replay.done
             if i == 2:
                 assert caption == "Tue 14:02 · merged · fix the flaky test (GH)"
+        assert cues[-1].data == space.END
+        await at(app, clock, show, cues[-1].t + 1e-3)
         assert plays.calls[0]["cues"] == [c.data for c in cues], "every cue, once, in order"
         assert replay.done and bottom(replay) == TALLY == replay.status == replay.tally(), "the tally, once all landed"
         assert replay.caption == "latest: Thu 10:05 · released · v2.0 (GH)", "and the newest piece of work"
@@ -462,7 +464,7 @@ async def test_at_minimal_motion_the_summary_is_a_still_and_the_tally_shows_at_o
         show = plays.show()
         assert show.stage.still and app.replay.done and bottom(app.replay) == TALLY, "the tally at once"
         await landed(show)
-        assert show.holding and plays.calls[0]["cues"] == []
+        assert show.holding and plays.calls[0]["cues"] == [space.END], "no landings, only the end"
     clean(output)
 
 

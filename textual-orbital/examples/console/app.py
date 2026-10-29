@@ -67,6 +67,8 @@ from textual_orbital import (  # noqa: E402
 from textual_orbital.theme import PALETTE, fmt_age, now, source_color, urgency_color, why_color  # noqa: E402
 from textual_orbital.widgets import (  # noqa: E402
     HEALTH_COLORS,
+    LEGEND,
+    REPLAY_LEGEND,
     STATE_COLORS,
     STATE_GLYPHS,
     beacon_view,
@@ -259,7 +261,7 @@ class MissionConsole(OrbitalApp):
         self.action_sources()
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen(HELP_KEYS))
+        self.push_screen(HelpScreen(HELP_KEYS, [*LEGEND, REPLAY_LEGEND]))
 
     def action_test_alert(self) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")

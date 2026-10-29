@@ -23,6 +23,7 @@ from .page import Page
 from .replay import SHIP_CLASSES, SHIPS, ReplayWeek, WeekReplay, week_hours
 from .screens import (
     LEGEND,
+    REPLAY_LEGEND,
     AlertScreen,
     AlertToast,
     DetailScreen,
@@ -35,7 +36,7 @@ from .screens import (
 from .track import HEALTH_COLORS, HEALTH_WORDS, Track, TrackTable, status_word
 
 __all__ = [
-    "HEALTH_COLORS", "HEALTH_WORDS", "LEGEND", "SHIPS", "SHIP_CLASSES", "SOURCE_HEALTH_COLORS",
+    "HEALTH_COLORS", "HEALTH_WORDS", "LEGEND", "REPLAY_LEGEND", "SHIPS", "SHIP_CLASSES", "SOURCE_HEALTH_COLORS",
     "SOURCE_HEALTH_GLYPHS", "STATE_COLORS", "STATE_GLYPHS", "TASK_COLORS", "AlertScreen", "AlertToast", "BeaconRow",
     "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip", "HelpScreen", "KeyBar", "OrbitalModal",
     "Page", "PriorityList", "ReplayWeek", "Section", "SourceHealth", "SourcesScreen", "TaskBoard", "Track",

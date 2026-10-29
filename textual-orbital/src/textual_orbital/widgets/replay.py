@@ -272,18 +272,18 @@ class WeekReplay(PixelWidget, can_focus=True):
         self.refresh()
 
     def _cue(self, token: int, data: Hashable) -> None:
-        """A ship landed: ``("landed", i, kind)``, ``i`` an index into the week it was made with."""
+        """A ship landed (``("landed", i, kind)``, ``i`` an index into the week it was made
+        with), or the show is over (``space.END``)."""
         shown = self._shown
         if token != self._token or shown is None:
             return
-        if not (isinstance(data, tuple) and len(data) >= 2 and data[0] == "landed" and isinstance(data[1], int)):
+        if isinstance(data, tuple) and len(data) >= 2 and data[0] == "landed" and isinstance(data[1], int):
+            if 0 <= data[1] < len(shown.items):
+                self._landed.add(data[1])
+                self._last = data[1]
+        elif data != space.END:
             return
-        i = data[1]
-        if not 0 <= i < len(shown.items):
-            return
-        self._landed.add(i)
-        self._last = i
-        if not self._done and len(self._landed) >= len(shown.items):
+        if not self._done and (data == space.END or len(self._landed) >= len(shown.items)):
             self._done = True
             week = self.week
             if week is not None and week.works != shown.works:

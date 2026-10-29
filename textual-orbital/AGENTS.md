@@ -792,7 +792,7 @@ class ReplayPage(Page):
 
 The widget does the rest. It plays when it becomes visible (the page shows, or glass comes on) and on `replay()`. New data while the summary holds puts the new summary up at once, without a replay, and only if the set of items changed; during the show it waits for the end. A resize or a new theme puts the summary back; leaving the page ends the show, and it plays again next time. At `minimal` motion the summary shows as a still with its tally at once. Without glass, or if glass turns off or the scene fails, it shows the table.
 
-**3. The key, the help and the layout.** Add the page to your app the way the others are (in CI Board: `("replay", "Replay", ReplayPage)` in `PAGES` and `("3", "page(2)", "replay")` in `BINDINGS`), and `p` and `l` to your `HelpScreen` keys. Pick other letters if your app binds them already (the console's `r` is "fetch now"). In your CSS:
+**3. The key, the help and the layout.** Add the page to your app the way the others are (in CI Board: `("replay", "Replay", ReplayPage)` in `PAGES` and `("3", "page(2)", "replay")` in `BINDINGS`), `p` and `l` to your `HelpScreen` keys, and the replay's row to its legend: `HelpScreen(keys, [*LEGEND, REPLAY_LEGEND])` (both from `textual_orbital.widgets`). Pick other letters if your app binds them already (the console's `r` is "fetch now"). In your CSS:
 
 ```css
 #replay-panel { height: 1fr; }
