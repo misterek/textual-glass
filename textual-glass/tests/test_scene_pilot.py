@@ -36,7 +36,7 @@ from textual_glass import Glass, kitty
 from textual_glass import engine as engine_module
 from textual_glass.engine import LEVEL_STEP, MAX_LEVELS, Z0, Z_AMBIENT, Z_FLOAT, Z_FLOURISH, Z_SCENE, Z_SCRIM
 from textual_glass.player import MAX_SCENES, Showing
-from textual_glass.scenes import ROLES, Actor, Cue, Route, Scene, Stage
+from textual_glass.scenes import MAX_ACTORS, ROLES, Actor, Cue, Route, Scene, Stage
 from textual_glass.testing.kitty_emu import KittyModel, composite
 from textual_glass.testing.pilot_helpers import Output, idle, settle, start
 
@@ -214,7 +214,7 @@ def commands(text: str, image_id: int) -> list[str]:
         if keys["a"] == "p":
             out.append("place")
         elif keys["a"] == "d":
-            out.append("delete" if keys["d"] == "I" else "unplace")
+            out.append("delete" if keys["d"] == "I" else f"unplace {keys['p']}" if "p" in keys else "unplace")
         elif keys.get("s") == "3":
             out.append("play")
         elif keys.get("s") == "1":
@@ -277,7 +277,7 @@ async def test_a_scene_goes_up_whole_plays_on_time_and_holds_in_silence(output: 
         for image_id in (moving, big):
             assert sent.index(f"a=a,i={image_id},s=3") > sent.rindex(f"a=f,i={image_id},"), "frames first (rule 2)"
         for index, cast in enumerate(show._casts):
-            assert cast.z == Z0 + Z_SCENE + cast.actor.z * 1000 + index
+            assert cast.z == Z0 + Z_SCENE + cast.actor.z * MAX_ACTORS + index
             assert engine.layers[(0, "main")].z + Z_AMBIENT + 5 < cast.z < Z0 + Z_FLOURISH < kitty.Z_BELOW_BACKGROUND
         assert placed(sent, moving)[0]["z"] == show._casts[0].z
         assert commands(sent, shot) == [], "the one-shot enters at 0.5 s"
@@ -311,7 +311,7 @@ async def test_a_scene_goes_up_whole_plays_on_time_and_holds_in_silence(output: 
 def test_the_scene_layer_sits_between_ambient_effects_and_flourishes_at_every_level() -> None:
     for level in range(MAX_LEVELS):
         base = Z0 + level * LEVEL_STEP
-        lowest, highest = base + Z_SCENE, base + Z_SCENE + 99 * 1000 + 255  # z 0 to 99, 256 actors
+        lowest, highest = base + Z_SCENE, base + Z_SCENE + 99 * MAX_ACTORS + MAX_ACTORS - 1  # z 0 to 99
         assert base + Z_AMBIENT + 5 < lowest and highest < base + Z_FLOURISH < base + Z_FLOAT
         assert highest < base + LEVEL_STEP + Z_SCRIM, "under the next popup's scrim"
         assert highest < kitty.Z_BELOW_BACKGROUND, f"level {level}: under cell backgrounds (rule 4)"
@@ -397,14 +397,14 @@ async def test_native_actors_are_cropped_at_the_stage_and_unplaced_outside_it(ou
         assert crops[0]["x"] + crops[0]["w"] == 20 and crops[0]["x"] > 0
         assert any(p["x"] == 0 and p["w"] < 20 for p in crops), "cropped on the right"
         assert all(p["h"] == 10 for p in crops)
-        assert commands(sent, first).count("unplace") == 1, "unplaced once, when it is wholly outside"
-        assert commands(sent, first)[-1] == "unplace" and seen_crop and shown
+        assert commands(sent, first).count("unplace 1") == 1, "unplaced once, when it is wholly outside"
+        assert commands(sent, first)[-1] == "unplace 1" and seen_crop and shown
         downs = placed(sent, second)
         assert downs[0]["row"] == panel[1] and "Y" not in downs[0] and downs[0]["y"] > 0, "cropped at the top"
         assert downs[0]["y"] + downs[0]["h"] == 20 and all(p["w"] == 10 for p in downs if "w" in p)
         assert any("h" not in p for p in downs), "whole while it is in"
         assert any(p.get("y") == 0 and p["h"] < 20 for p in downs if "h" in p), "cropped at the bottom"
-        assert commands(sent, second).count("unplace") == 1
+        assert commands(sent, second).count("unplace 1") == 1
     clean(output)
 
 
@@ -455,6 +455,88 @@ async def test_actors_enter_and_leave_on_time_and_their_images_go_with_them(outp
         assert commands(output.since(mark), first) == ["play", "place", "delete"], "deleted once, when it left"
         assert first not in engine.ids.live and first not in output.model(CELL).images
         assert engine.stats()["actors"] == 1 and second in engine.ids.live
+    clean(output)
+
+
+UPLOAD = re.compile(r"\x1b_G(a=[tf],[^;\x1b]*)")
+
+
+def uploads(text: str, image_id: int) -> list[str]:
+    """Each transmit (``t``) and frame (``f``) sent for an image, in order."""
+    return [_keys(m.group(1))["a"] for m in UPLOAD.finditer(text) if _keys(m.group(1)).get("i") == str(image_id)]
+
+
+def placements_of(model: KittyModel, image_id: int) -> set[int]:
+    return {pid for iid, pid in model.placements if iid == image_id}
+
+
+async def test_actors_with_the_same_frames_share_one_image_each_with_its_own_placement(output: Output,
+                                                                                       cell: Any) -> None:
+    """Stills and loops whose frames are the same object go up once, and each actor is a placement of
+    that image; each placement goes as its actor leaves and the image with the last one, or all of it
+    when the scene ends. One-shots never share: each is stepped on its own image."""
+    app = Board()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        clock = engine.player.clock = Clock()
+        light, flame, flash = picture(6, 6), picture(6, 6, frames=3), picture(6, 6, frames=3)
+        going = [Actor(light, 6, 6, Route.still(10 + 9 * k, 20), enter=0.1 * k, leave=1.0 + 0.25 * k)
+                 for k in range(5)]
+        staying = [Actor(light, 6, 6, Route.still(10 + 9 * k, 40), gaps=(500,)) for k in range(3)]
+        flames = [Actor(flame, 6, 6, Route.line((4, 60 + 8 * k), (120, 60 + 8 * k), 0, 2), gaps=(80,),
+                        leave=2.2 + 0.1 * k) for k in range(4)]
+        flashes = [Actor(flash, 6, 6, Route.still(10 + 30 * k, 100), loop=False, gaps=(100,), enter=0.5 * k)
+                   for k in range(2)]
+        live = set(engine.ids.live)
+        mark = output.mark()
+        show = engine.play_scene(maker(Scene(going + staying + flames + flashes, 3.0)), at=left_of(app))
+        assert show is not None
+        await landed(app, pilot, show)
+        casts = show._casts
+        assert casts is not None and len(casts) == 14
+        light_id, flame_id = casts[0].image_id, casts[8].image_id
+        flash_ids = [cast.image_id for cast in casts[12:]]
+        assert {cast.image_id for cast in casts[:8]} == {light_id} and {c.image_id for c in casts[8:12]} == {flame_id}
+        assert len({light_id, flame_id, *flash_ids}) == 4, "the one-shots have an image each"
+        assert [cast.placement_id for cast in casts[:8]] == list(range(1, 9))
+        assert [cast.placement_id for cast in casts[8:12]] == [1, 2, 3, 4]
+        assert engine.ids.live - live == {light_id, flame_id, *flash_ids}
+        assert engine.stats()["scene_images"] == 4 and engine.stats()["actors"] == 14
+        sent = output.since(mark)
+        assert uploads(sent, light_id) == ["t"], "one upload for eight actors"
+        assert uploads(sent, flame_id) == ["t", "f", "f"] and commands(sent, flame_id).count("play") == 1
+        assert all(uploads(sent, i) == ["t", "f", "f"] for i in flash_ids)
+
+        await at(app, clock, show, 0.5)
+        model = output.model(CELL)
+        assert placements_of(model, light_id) == set(range(1, 9)), "every actor on stage is a placement"
+        assert placements_of(model, flame_id) == {1, 2, 3, 4} and model.images[flame_id]["state"] == 3
+        await at(app, clock, show, 1.1)
+        assert placements_of(output.model(CELL), light_id) == set(range(2, 9)), "the first one left"
+        await at(app, clock, show, 2.05)
+        model = output.model(CELL)
+        assert placements_of(model, light_id) == {6, 7, 8} and light_id in model.images
+        for t in (2.25, 2.35, 2.45, 2.55):
+            await at(app, clock, show, t)
+        model = output.model(CELL)
+        sent = output.since(mark)
+        assert [c for c in commands(sent, light_id) if c != "place"] == [f"unplace {k}" for k in range(1, 6)]
+        assert [c for c in commands(sent, flame_id) if c.startswith(("unplace", "delete"))] == \
+            ["unplace 1", "unplace 2", "unplace 3", "delete"], "the last one to leave takes the image"
+        assert flame_id not in model.images and flame_id not in engine.ids.live
+        for flash_id in flash_ids:
+            assert [c for c in commands(sent, flash_id) if c.startswith("frame")][-1] == "frame 3", "each stepped"
+        await at(app, clock, show, 3.0)
+        assert show.holding and engine.stats()["scene_images"] == 3
+
+        show.stop()
+        await frames(app, pilot)
+        model = output.model(CELL)
+        assert commands(output.since(mark), light_id)[-1] == "delete", "the scene's end: the image, all of it"
+        assert not placements_of(model, light_id) and light_id not in model.images
+        assert not ({light_id, *flash_ids} & set(model.images))
+        assert engine.ids.live == live and engine.stats()["scene_images"] == 0, "every id freed"
     clean(output)
 
 
@@ -697,7 +779,7 @@ async def test_a_broken_scene_counts_as_an_error_and_leaves_nothing(output: Outp
             return Scene([actor()], 400)
         if broken == "bad frames":
             return Scene([Actor([b"\0" * 12], 6, 6, Route.still(1, 1))], 1)
-        return Scene([actor(route=Wrong(((0.0, 10.0, 10.0),)))], 2)
+        return Scene([actor(route=Wrong(((0.0, 10.0, 10.0), (2.0, 30.0, 10.0))))], 2)
 
     app = Board()
     async with app.run_test(size=SIZE) as pilot:

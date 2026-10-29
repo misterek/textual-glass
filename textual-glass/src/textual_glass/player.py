@@ -2,9 +2,12 @@
 (``app.glass.play_scene``). The engine owns one, made the first time an app
 plays a scene, so an app that never does pays nothing.
 
-Each actor is one terminal image, uploaded with all the others when the scene
-starts (encoded in the worker, like the maker's drawing). Every tick glass
-works out where each actor on stage is and re-places it only when that changed:
+Each actor is one placement of a terminal image, uploaded with all the others
+when the scene starts (encoded in the worker, like the maker's drawing). Stills
+and loops whose frames are the same object share one image, each actor with a
+placement id of its own; every one-shot has its own image. Every tick glass
+works out where each actor on stage is and re-places it only when that changed
+(an actor whose route has ended is not worked out again):
 
 * a native actor (``cells=None``) is drawn at its own pixels: at a cell plus
   ``X``/``Y`` pixel offsets, each less than the cell's size, and cropped to the
@@ -13,12 +16,13 @@ works out where each actor on stage is and re-places it only when that changed:
 
 One-shot actors are stepped with ``a=a,c=N`` from their entrance and hold their
 last frame; loops go up whole and are then started, and the terminal plays them
-(rule 2). After its duration a scene holds: what is on stage stays, only the
-loops move, and glass sends nothing (rule 9). A scene goes (every image deleted,
-every id freed, ``on_end(reason)`` called once) when the app stops or replaces
-it, when its anchor moves or is hidden, and on a resize, a new theme or glass
-turning off. At ``minimal`` motion a scene is a still: it starts at its end, and
-its loops stay on frame 1.
+(rule 2). An actor that leaves deletes its placement, and the last one of an
+image deletes the image. After its duration a scene holds: what is on stage
+stays, only the loops move, and glass sends nothing (rule 9). A scene goes
+(every image deleted, every id freed, ``on_end(reason)`` called once) when the
+app stops or replaces it, when its anchor moves or is hidden, and on a resize, a
+new theme or glass turning off. At ``minimal`` motion a scene is a still: it
+starts at its end, and its loops stay on frame 1.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from . import _textual_hooks as hooks
 from . import kitty
 from .engine import LEVEL_STEP, MAX_LEVELS, Z0, Z_SCENE
 from .scene import visible_screens
-from .scenes import ROLES, Actor, Scene, SceneMaker, Stage, check
+from .scenes import MAX_ACTORS, ROLES, Actor, Scene, SceneMaker, Stage, check, gaps, shares
 
 if TYPE_CHECKING:
     from textual.screen import Screen
@@ -57,16 +61,36 @@ Placed = tuple[Any, ...]
 
 
 @dataclass
+class Picture:
+    """One terminal image and the actors that show it: one, or every still or loop
+    whose frames are the same object."""
+
+    image_id: int
+    #: The actor whose frames go up (until they are in the terminal).
+    source: Actor | None
+    #: An animation the terminal plays (a loop of more than one frame).
+    looping: bool
+    casts: list[Cast] = dataclasses.field(default_factory=list)
+    gone: bool = False  # deleted, its id freed
+
+
+@dataclass
 class Cast:
-    """One actor in the terminal: its image and what was last sent for it."""
+    """One actor in the terminal: its placement of a picture and what was last sent for it."""
 
     actor: Actor
-    image_id: int
+    picture: Picture
+    placement_id: int
     z: int
     ends: list[float]  # when each frame ends, in seconds after its entrance (one-shots)
     placed: Placed | None = None  # the placement last sent; None while it isn't placed
     frame: int = 1  # the frame shown (one-shots), 1-based
-    gone: bool = False  # it left for good, or the scene ended: its image is deleted
+    settled: bool = False  # its route has ended and it is where it stays: not worked out again
+    gone: bool = False  # it left for good, or the scene ended: its placement is deleted
+
+    @property
+    def image_id(self) -> int:
+        return self.picture.image_id
 
 
 class Showing:
@@ -92,6 +116,7 @@ class Showing:
         self._t0: float | None = None  # when the upload was sent: the clock starts
         self._settled = False  # its end is on screen: nothing more is sent for it
         self._casts: list[Cast] | None = None  # None until the maker's scene is in
+        self._pictures: list[Picture] = []  # the scene's images, each shown by one or more casts
         self._loops: bool | None = None  # whether its loops play in the terminal (None: not uploaded)
         self._cues: list[Any] = []
         self._next_cue = 0
@@ -155,6 +180,11 @@ class Player:
         """Actors in the terminal (or on their way there), over every scene."""
         return sum(1 for show in self.showings for cast in show._casts or () if not cast.gone)
 
+    @property
+    def images(self) -> int:
+        """Images the actors show (actors that share their frames share one)."""
+        return sum(1 for show in self.showings for picture in show._pictures if not picture.gone)
+
     def animating(self) -> bool:
         """Something still moves that glass moves (the ticks must go on)."""
         return any(show._t0 is not None and not show._settled for show in self.showings)
@@ -188,6 +218,8 @@ class Player:
         for show in shows:
             for cast in show._casts or ():
                 cast.gone = True
+            for picture in show._pictures:
+                picture.gone = True
             self._finish(show, "off")
 
     def motion_changed(self) -> None:
@@ -224,7 +256,8 @@ class Player:
         stage = Stage(width=max(1, round(cells[2] * cell[0])), height=max(1, round(cells[3] * cell[1])),
                       cols=cells[2], rows=cells[3], cell=cell,
                       colors={role: getattr(palette, role) for role in ROLES}, dark=palette.dark,
-                      still=engine.motion == "minimal", seed=self.fired)
+                      still=engine.motion == "minimal", seed=self.fired, space=palette.space,
+                      nebula=palette.nebula)
         level = next(i for i, s in enumerate(screens) if s is screen)
         start = float(start)
         show = Showing(self, at, screen, level, cells, stage, start if start > 0 else 0.0, on_cue, on_end)
@@ -279,8 +312,8 @@ class Player:
         return "moved" if found[1] != show._cells else None
 
     def _made(self, show: Showing, result: tuple[bool, Any]) -> None:
-        """The maker's scene, on the app thread: give each actor that can still show an
-        id and a z, then encode the uploads in the worker."""
+        """The maker's scene, on the app thread: give each image an id and each actor that
+        can still show a placement of one and a z, then encode the uploads in the worker."""
         if show.ended is not None:
             return
         made, scene = result
@@ -294,18 +327,28 @@ class Player:
         first = show._time(self.clock())
         engine = self.engine
         base = Z0 + show._level * LEVEL_STEP + Z_SCENE
-        casts = []
+        casts: list[Cast] = []
+        shared: dict[int, Picture] = {}  # by the frames' identity: stills and loops only
         for index, actor in enumerate(scene.actors):
             if actor.leave <= first or actor.enter > scene.duration:
                 continue  # never on stage from here on: not worth uploading
-            ends = list(itertools.accumulate(g / 1000 for g in _gaps(actor)))
-            casts.append(Cast(actor, engine.ids.new(), base + actor.z * 1000 + index, ends))
+            picture = shared.get(id(actor.frames)) if shares(actor) else None
+            if picture is None:
+                picture = Picture(engine.ids.new(), actor, actor.loop and len(actor.frames) > 1)
+                show._pictures.append(picture)
+                if shares(actor):
+                    shared[id(actor.frames)] = picture
+            ends = list(itertools.accumulate(g / 1000 for g in gaps(actor)))
+            cast = Cast(actor, picture, len(picture.casts) + 1, base + actor.z * MAX_ACTORS + index, ends)
+            picture.casts.append(cast)
+            casts.append(cast)
         show._casts = casts
+        pictures = list(show._pictures)
         loops = engine.motion != "minimal"
 
         def work() -> tuple[bool, Any]:
             try:
-                return True, "".join(_upload(cast, loops) for cast in casts)
+                return True, "".join(_upload(picture, loops) for picture in pictures)
             except Exception as error:  # noqa: BLE001
                 return False, error
 
@@ -343,29 +386,39 @@ class Player:
         while show._next_cue < len(cues) and cues[show._next_cue].t <= t:
             self._call(show._on_cue, cues[show._next_cue].data)
             show._next_cue += 1
-        engine = self.engine
         out = []
         for cast in casts:
             actor = cast.actor
             if cast.gone or t < actor.enter:
                 continue
             if t >= actor.leave:  # gone for good: time only moves on
-                out.append(kitty.delete(cast.image_id))
-                engine.ids.free(cast.image_id)
-                cast.gone = True
+                out.append(self._leave(cast))
                 continue
             if not actor.loop and len(cast.ends) > 1:
                 frame = min(len(cast.ends), bisect.bisect_right(cast.ends, t - actor.enter) + 1)
                 if frame != cast.frame:
                     out.append(kitty.animate(cast.image_id, c=frame))
                     cast.frame = frame
+            if cast.settled:
+                continue
             where = self._where(show, actor, t)
             if where != cast.placed:
-                out.append(kitty.unplace(cast.image_id) if where is None else _place(cast, where))
+                out.append(_unplace(cast) if where is None else _place(cast, where))
                 cast.placed = where
-        engine.writer.queue("".join(out))
+            cast.settled = t >= actor.route.settles
+        self.engine.writer.queue("".join(out))
         if t >= scene.duration:
             show._settled = True
+
+    def _leave(self, cast: Cast) -> str:
+        """An actor leaves for good: its placement goes, and with the last one its image."""
+        cast.gone = True
+        picture = cast.picture
+        if all(other.gone for other in picture.casts):
+            picture.gone = True
+            self.engine.ids.free(picture.image_id)
+            return kitty.delete(picture.image_id)
+        return "" if cast.placed is None else _unplace(cast)
 
     def _where(self, show: Showing, actor: Actor, t: float) -> Placed | None:
         """Where an actor goes at ``t``: (col, row, X, Y, crop) for a native actor, None
@@ -394,8 +447,8 @@ class Player:
         if show._loops is None or show._loops == play or show._casts is None:
             return
         show._loops = play
-        out = [kitty.play(cast.image_id) if play else kitty.animate(cast.image_id, s=1, c=1)
-               for cast in show._casts if not cast.gone and cast.actor.loop and len(cast.ends) > 1]
+        out = [kitty.play(picture.image_id) if play else kitty.animate(picture.image_id, s=1, c=1)
+               for picture in show._pictures if not picture.gone and picture.looping]
         self.engine.writer.queue("".join(out))
 
     # -- ending -------------------------------------------------------------------------------------
@@ -408,12 +461,14 @@ class Player:
             self.showings.remove(show)
         engine = self.engine
         out = []
-        for cast in show._casts or ():
-            if not cast.gone:
+        for picture in show._pictures:
+            if not picture.gone:
                 if show._t0 is not None:  # uploaded (an upload still in the worker is dropped when it lands)
-                    out.append(kitty.delete(cast.image_id))
-                engine.ids.free(cast.image_id)
-                cast.gone = True
+                    out.append(kitty.delete(picture.image_id))
+                engine.ids.free(picture.image_id)
+                picture.gone = True
+        for cast in show._casts or ():
+            cast.gone = True
         engine.writer.queue("".join(out))
         self._finish(show, reason)
 
@@ -457,6 +512,8 @@ def _let_frames_go(show: Showing) -> None:
     show.scene = dataclasses.replace(show.scene, actors=[light(actor) for actor in show.scene.actors])
     for cast in show._casts:
         cast.actor = light(cast.actor)
+    for picture in show._pictures:
+        picture.source = None
 
 
 def _attached(widget: Any) -> bool:
@@ -481,24 +538,25 @@ def _split(p: int, size: float, cells: int) -> tuple[int, int]:
 def _place(cast: Cast, where: Placed) -> str:
     if cast.actor.cells is None:
         col, row, x_off, y_off, crop = where
-        return kitty.place_px(cast.image_id, col, row, cast.z, x_off, y_off, crop)
+        return kitty.place_px(cast.image_id, col, row, cast.z, x_off, y_off, crop, cast.placement_id)
     col, row = where
     cols, rows = cast.actor.cells
-    return kitty.place(cast.image_id, col, row, cols, rows, cast.z)
+    return kitty.place(cast.image_id, col, row, cols, rows, cast.z, cast.placement_id)
 
 
-def _upload(cast: Cast, loops: bool) -> str:
-    """One actor's upload (in the worker): a still, a loop with its gaps (started
+def _unplace(cast: Cast) -> str:
+    """Take one actor off the stage: its own placement, not the others of its image."""
+    return kitty.unplace(cast.image_id, cast.placement_id)
+
+
+def _upload(picture: Picture, loops: bool) -> str:
+    """One image's upload (in the worker): a still, a loop with its gaps (started
     after every frame is up, unless ``loops`` is False), or a one-shot's frames, stopped."""
-    actor, image_id = cast.actor, cast.image_id
+    actor, image_id = picture.source, picture.image_id
+    assert actor is not None
     frames = list(actor.frames)
     if len(frames) == 1:
         return kitty.transmit_raw(image_id, actor.width, actor.height, frames[0])
     if actor.loop:
-        return kitty.animation(image_id, actor.width, actor.height, frames, _gaps(actor), start=loops)
+        return kitty.animation(image_id, actor.width, actor.height, frames, gaps(actor), start=loops)
     return kitty.frames_stopped(image_id, actor.width, actor.height, frames)
-
-
-def _gaps(actor: Actor) -> list[int]:
-    gaps = [int(g) for g in actor.gaps]
-    return gaps * len(actor.frames) if len(gaps) == 1 else gaps

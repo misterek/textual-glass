@@ -1519,7 +1519,8 @@ class GlassEngine:
                     support=self.support.reason if self.support else None, active=self.active,
                     errors=self.errors, retry_in=self.retry_in, flourishes=self.effects.flourishes,
                     scenes=len(self._player.showings) if self._player is not None else 0,
-                    actors=self._player.actors if self._player is not None else 0)
+                    actors=self._player.actors if self._player is not None else 0,
+                    scene_images=self._player.images if self._player is not None else 0)
 
 
 def _flourish_rgb(color: Any) -> RGB:

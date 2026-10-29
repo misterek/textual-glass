@@ -190,9 +190,11 @@ def place_virtual(image_id: int, cols: int, rows: int) -> str:
     return command(dict(a="p", U=1, i=image_id, p=1, c=max(1, cols), r=max(1, rows)))
 
 
-def unplace(image_id: int) -> str:
-    """Delete an image's placements but keep its data."""
-    return command(dict(a="d", d="i", i=image_id))
+def unplace(image_id: int, placement_id: int | None = None) -> str:
+    """Delete an image's placements (or only ``placement_id``) but keep its data."""
+    if placement_id is None:
+        return command(dict(a="d", d="i", i=image_id))
+    return command(dict(a="d", d="i", i=image_id, p=placement_id))
 
 
 def delete(image_id: int) -> str:

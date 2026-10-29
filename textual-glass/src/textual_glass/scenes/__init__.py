@@ -16,6 +16,12 @@ never plays one by itself. Lengths are terminal pixels on the :class:`Stage`
 
 **Every frame is fully transparent at its border** (rule 17): a native actor
 moves and is cropped at the stage's edge, a stretched one fills whole cells.
+
+**Actors whose** ``frames`` **is the same object share one image**, uploaded
+once, each actor its own placement of it: a hundred lights of one kind cost
+one picture. Only stills and loops share: glass steps a one-shot's frames on
+its image (``a=a,c=N``), not on a placement, so each one-shot has an image of
+its own, whatever its frames.
 """
 
 from __future__ import annotations
@@ -29,14 +35,18 @@ from typing import Any
 from ..render import RGB
 
 #: At most this many actors, frames per actor, pixels in all (every frame of
-#: every actor) and seconds per scene.
-MAX_ACTORS = 256
+#: every image: actors that share one count it once) and seconds per scene.
+MAX_ACTORS = 1024
 MAX_FRAMES = 64
 MAX_PIXELS = 16_000_000
 MAX_SECONDS = 300.0
 
 #: Palette roles a stage carries (``Stage.colors``).
 ROLES = ("primary", "secondary", "accent", "success", "warning", "error", "foreground", "background")
+#: The theme's space and nebula colours when it sets none (``glass-space-top``,
+#: ``glass-space-bottom``, ``glass-nebula-1`` to ``3``): the same as the nebula backdrop's.
+SPACE: tuple[RGB, RGB] = ((0x0B, 0x14, 0x33), (0x03, 0x05, 0x0D))
+NEBULA: tuple[RGB, RGB, RGB] = ((0x5B, 0x2A, 0x9E), (0x0E, 0x6A, 0x78), (0x1B, 0x3D, 0x8F))
 
 Point = tuple[float, float]
 Key = tuple[float, float, float]  # t, x, y
@@ -61,13 +71,19 @@ class Stage:
     still: bool
     #: For any randomness: the same seed gives the same scene.
     seed: int
+    #: The theme's deep space, top to bottom, and its three nebula colours (the nebula
+    #: backdrop's). On a light theme a scene that wants the night paints its own sky
+    #: from them, behind everything (``scenes.space`` does).
+    space: tuple[RGB, RGB] = SPACE
+    nebula: tuple[RGB, RGB, RGB] = NEBULA
 
 
 @dataclass(frozen=True)
 class Route:
     """Where an actor's centre is over time: keys of ``(t, x, y)`` in order of
     ``t``, with straight lines between them. Before the first key it is at the
-    first, after the last at the last. Sample a curve with :meth:`sample`."""
+    first, after the last at the last (glass stops working it out once it has settled).
+    Sample a curve with :meth:`sample`."""
 
     keys: tuple[Key, ...]
 
@@ -115,7 +131,11 @@ class Route:
 
 @dataclass(frozen=True)
 class Actor:
-    """One moving part: an image of one or more frames, and where it is when."""
+    """One moving part: an image of one or more frames, and where it is when.
+
+    Stills and loops whose ``frames`` is the same object (``is``, not equal bytes) share
+    one image: give them the same size and, for a loop, the same gaps. A loop's
+    placements all show the frame the terminal is on. One-shots never share."""
 
     #: Straight-alpha RGBA frames, ``width * height * 4`` bytes each, transparent at their border.
     frames: Sequence[bytes]
@@ -174,6 +194,7 @@ def check(scene: Any, stage: Stage) -> None:
     if any(not 0 <= cue.t <= scene.duration for cue in scene.cues):
         raise ValueError(f"a scene's cues are at 0 to its duration ({scene.duration:g} s): later ones never come")
     pixels = 0
+    shown: dict[int, tuple[int, Actor]] = {}  # the first actor of each shared image, by its frames
     for n, actor in enumerate(scene.actors):
         size = actor.width * actor.height * 4
         frames = len(actor.frames)
@@ -191,6 +212,28 @@ def check(scene: Any, stage: Stage) -> None:
             if not (1 <= cols <= stage.cols and 1 <= rows <= stage.rows):
                 raise ValueError(f"actor {n} is stretched over {cols}x{rows} cells, "
                                  f"more than the stage's {stage.cols}x{stage.rows}")
+        if shares(actor):
+            first = shown.get(id(actor.frames))
+            if first is not None:
+                m, other = first
+                if (other.width, other.height) != (actor.width, actor.height) or (
+                        frames > 1 and gaps(other) != gaps(actor)):
+                    raise ValueError(f"actors {m} and {n} share their frames, so they need the same size "
+                                     "(and a loop the same gaps)")
+                continue  # its image is counted once
+            shown[id(actor.frames)] = (n, actor)
         pixels += actor.width * actor.height * frames
     if pixels > MAX_PIXELS:
         raise ValueError(f"a scene has at most {MAX_PIXELS:,} pixels in all its frames, not {pixels:,}")
+
+
+def shares(actor: Actor) -> bool:
+    """Whether an actor can share its image with others whose ``frames`` is the same object:
+    stills and loops can, one-shots can't."""
+    return len(actor.frames) == 1 or actor.loop
+
+
+def gaps(actor: Actor) -> list[int]:
+    """One gap per frame, in ms."""
+    out = [int(g) for g in actor.gaps]
+    return out * len(actor.frames) if len(out) == 1 else out
