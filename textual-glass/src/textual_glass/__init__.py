@@ -40,7 +40,7 @@ from .widgets import (
     Telemetry,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "FLOURISHES", "MOTIONS", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard", "LoadedImage",
     "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile",

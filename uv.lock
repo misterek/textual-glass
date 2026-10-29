@@ -979,7 +979,7 @@ wheels = [
 
 [[package]]
 name = "textual-glass"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "textual-glass" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## textual-glass 0.4.0 (2026-10-28)
+
+Flourishes: short celestial animations your app plays when something happens. Nothing changes for an app that doesn't call them. textual-orbital stays at 0.2.0 and works with either glass.
 
 ### textual-glass
 
