@@ -1,9 +1,10 @@
 """Shapes: flourishes that follow the anchor's outline or sky. No Textual imports.
 
 Each one is drawn around the anchor's panel border, the rounded rectangle glass
-draws through the middle of the anchor's outermost cells (:func:`_outline`).
-Light is drawn into small windows of the stage wherever it can be, so a
-flourish over the whole window costs little more than one over a panel.
+draws through the middle of the anchor's outermost cells (:func:`_outline`);
+over the whole window, the eclipse and the constellation move into its sky.
+Light goes into small windows of the stage where it can, and every frame is
+packed to upload small (:func:`_frame`).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ TAU = 2 * math.pi
 
 #: A window of the stage: its slices, and its pixel centres (a row and a column).
 Win = tuple[tuple[slice, slice], Array, Array]
-_ROUND = np.array([0xFC, 0xFC, 0xFC, 0xFF], np.uint8)
+_ROUND = np.array([0xFC, 0xFC, 0xFC, 0xFF], np.uint8)  # colours to 6 bits, alpha kept
 
 
 # ================================================================ helpers ==
@@ -179,6 +180,15 @@ def _frame(light: Light, mask: Array, rows: int = 1) -> bytes:
     return px.tobytes()
 
 
+def _pairs(plane: Array) -> Array:
+    """Pairs of columns averaged: soft light changes little across two pixels, and uploads much smaller."""
+    n = plane.shape[1] // 2 * 2
+    pair = (plane[:, 0:n:2] + plane[:, 1:n:2]) * F32(0.5)
+    plane[:, 0:n:2] = pair
+    plane[:, 1:n:2] = pair
+    return plane
+
+
 def _fan(loop: _Loop, xs: Array, ys: Array, out: Array, lean: float) -> tuple[Array, Array]:
     """Where each pixel outside the outline came from, if light leaves the outline
     leaning ``lean`` (0 to 1) of the way from straight out to straight away from
@@ -284,7 +294,7 @@ def eclipse(stage: Stage) -> tuple[list[bytes], list[int]]:
         hw, hh = max(hw, 0.8 * ch), max(hh, 0.8 * ch)
         rad = min(hw, hh)
     loop = _Loop(cx, cy, hw, hh, rad)
-    small = min(1.0, math.sqrt(loop.length / (25 * ch)))
+    small = min(1.0, math.sqrt(loop.length / (25 * ch)))  # 1, or less round a small outline
     reach_max = 3.4 * zone
     win = _window(stage, cx - hw - reach_max, cy - hh - reach_max, cx + hw + reach_max, cy + hh + reach_max)
     if win is None:
@@ -309,9 +319,9 @@ def eclipse(stage: Stage) -> tuple[list[bytes], list[int]]:
         streams += R.uniform(0.6, 1.4) * np.exp(-gap * gap) * left ** 1.4
     rays = (0.75 + 0.25 * np.sin(s * (TAU / (0.9 * zone * small)) + 2.5 * np.sin(s * (TAU / (4.7 * zone)))))
     rays = rays * outside
-    inner = np.exp(-out / (0.45 * zone)) * 0.5 * rays
-    streams *= 0.9 * rays
-    tint = smoothstep(0.0, 0.6 * zone, out)[..., None]
+    inner = np.exp(-out / (0.45 * zone)) * 0.6 * rays
+    streams *= 1.2 * rays
+    tint = _pairs(smoothstep(0.0, 0.6 * zone, out))[..., None]
     corona_rgb = near * (1 - tint) + color * tint
     # the rim: a thin hot line in a narrow halo
     rim = np.exp(-((d / (0.6 * u + 0.4)) ** 2)) * fade
@@ -330,7 +340,7 @@ def eclipse(stage: Stage) -> tuple[list[bytes], list[int]]:
     # the moon: a disc just big enough to cover the outline, passing left to right
     moon_r = math.hypot(loop.a, loop.b) + loop.r + 0.5 * cw + 0.45 * ch
     travel = moon_r + hw + 0.5 * ch
-    panel = smoothstep(0.5 * cw, -0.2 * cw, d) * (0.58 if dark else 0.26)
+    panel = smoothstep(0.5 * cw, -0.2 * cw, d) * (0.58 if dark else 0.22)
     # the diamond: on the top-right corner, the last of the rim the moon covers
     gx, gy, nx, ny = loop.point(corners[1])
     gx, gy = gx + nx * 0.5 * u, gy + ny * 0.5 * u
@@ -344,7 +354,7 @@ def eclipse(stage: Stage) -> tuple[list[bytes], list[int]]:
     for t in times:
         light = Light(stage)
         if t < 0.56:
-            mx = cx - travel * (1 - ease_out(t / 0.56))
+            mx = cx - travel * (1 - t / 0.56) ** 2  # slowing as it covers
         else:
             mx = cx + travel * ease_in_out((t - 1.08) / 0.5) ** 1.6
         moon = smoothstep(moon_r + 0.45 * ch, moon_r - 0.45 * ch, np.sqrt((xs - mx) ** 2 + (ys - cy) ** 2))
@@ -353,17 +363,17 @@ def eclipse(stage: Stage) -> tuple[list[bytes], list[int]]:
         lit = _ramp(t, 0.0, 0.12) * (1 - _ramp(t, 0.5, 0.6))
         if lit > 0:
             _shine(light, where, lit_rgb * (lit * (1 - moon))[..., None], lit_a * lit * (1 - moon))
-        corona = _ramp(t, 0.5, 0.6) * (1 + 0.45 * bump(t - 0.55, 0.06, 0.45)) * (1 - _ramp(t, 1.1, 1.72))
+        corona = _ramp(t, 0.45, 0.56) * (1 + 0.45 * bump(t - 0.5, 0.06, 0.45)) * (1 - _ramp(t, 1.1, 1.72))
         if corona > 0.002:
-            front = (0.8 + 2.4 * ease_out((t - 0.52) / 0.7)) * zone
+            front = (0.8 + 2.4 * ease_out((t - 0.47) / 0.7)) * zone
             flow = (0.85 + 0.15 * np.sin(out * (TAU / (0.9 * zone)) - t * 9)) * smoothstep(front + 0.8 * zone,
                                                                                           front - 0.8 * zone, out)
-            k = (inner + streams * flow) * corona
-            _shine(light, where, corona_rgb * k[..., None] + rim_rgb * corona,
-                   1 - (1 - np.minimum(k, 1)) * (1 - np.minimum(rim_a * corona, 1)))
+            amount = _pairs((inner + streams * flow) * corona)
+            _shine(light, where, corona_rgb * amount[..., None] + rim_rgb * corona,
+                   1 - (1 - np.minimum(amount, 1)) * (1 - np.minimum(rim_a * corona, 1)))
             for px, py, size, ph in proms:
                 _blob(light, stage, px, py, size, color, 1.1 * corona * (0.8 + 0.2 * math.sin(t * 11 + ph)))
-        flash = bump(t - 0.45, 0.11, 0.5)
+        flash = bump(t - 0.4, 0.09, 0.5)
         if flash > 0:
             _blob(light, stage, gx, gy, bloom, near, 0.7 * flash)
             _star(light, stage, gx, gy, 1.1 * flare * (0.5 + 0.5 * flash), 4.0 * (0.6 + 0.4 * flash), hot,
@@ -413,6 +423,7 @@ def aurora(stage: Stage) -> tuple[list[bytes], list[int]]:
                   R.uniform(0, TAU)) for _ in range(2)]
         curtains.append((depth, R.uniform(0, TAU, 6), folds))
     lap, swell = TAU / max(10 * cw, span / 2.5), R.uniform(0, TAU)  # the lower edge's wave
+    strength = 1.0 if dark else 0.8  # paint on a light theme: a little goes a long way
     mask = border(stage)
 
     times, gap_ms = _times(32 if bw == 2 else 27, 2000)  # it moves slowly: fewer frames on a big stage
@@ -432,7 +443,7 @@ def aurora(stage: Stage) -> tuple[list[bytes], list[int]]:
                     arg = k * xs - speed * t * TAU + p0
                     u = u - amp / k * np.sin(arg)
                     bunch = bunch + amp * np.cos(arg)
-                bright = 0.6 / np.maximum(1 - bunch, 0.2)
+                bright = np.minimum(0.6 / np.maximum(1 - bunch, 0.2), 3.0 if dark else 1.5)
                 base = base0 - (0.2 + 0.3 * depth) * ch - wave * np.sin(u * lap - t * 1.8 + swell + 0.5 * depth)
                 hgt = np.maximum(base - ys, -tall)  # above the curtain's lower edge
                 rel = hgt / max(1.0, tall)
@@ -448,7 +459,7 @@ def aurora(stage: Stage) -> tuple[list[bytes], list[int]]:
                 up = np.clip(rel / reach, 0, 1)
                 upper = (1 - up) ** 1.3 * (0.55 + 0.45 * np.exp(-up * 6))
                 spill = np.exp(np.minimum(hgt, 0) / (0.3 * ch)) * (hgt < 0) * 0.3
-                k_ = (lower * upper * rays + spill) * bright * ends * gain * (0.95 if depth == 0 else 0.45)
+                k_ = (lower * upper * rays + spill) * bright * ends * gain * ((0.95 if depth == 0 else 0.45) * strength)
                 tint = smoothstep(0.1, 0.75, rel)[..., None]
                 c = color * (1 - tint) + accent * tint
                 if dark and depth == 0:  # the lower edge burns
@@ -524,13 +535,13 @@ def orbit(stage: Stage) -> tuple[list[bytes], list[int]]:
         if t <= lap + 0.05:
             hx, hy, _, _ = path.point(ease_in_out(t / lap) * path.length)
             grow = _ramp(t, 0.0, 0.08) * (1 - _ramp(t, lap - 0.03, lap + 0.05))
-            _blob(light, stage, hx, hy, 0.95 * ch, color, 0.55 * grow)
-            _star(light, stage, hx, hy, 0.4 * ch, 1.6, hot, color, 1.4 * grow)
+            _blob(light, stage, hx, hy, 1.1 * ch, color, 0.6 * grow)
+            _star(light, stage, hx, hy, 0.42 * ch, 1.7, hot, color, 1.5 * grow)
         # the glint where it finishes
         if done > 0:
-            _blob(light, stage, gx, gy, 1.2 * ch, color, 0.5 * done)
-            _star(light, stage, gx, gy, 0.7 * ch * (0.6 + 0.4 * done), 3.2, hot, mix(stage.color, stage.accent, 0.3),
-                  1.7 * done)
+            _blob(light, stage, gx, gy, 1.5 * ch, color, 0.6 * done)
+            _star(light, stage, gx, gy, 0.9 * ch * (0.6 + 0.4 * done), 4.0, hot, mix(stage.color, stage.accent, 0.3),
+                  2.2 * done, 1.3)
         frames.append(_frame(light, mask))
     return frames, gap_ms
 
@@ -623,8 +634,11 @@ def constellation(stage: Stage) -> tuple[list[bytes], list[int]]:
                 _add(light, where, accent, shape * (0.7 * lit + 0.7 * fresh) * env)
                 _blob(light, stage, sx + (ex - sx) * p, sy + (ey - sy) * p, 0.3 * ch, hot, 1.2 * env)
             else:
+                # once it is closed, a sheen runs once round the figure
+                at = starts[i] + along * (starts[i + 1] - starts[i]) - _ramp(t, draw1, draw1 + 0.36) * 1.2 + 0.1
+                sheen = np.exp(-((at / 0.07) ** 2)) * (t > draw1)
                 shimmer = 0.85 + 0.15 * math.sin(t * 8 + 1.7 * i)
-                _add(light, where, accent, shape * (0.7 * shimmer + 0.7 * done) * env)
+                _add(light, where, accent, shape * (0.7 * shimmer + 0.5 * done + 1.1 * sheen) * env)
         for k, (x, y, size) in enumerate(stars):
             age = t - born[k]
             if age <= 0:
