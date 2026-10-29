@@ -250,37 +250,11 @@ def glow(xs: Array, ys: Array, cx: float, cy: float, radius: float) -> Array:
     return np.exp(-4.0 * d * d) * smoothstep(1.0, 0.6, d)
 
 
-def disc(xs: Array, ys: Array, cx: float, cy: float, r: float, feather: float = 1.0) -> Array:
-    """A soft-edged disc: 1 inside ``r``, 0 from ``r + feather`` out."""
-    d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-    return smoothstep(r + feather, r - feather, d)
-
-
-def ring(xs: Array, ys: Array, cx: float, cy: float, r: float, width: float) -> Array:
-    """A thin soft ring of radius ``r``."""
-    d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-    return np.exp(-(((d - r) / max(1e-6, width)) ** 2)) * smoothstep(r + 3 * width, r + 2 * width, d)
-
-
-def soft_flash(stage: Stage) -> tuple[list[bytes], list[int]]:
-    """A placeholder: a glow that swells and fades at the anchor (until a maker is written)."""
-    xs, ys = coords(stage)
-    cx, cy = centre(stage.at)
-    radius = min(stage.width, stage.height) / 2
-    shape = glow(xs, ys, cx, cy, radius)
-    out = []
-    for f in range(20):
-        light = Light(stage)
-        light.add(stage.color, shape * bump(f / 19, 0.3, 1.0) * 0.8)
-        out.append(light.frame())
-    return out, gaps(20, 900)
-
-
 def blank(stage: Stage) -> bytes:
     """A fully transparent frame."""
     return bytes(stage.width * stage.height * 4)
 
 
-__all__ = ["Light", "Where", "Window", "blank", "border", "bump", "centre", "coords", "disc", "ease_in_out",
-           "ease_out", "gaps", "glow", "mix", "ramp", "ring", "rng", "room", "segment", "shade", "soft_flash",
-           "timeline", "unit", "white_hot", "window"]
+__all__ = ["Light", "Where", "Window", "blank", "border", "bump", "centre", "coords", "ease_in_out", "ease_out",
+           "gaps", "glow", "mix", "ramp", "rng", "room", "segment", "shade", "timeline", "unit", "white_hot",
+           "window"]
