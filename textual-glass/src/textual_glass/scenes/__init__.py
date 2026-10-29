@@ -32,6 +32,7 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..palette import NEBULA, SPACE
 from ..render import RGB
 
 #: At most this many actors, frames per actor, pixels in all (every frame of
@@ -43,10 +44,6 @@ MAX_SECONDS = 300.0
 
 #: Palette roles a stage carries (``Stage.colors``).
 ROLES = ("primary", "secondary", "accent", "success", "warning", "error", "foreground", "background")
-#: The theme's space and nebula colours when it sets none (``glass-space-top``,
-#: ``glass-space-bottom``, ``glass-nebula-1`` to ``3``): the same as the nebula backdrop's.
-SPACE: tuple[RGB, RGB] = ((0x0B, 0x14, 0x33), (0x03, 0x05, 0x0D))
-NEBULA: tuple[RGB, RGB, RGB] = ((0x5B, 0x2A, 0x9E), (0x0E, 0x6A, 0x78), (0x1B, 0x3D, 0x8F))
 
 Point = tuple[float, float]
 Key = tuple[float, float, float]  # t, x, y

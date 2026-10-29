@@ -85,12 +85,5 @@ def test_actors_with_the_same_frames_share_one_image_and_count_it_once() -> None
     assert not scenes.shares(actor(frames=flame, loop=False))
 
 
-def test_the_default_space_colours_are_the_nebula_backdrops() -> None:
-    from textual_glass import palette
-
-    assert scenes.SPACE == palette.SPACE and scenes.NEBULA == palette.NEBULA
-    assert STAGE.space == palette.SPACE and STAGE.nebula == palette.NEBULA
-
-
 def test_the_scenes_have_no_textual_imports() -> None:
     assert not re.search(r"^\s*(from|import) textual\b", inspect.getsource(scenes), re.M)

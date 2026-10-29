@@ -13,11 +13,16 @@ For each look it writes:
   the lights coming on, the release, and the summary of a 25-item week;
 * ``{look}_show.gif``: a 12-ship show on a 120x36-cell page at 9x19 px cells;
 * ``{look}_story.png``: moments of that show, for a quick look without playing it;
-* ``{look}_final.png`` and ``{look}_light.png``: the summary on the dark and light themes;
+* ``{look}_final.png`` and ``{look}_light.png``: the 25-item summary on the dark
+  theme, and on the light one (the show's own night, over a light page);
+* ``{look}_busy.png`` and ``{look}_busy_story.png``: a 150-item week's summary,
+  and moments of its show (the waves);
 
-and prints the budgets of the 25-item show at 140x45 cells on a Retina screen
-(18x38 px cells): actors, frames, pixels, compressed upload, render time, and
-whether every frame of every actor is transparent at its border (rule 17).
+and prints the budgets at 140x45 cells on a Retina screen (18x38 px cells) of a
+25, 75 and 150-item week: actors, images (actors with the same frames share
+one), pixels against the contract's limit, compressed upload, the show's
+length, render time, and whether every frame of every actor is transparent at
+its border (rule 17).
 """
 
 from __future__ import annotations
@@ -35,8 +40,8 @@ from PIL import Image, ImageDraw
 
 from textual_glass import backdrop
 from textual_glass.palette import Palette
-from textual_glass.scenes import ROLES, Actor, Scene, Stage, check, space
-from textual_glass.scenes._effects import arrive, light_on, warp_in
+from textual_glass.scenes import MAX_ACTORS, MAX_PIXELS, ROLES, Actor, Scene, Stage, check, shares, space
+from textual_glass.scenes._effects import arrive, held_light, light_on, warp_in
 from textual_glass.scenes._paint import Sprite
 from textual_glass.scenes._ships import ship_sprite
 from textual_glass.scenes._worlds import LOOP_GAP
@@ -144,16 +149,27 @@ def border_clear(actor: Actor) -> bool:
     return True
 
 
+def images(scene: Scene) -> list[Actor]:
+    """One actor per terminal image: stills and loops with the same frames share one."""
+    seen: dict[int, Actor] = {}
+    for a in scene.actors:
+        seen[id(a.frames) if shares(a) else id(a)] = a
+    return list(seen.values())
+
+
 def budget(scene: Scene, ms: float) -> dict[str, object]:
-    loops = [a for a in scene.actors if a.loop and len(a.frames) > 1 and a.cells is not None]
+    pictures = images(scene)
+    loops = [a for a in pictures if a.loop and len(a.frames) > 1 and a.cells is not None]
     world = max(loops, key=lambda a: a.width * a.height, default=None)
+    held = {id(a.frames) if shares(a) else id(a) for a in scene.actors if a.leave == math.inf}
     return {
         "actors": len(scene.actors),
-        "frames": sum(len(a.frames) for a in scene.actors),
-        "pixels": sum(a.width * a.height * len(a.frames) for a in scene.actors),
-        "upload_bytes": sum(len(zlib.compress(bytes(f), 6)) for a in scene.actors for f in a.frames),
-        "hold_bytes": sum(len(zlib.compress(bytes(f), 6)) for a in scene.actors for f in a.frames
-                          if a.leave == math.inf),
+        "images": len(pictures),
+        "frames": sum(len(a.frames) for a in pictures),
+        "pixels": sum(a.width * a.height * len(a.frames) for a in pictures),
+        "upload_bytes": sum(len(zlib.compress(bytes(f), 6)) for a in pictures for f in a.frames),
+        "hold_bytes": sum(len(zlib.compress(bytes(f), 6)) for a in pictures for f in a.frames
+                          if (id(a.frames) if shares(a) else id(a)) in held),
         "loop_frames": len(world.frames) if world else 0,
         "loop_px": world.width * world.height if world else 0,
         "duration_s": round(scene.duration, 1),
@@ -239,19 +255,24 @@ def contact_sheet(look: str, out: Path, seed: int) -> None:
     for kind in ("deploy", "release"):
         sprite, _ = arrive(retina, style.family, kind, heading, inks[kind], style.arrive, style.sun, (0.6, 0.4))
         rows.append((f"Arrival ({style.arrive}), {kind}", strip(sprite, bg_retina)))
-    lights = [strip(light_on(retina, kind, inks[kind], style.light, seed=3), bg_retina) for kind in space.KINDS]
+    def coming_on(kind: str) -> Sprite:  # the light coming on, then the one that stays
+        on, held = (f(retina, kind, inks[kind], style.light, seed=3) for f in (light_on, held_light))
+        return Sprite([*on.frames, *held.frames], on.width, on.height, [*on.gaps, 1000], False)
+
+    lights = [strip(coming_on(kind), bg_retina) for kind in space.KINDS]
     lw = max(s.width for s in lights)
     block = Image.new("RGBA", (lw, sum(s.height + 4 for s in lights)), (0, 0, 0, 255))
     y = 0
     for s in lights:
         block.paste(s, (0, y))
         y += s.height + 4
-    rows.append((f"Lights coming on ({style.light}); the last frame stays: merged, review, deploy, ticket, release",
+    rows.append((f"Lights coming on ({style.light}); the last frame, one picture per kind, stays: merged, review, "
+                 "deploy, ticket, release",
                  block))
 
     # the release, on the page
     comp = Compositor(small, scene, bg_small)
-    t_rel = next(c.t for c in scene.cues if c.data[2] == "release")
+    t_rel = next(c.t for c in scene.cues if c.data != space.END and c.data[2] == "release")
     moments = [comp.at(t_rel + dt) for dt in (-0.9, -0.3, 0.0, 0.15, 0.35, 0.6, 0.9, 1.4)]
     mw, mh = moments[0].width // 4, moments[0].height // 4
     rel = Image.new("RGBA", (mw * 4 + 12, mh * 2 + 4), (0, 0, 0, 255))
@@ -276,9 +297,28 @@ def contact_sheet(look: str, out: Path, seed: int) -> None:
 
 
 def light_frame(look: str, out: Path, seed: int) -> None:
+    """The 25-item summary on a light theme: the show's own night over a light page."""
     stage = stage_for(LIGHT, 120, 36, (9, 19), seed)
     scene = space.make(stage, space.sample_week(25, seed=seed), look)
     Compositor(stage, scene, backdrop_image(stage, LIGHT)).at(scene.duration + 5.0).save(out / f"{look}_light.png")
+
+
+def busy_frames(look: str, out: Path, seed: int) -> None:
+    """A 150-item week on a 140x45-cell Retina page: its summary, and moments of its show."""
+    stage = stage_for(NAVY, 140, 45, (18, 38), seed)
+    scene = space.make(stage, space.sample_week(150, seed=seed, releases=2), look)
+    comp = Compositor(stage, scene, backdrop_image(stage, NAVY))
+    comp.at(scene.duration + 5.0).save(out / f"{look}_busy.png")
+    moments = [scene.duration * k / 8 for k in range(1, 8)] + [scene.duration + 2.0]
+    shots = [comp.at(t) for t in moments]
+    w, h = shots[0].width // 4, shots[0].height // 4
+    board = Image.new("RGB", (w * 4 + 12, h * 2 + 4), (0, 0, 0))
+    draw = ImageDraw.Draw(board)
+    for i, (s, t) in enumerate(zip(shots, moments, strict=True)):
+        x, y = (i % 4) * (w + 4), (i // 4) * (h + 4)
+        board.paste(tile(s, w, h).convert("RGB"), (x, y))
+        draw.text((x + 6, y + 4), f"{t:4.1f} s", fill=(220, 220, 230))
+    board.save(out / f"{look}_busy_story.png")
 
 
 def mock_show(look: str, out: Path, seed: int, gif: bool) -> None:
@@ -291,7 +331,7 @@ def mock_show(look: str, out: Path, seed: int, gif: bool) -> None:
     if gif:
         frames = [comp.at(k * gap / 1000) for k in range(int((scene.duration + 1.5) * 1000 / gap))]
         save_gif(frames, out / f"{look}_show.gif", gap)
-    cue_t = [c.t for c in scene.cues]
+    cue_t = [c.t for c in scene.cues if c.data != space.END]
     moments = [0.5, cue_t[0] - 1.0, cue_t[0] + 0.2, cue_t[3], cue_t[6], cue_t[-1] - 0.3, cue_t[-1] + 0.3,
                scene.duration + 2.0]
     shots = [comp.at(t) for t in moments]
@@ -305,10 +345,10 @@ def mock_show(look: str, out: Path, seed: int, gif: bool) -> None:
     board.save(out / f"{look}_story.png")
 
 
-def measure(look: str, seed: int) -> dict[str, object]:
-    """The 25-item show at 140x45 cells on a Retina screen, and the same page under minimal motion."""
+def measure(look: str, seed: int, items: int = 25) -> dict[str, object]:
+    """The show at 140x45 cells on a Retina screen, and the same page under minimal motion."""
     stage = stage_for(NAVY, 140, 45, (18, 38), seed)
-    week = space.sample_week(25, seed=seed)
+    week = space.sample_week(items, seed=seed, releases=2 if items >= 100 else 1)
     t0 = time.perf_counter()
     scene = space.make(stage, week, look)
     ms = (time.perf_counter() - t0) * 1000
@@ -317,14 +357,14 @@ def measure(look: str, seed: int) -> dict[str, object]:
     still = stage_for(NAVY, 140, 45, (18, 38), seed, still=True)
     t0 = time.perf_counter()
     quiet = space.make(still, week, look)
-    numbers["still_bytes"] = sum(len(zlib.compress(bytes(f), 6)) for a in quiet.actors for f in a.frames)
+    numbers["still_bytes"] = sum(len(zlib.compress(bytes(f), 6)) for a in images(quiet) for f in a.frames)
     numbers["still_ms"] = round((time.perf_counter() - t0) * 1000)
     numbers["still_border_ok"] = all(border_clear(a) for a in quiet.actors)
     small = stage_for(NAVY, 120, 36, (9, 19), seed)
     t0 = time.perf_counter()
     page = space.make(small, week, look)
     numbers["page_ms"] = round((time.perf_counter() - t0) * 1000)
-    numbers["page_bytes"] = sum(len(zlib.compress(bytes(f), 6)) for a in page.actors for f in a.frames)
+    numbers["page_bytes"] = sum(len(zlib.compress(bytes(f), 6)) for a in images(page) for f in a.frames)
     numbers["page_border_ok"] = all(border_clear(a) for a in page.actors)
     return numbers
 
@@ -335,20 +375,29 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--no-gif", action="store_true", help="skip the GIFs (the slow part)")
+    parser.add_argument("--numbers", action="store_true", help="only print the budgets")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    table = {}
+    table: dict[str, dict[int, dict[str, object]]] = {}
     for look in args.looks or space.LOOKS:
-        numbers = measure(look, args.seed)
-        table[look] = numbers
-        clear = numbers["border_ok"] and numbers["still_border_ok"] and numbers["page_border_ok"]
-        print(f"{look:10} actors {numbers['actors']:3}  frames {numbers['frames']:4}  "
-              f"px {numbers['pixels'] / 1e6:5.1f}M  upload {numbers['upload_bytes'] / 1e6:4.2f} MB "
-              f"(held {numbers['hold_bytes'] / 1e3:4.0f} KB, minimal motion {numbers['still_bytes'] / 1e3:4.0f} KB)  "
-              f"loop {numbers['loop_frames']}x{numbers['loop_px']} px  render {numbers['render_ms']} ms  "
-              f"{numbers['duration_s']} s  border {'ok' if clear else 'LIGHT AT THE EDGE'}")
+        table[look] = {}
+        for items in (25, 75, 150):
+            numbers = measure(look, args.seed, items)
+            table[look][items] = numbers
+            clear = numbers["border_ok"] and numbers["still_border_ok"] and numbers["page_border_ok"]
+            pixels, actors = int(str(numbers["pixels"])), int(str(numbers["actors"]))
+            print(f"{look:10} {items:3} items  actors {actors:4} ({actors / MAX_ACTORS:4.0%})  "
+                  f"images {numbers['images']:4}  px {pixels / 1e6:5.2f}M ({pixels / MAX_PIXELS:4.0%})  "
+                  f"upload {int(str(numbers['upload_bytes'])) / 1e6:4.2f} MB "
+                  f"(held {int(str(numbers['hold_bytes'])) / 1e3:4.0f} KB, "
+                  f"minimal motion {int(str(numbers['still_bytes'])) / 1e3:4.0f} KB)  "
+                  f"{numbers['duration_s']} s  render {numbers['render_ms']} ms  "
+                  f"border {'ok' if clear else 'LIGHT AT THE EDGE'}")
+        if args.numbers:
+            continue
         contact_sheet(look, args.out, args.seed)
         light_frame(look, args.out, args.seed)
+        busy_frames(look, args.out, args.seed)
         mock_show(look, args.out, args.seed, not args.no_gif)
     (args.out / "numbers.json").write_text(json.dumps(table, indent=2))
     print(f"sheets, GIFs and numbers in {args.out}")
