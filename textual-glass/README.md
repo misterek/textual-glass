@@ -156,7 +156,7 @@ app.glass.flourish("comet", at=self.query_one("#open"), to=self.query_one("#merg
 
 - `name` is a key of `textual_glass.FLOURISHES` (the kinds are in the table below). An unknown name raises `ValueError`.
 - `at` is where it plays: a widget, a `textual.geometry.Region` in screen cells, or `None` for the whole window. It plays on the widget's screen: over a popup when the widget is on the popup, and under the popup's scrim when the widget is below it. A region is on the top screen.
-- `to` is where a kind that travels goes: a comet flies from `at` to `to`. It is a widget or a region too. Leave it out for other kinds: they don't use it, but it still makes their stage bigger.
+- `to` is where a kind that travels goes: a comet flies from `at` to `to`. It is a widget or a region too. Other kinds ignore it.
 - `color` replaces the kind's main colour: `"#rrggbb"`, an RGB tuple or a Textual `Color`. A colour that doesn't parse raises `ValueError`. By default both of a kind's colours come from the theme: each kind names two palette roles (`Flourish.color` and `Flourish.accent`, such as `primary` and `secondary`).
 - It returns `True` if the flourish will play.
 

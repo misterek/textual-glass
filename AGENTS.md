@@ -17,7 +17,7 @@ Both packages were built for an always-on dashboard in a corner window of about 
 2. cheap while idle;
 3. good-looking.
 
-Every visual must encode information. Don't add decoration that takes space.
+Every visual that stays on screen must encode information: don't add decoration that takes space. Decoration that takes no space and doesn't stay is welcome when it makes a moment feel good: a flourish when something lands.
 
 ## How the two packages fit together
 

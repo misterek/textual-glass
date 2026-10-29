@@ -84,7 +84,7 @@ def kinds(monkeypatch: pytest.MonkeyPatch, gate: threading.Event) -> list[Stage]
         return frames_of(*STEADY)(stage)
 
     monkeypatch.setitem(FLOURISHES, "test-steady", Flourish(frames_of(*STEADY, seen), grow=(2, 1),
-                                                            color="success", accent="warning"))
+                                                            color="success", accent="warning", travels=True))
     monkeypatch.setitem(FLOURISHES, "test-long", Flourish(frames_of(*LONG, seen), grow=(2, 1)))
     monkeypatch.setitem(FLOURISHES, "test-gated", Flourish(gated))
     return seen

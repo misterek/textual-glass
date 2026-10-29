@@ -180,10 +180,10 @@ class Demo(App[None]):
     # -- playing ------------------------------------------------------------------------------
 
     def play(self, name: str) -> None:
-        """Play ``name`` at the target panel; a comet flies on to the next panel."""
+        """Play ``name`` at the target panel; a kind that travels (the comet) flies on to the next panel."""
         panels = [self.query_one(f"#{key}") for key in PANELS]
         at = panels[self.target]
-        to = panels[(self.target + 1) % len(panels)] if name == "comet" else None
+        to = panels[(self.target + 1) % len(panels)]
         glass = getattr(self, "glass", None)
         played = glass is not None and glass.flourish(name, at=at, to=to)
         self.last = name
