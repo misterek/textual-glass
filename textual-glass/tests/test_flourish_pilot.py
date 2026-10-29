@@ -439,6 +439,29 @@ async def ended(app: Any, most: int = 0) -> None:
     raise AssertionError("the flourishes never ended")
 
 
+class Logbook(list[Flight]):
+    """``effects.flights`` that remembers every flight that took off. A real kind
+    can land and end inside one ``pilot.pause()``, which waits for the CPU to go
+    idle while the worker renders the next one, so watching ``flights`` misses it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.took_off: list[Flight] = []
+
+    def append(self, flight: Flight) -> None:
+        self.took_off.append(flight)
+        super().append(flight)
+
+
+async def took_off(log: Logbook, count: int, timeout: float = 20.0) -> None:
+    """Wait until ``count`` flourishes have been uploaded and placed."""
+    deadline = time.monotonic() + timeout
+    while len(log.took_off) < count:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"only {len(log.took_off)} of {count} flourishes took off")
+        await asyncio.sleep(0.01)
+
+
 @pytest.mark.parametrize("size", [(70, 22), (90, 28), (140, 45)])
 async def test_the_demo_plays_every_kind(output: Output, size: tuple[int, int]) -> None:
     demo = _demo()
@@ -446,21 +469,23 @@ async def test_the_demo_plays_every_kind(output: Output, size: tuple[int, int]) 
     async with app.run_test(size=size) as pilot:
         await start(app, pilot)
         engine = app.glass
+        engine.effects.flights = log = Logbook()
         kinds = app.query_one(demo.KindList)
         names = list(FLOURISHES)
-        played: list[int] = []
         for n, name in enumerate(names):
             await ended(app, MAX_FLOURISHES - 1)
             kinds.select_index(n, animate=False)
             await pilot.press("enter" if n % 2 else "space")
             await pilot.pause()
             assert app.last == name and engine.effects.fired == n + 1, name
-            played.append((await landed(app, pilot)).image_id)
+            await took_off(log, n + 1)
             if n % 3 == 2:
                 await pilot.press("t")  # the next target panel
         await ended(app)
         model = output.model()
-        assert engine.errors == 0 and not set(played) & set(model.images), "every one played and was deleted"
+        played = {flight.image_id for flight in log.took_off}
+        assert engine.errors == 0 and len(log.took_off) == len(names), "every one played"
+        assert not played & set(model.images), "and was deleted"
         await pilot.press("f9", "f9")  # subtle, full, minimal
         assert engine.motion == "minimal" and "minimal" in str(app.query_one("#bar", Static).content)
         await pilot.press("space")
