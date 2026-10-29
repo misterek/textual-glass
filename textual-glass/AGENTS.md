@@ -10,7 +10,7 @@ Modules in `src/textual_glass/`:
 | --- | --- |
 | `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `on_hard_exit`, `detect`, `MOTIONS`, `FLOURISHES`. |
 | `glass.py` | The `Glass` mixin (`class MyApp(Glass, App)`): the `GLASS_*` options, `f9`/`shift+f9`, the palette's "Glass: ..." commands, detection before the driver starts, the suspend and resume subscriptions, `GLASS_CSS` (transparent modals), `terminal_write`. |
-| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites (freed once no widget shows them, rule 21), dimming placeholder images under popups, the image cache, `background_job` and the one path every worker callback takes (`_from_worker`, rule 22), the error budget and its retries, suspend and resume, glass's hard-exit sequence. `flourish()`: an anchor's screen and cells, the stage, the limit (`MAX_FLOURISHES`). The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`, `Z_FLOURISH`...). |
+| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites (freed once no widget shows them, rule 21), dimming placeholder images under popups, the image cache, `background_job` and the one path every worker callback takes (`_from_worker`, rule 22), the error budget and its retries, suspend and resume, glass's hard-exit sequence. `flourish()`: an anchor's screen and cells, the stage, the limit (`MAX_FLOURISHES`). `play_scene()` and the `player` it makes on first use, and the few calls into it (each frame, a resize, a theme change, the motion level, glass turning off, `stats()`). The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`, `Z_SCENE`, `Z_FLOURISH`...). |
 | `hard_exit.py` | `on_hard_exit(key, data)`: escape sequences written to the terminal on SIGTERM, SIGHUP or an unclean interpreter exit (rule 24). No Textual imports; works with glass on or off. |
 | `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin` (whose `render_lines` reports the sprites a widget's lines show), `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
 | `render.py` | The drawing model, no Textual imports: `Grid` (cells to layer pixels), `Canvas`, the `Item` base class (`bbox`, `draw`, `window`, `diff_boxes`, `dynamic`, `edge`), `paint`, `to_u8`, colour and shape helpers. |
@@ -21,7 +21,9 @@ Modules in `src/textual_glass/`:
 | `filter.py` | `GlassFilter` and `Rules`: the per-widget line filter that turns structural backgrounds into the terminal default, blanks pixel-drawn scrollbars and bars, and dims the screen under a modal (leaving placeholder colours alone). |
 | `effects.py` | Popup scrims (fades, recolouring), the `full` motion ambient effects, and flourish playback: rendered in the worker, uploaded while stopped, stepped with `a=a,c=N`, deleted after the last frame, dropped on a resize, a theme change, `minimal` motion or their screen closing. |
 | `flourishes/` | The flourish kinds, no Textual imports. `__init__.py`: `Flourish`, `Stage`, `make_stage`, `stage_cells`, `FLOURISHES` and the limits (`MAX_PX`, `MAX_FRAMES`, `MAX_MS`). The makers, by family: `streaks.py` (kinds that travel), `bursts.py`, `shapes.py`. `_draw.py`: what the makers share: `Light` (the canvas and the frame encoder), `window`, `room`, the border fade, colours for the theme, glows, easing and timelines. |
-| `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation`, edits, placements, placeholders, deletes (one id, delete-all, an id range), OSC 11. |
+| `scenes/` | The scene contract, no Textual imports: `Stage`, `Route`, `Actor`, `Cue`, `Scene`, `SceneMaker`, the palette `ROLES`, the limits (`MAX_ACTORS`, `MAX_FRAMES`, `MAX_PIXELS`, `MAX_SECONDS`) and `check`. The app writes the makers. |
+| `player.py` | Scene playback (`app.glass.play_scene`): `Player`, owned by the engine and made on first use, and the `Showing` handle. The maker and the uploads' encoding in the worker (two jobs: ids are handed out on the app thread in between); each tick the actors on stage placed again only when their rounded position or crop changes, native ones at a cell plus `X`/`Y` offsets with a source rectangle, stretched ones on whole cells; one-shots stepped with `a=a,c=N`; cues; the hold; the anchor checked every frame; the end reasons, every image deleted and every id freed; `minimal` motion; `on_cue` and `on_end` run on the app thread once glass is done (`loop.call_soon`), their errors counted. `MAX_SCENES`, `REASONS`. |
+| `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation` (and `play`, to start one uploaded stopped), edits, placements (`place` over cells, `place_px` at an image's own pixels with offsets and a source rectangle), placeholders, deletes (one id, delete-all, an id range), OSC 11. |
 | `detection.py` | Whether to use glass. Runs before Textual's driver reads input. |
 | `images.py` | `load_image` and `LoadedImage` (Pillow, the `images` extra). |
 | `_textual_hooks.py` | **Every** use of Textual's private API, each failing soft (rule 7). Nothing else may touch private Textual attributes. |
@@ -30,8 +32,8 @@ Modules in `src/textual_glass/`:
 | `widgets/instruments.py` | `RingGauge`, `Telemetry`, `StatValue`, `StatTile`, `ProgressArc`, `SpriteView`, `InfoCard`. |
 | `widgets/image.py` | `GlassImage`: placeholders with glass, half blocks without; `cache_key`; the dimmed gapless frame. |
 | `testing/harness.py` | The pty runner and replay (`run_app`, `Step`, `replay_steps`, `Replay`, `graphics_in`). |
-| `testing/kitty_emu.py` | `KittyModel`, a model of Ghostty 1.4's kitty graphics rules, and `composite`, which draws the approximate PNGs. |
-| `testing/pilot_helpers.py` | `Output`, `start`, `settle`, `idle` for pilot tests. |
+| `testing/kitty_emu.py` | `KittyModel`, a model of Ghostty 1.4's kitty graphics rules (given the cell size, it records an `X` or `Y` offset at or beyond it as a mistake; also a source rectangle off the image), and `composite`, which draws the approximate PNGs (placements at their own pixels and source rectangles included). |
+| `testing/pilot_helpers.py` | `Output` (its `model(cell=None)` places each image at the cursor written before it), `start`, `settle`, `idle` for pilot tests. |
 
 Elsewhere in `textual-glass/`:
 
@@ -43,8 +45,11 @@ Elsewhere in `textual-glass/`:
 | `tests/test_flourishes.py` | Every flourish kind by itself: the rule 17 border check, the limits, determinism, `about` and palette roles, no Textual imports, the stage's geometry; and `_draw.Light`'s windows and packing. |
 | `tests/test_flourish_pilot.py` | `flourish()` in a running app, with test kinds, and the demo playing every real kind. |
 | `tests/flourish_sheet.py` | Contact sheets and GIFs of the kinds, with their frame counts, render times and upload sizes. |
+| `tests/test_scenes.py` | The scene contract by itself: routes, and the limits `check` holds a maker to. |
+| `tests/test_scene_pilot.py` | `play_scene()` in a running app, with tiny test actors and a fake clock (`engine.player.clock`), and the demo playing to its hold. |
 | `examples/showcase/` | `app.py` (the app, keys, `--plain`, `--image`), `views.py` (view 1 stock widgets, view 2 pixel widgets, with a `SelectList` subclass), `dialogs.py` (the modals), `art.py` (the rocket drawn in numpy), `world.py` (made-up data and colours), `showcase.tcss`. |
 | `examples/flourishes/` | `app.py`: every flourish kind over a small made-up dashboard, for trying them in Ghostty (keys, `--plain`); `flourishes.tcss`. |
+| `examples/scenes/` | `app.py`: a small scene over a bordered panel in placeholder art (dots flying in from beyond its edge, a stretched disc, one-shot flashes, a caption on cues, the hold), and `make_show`, its maker; `scenes.tcss`. |
 
 ## Adding support for a stock widget
 
@@ -164,4 +169,5 @@ The README's [Tests](README.md#tests) section says what each file checks. Rules 
 - Colour-based ownership is a heuristic (see the README's Limitations).
 - Items defined outside `items.py` are not covered by the rule 16 test.
 - A sprite used by a widget that isn't a `PixelMixin` is freed only when that widget is removed (rule 21).
-- A flourish stays where it started: if its widget moves or is hidden while it plays (a scroll, a page switch), it finishes where the widget was. Only its screen going away stops it early.
+- A flourish stays where it started: if its widget moves or is hidden while it plays (a scroll, a page switch), it finishes where the widget was. Only its screen going away stops it early. A scene, by contrast, ends as soon as its anchor moves or is hidden, and the app plays it again if it wants its end back.
+- Scene actors are placed at terminal pixels from `TIOCGWINSZ`. Where the cell size it reports isn't whole, offsets are rounded so they stay below it, and an actor can be up to a pixel off.

@@ -23,7 +23,7 @@ Every visual that stays on screen must encode information: don't add decoration 
 
 | Package | Import | Depends on | Gives you |
 | --- | --- | --- | --- |
-| `textual-glass` | `textual_glass` | `textual>=8.2,<9`, `numpy` (Pillow with `[images]`; pyte and Pillow with `[testing]`) | The `Glass` mixin, which gives any Textual app pixel chrome through the kitty graphics protocol. Also the pixel engine (`PixelMixin`, scene items, sprites, backdrops), flourishes the app plays (`app.glass.flourish`), generic pixel widgets, `GlassImage`, and the test harness `textual_glass.testing`. |
+| `textual-glass` | `textual_glass` | `textual>=8.2,<9`, `numpy` (Pillow with `[images]`; pyte and Pillow with `[testing]`) | The `Glass` mixin, which gives any Textual app pixel chrome through the kitty graphics protocol. Also the pixel engine (`PixelMixin`, scene items, sprites, backdrops), flourishes and scenes the app plays (`app.glass.flourish`, `app.glass.play_scene`), generic pixel widgets, `GlassImage`, and the test harness `textual_glass.testing`. |
 | `textual-orbital` | `textual_orbital` | `textual-glass` | A generic always-on dashboard: typed records, the source seam, a store, alert rules, notifications, `OrbitalApp(Glass, App)` and dashboard widgets built on glass's `PixelWidget` and `SelectList`. |
 
 textual-glass knows nothing about orbital. Orbital uses only glass's public names, apart from its tests, which patch `textual_glass._textual_hooks.driver_write` to capture output (the same `output` fixture glass's tests use).
@@ -46,7 +46,7 @@ Each step on the app thread is guarded on its own: what raises goes to `OrbitalA
 | `pyproject.toml` | The uv workspace root (not a package): the members, the `dev` dependency group, and the pytest, ruff and mypy settings for both packages. |
 | `uv.lock` | One lock file for the workspace. |
 | `LICENSE` | MIT-0 (MIT No Attribution). Each package carries a copy. |
-| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `docs/screenshots/`. |
+| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `examples/scenes/` (a small scene over a panel), `docs/screenshots/`. |
 | `textual-orbital/` | `src/textual_orbital/` (the package), `tests/`, `examples/console/` (Mission Console, the demo dashboard), `docs/screenshots/`. |
 
 In the workspace, orbital's dependency on textual-glass resolves to the sibling directory (`[tool.uv.sources] textual-glass = { workspace = true }` in `textual-orbital/pyproject.toml`).
@@ -136,6 +136,7 @@ Everything glass draws is a kitty image. The table lists the z of each, top to b
 | Scrim under modal level k | Z0 + k x 100M - 50M | glass | Dims everything below the modal; fades in and out at `subtle` motion. |
 | Float layer | Z0 + 30M | glass | Toasts, tooltips and other overlay widgets. |
 | Flourishes | Z0 + 20M | glass | `app.glass.flourish(...)`: one-shot effects the app plays, at the level of the anchor's screen (Z0 + k x 100M + 20M on modal level k), so under the next popup's scrim. Stepped by glass with `a=a,c=N` and deleted after the last frame. |
+| Scenes | Z0 + 15M | glass | `app.glass.play_scene(...)`: the app's actors moving over a widget, at the level of the anchor's screen (Z0 + k x 100M + 15M + actor z x 1000 + its index), so under the next popup's scrim. Re-placed by glass at pixel offsets as they move, nothing sent once the scene holds; deleted when it ends. |
 | Ambient | Z0 + 10M | glass | `full` motion only: shimmer, glints, the pulsing focus halo (terminal-played). |
 | Backdrop | Z0 = -2,000,000,000 | glass | The bottom screen: the backdrop painter (gradient or nebula), panels, pills, header strips, badges, bars and every widget's `pixel_items`. One image per page (rule 19). |
 
@@ -205,7 +206,7 @@ async def test_my_app(output: Output) -> None:
 
 | Name | What it does |
 | --- | --- |
-| `Output()` | A callable that records every write. `.chunks`, `.text`, `.mark()` and `.since(mark)`, and `.model()`: a `KittyModel` fed with everything written so far. |
+| `Output()` | A callable that records every write. `.chunks`, `.text`, `.mark()` and `.since(mark)`, and `.model(cell=None)`: a `KittyModel` fed with everything written so far, each placement at the cursor written before it (with `cell`, the cell size in pixels, it also checks placement offsets). |
 | `start(app, pilot)` | Marks the terminal as supported, calls `app.glass.activate(force=True)` and waits until everything is idle. |
 | `settle(app, pilot, rounds=8)` | Lets Textual render and glass run its frame and ticks, and waits for worker renders. |
 | `idle(app, pilot, timeout=20.0)` | Like `settle`, but also waits for slow worker jobs (big uploads). |
@@ -249,7 +250,7 @@ assert graphics_in(idle) == 0
 
 For screenshots of chosen steps, `textual_glass.testing.screenshots.shoot(argv, root, size, steps, labels, out, prefix="", timeout=40.0)` runs the app once and writes `{prefix}{cols}x{rows}_{label}.png` into `out` for each step named in `labels`. It returns the paths, and exits with an error when the app fails or the kitty model saw a protocol error. Both packages' `tests/screenshots.py` use it.
 
-The kitty model (`textual_glass.testing.kitty_emu.KittyModel`) applies transmit, frame, animate, place and delete commands the way Ghostty 1.4 does (`d=A` keeps images behind placeholders, `d=R` doesn't), and records protocol mistakes in `errors`: an `ENOENT`, a command interleaved into a chunked transfer, a frame added while playing, a placement that moves the cursor. `Replay` also follows mode 1049: entering the alternate screen runs Ghostty's delete-all, and a graphics command sent on the primary screen is an error.
+The kitty model (`textual_glass.testing.kitty_emu.KittyModel`) applies transmit, frame, animate, place and delete commands the way Ghostty 1.4 does (`d=A` keeps images behind placeholders, `d=R` doesn't), and records protocol mistakes in `errors`: an `ENOENT`, a command interleaved into a chunked transfer, a frame added while playing, a placement that moves the cursor, a source rectangle off the image, and, when it knows the cell size (`Replay` does), an `X` or `Y` offset at or beyond it. `Replay` also follows mode 1049: entering the alternate screen runs Ghostty's delete-all, and a graphics command sent on the primary screen is an error.
 
 ### The PNGs are approximate composites
 
