@@ -23,7 +23,7 @@ Every visual must encode information. Don't add decoration that takes space.
 
 | Package | Import | Depends on | Gives you |
 | --- | --- | --- | --- |
-| `textual-glass` | `textual_glass` | `textual>=8.2,<9`, `numpy` (Pillow with `[images]`; pyte and Pillow with `[testing]`) | The `Glass` mixin, which gives any Textual app pixel chrome through the kitty graphics protocol. Also the pixel engine (`PixelMixin`, scene items, sprites, backdrops), generic pixel widgets, `GlassImage`, and the test harness `textual_glass.testing`. |
+| `textual-glass` | `textual_glass` | `textual>=8.2,<9`, `numpy` (Pillow with `[images]`; pyte and Pillow with `[testing]`) | The `Glass` mixin, which gives any Textual app pixel chrome through the kitty graphics protocol. Also the pixel engine (`PixelMixin`, scene items, sprites, backdrops), flourishes the app plays (`app.glass.flourish`), generic pixel widgets, `GlassImage`, and the test harness `textual_glass.testing`. |
 | `textual-orbital` | `textual_orbital` | `textual-glass` | A generic always-on dashboard: typed records, the source seam, a store, alert rules, notifications, `OrbitalApp(Glass, App)` and dashboard widgets built on glass's `PixelWidget` and `SelectList`. |
 
 textual-glass knows nothing about orbital. Orbital uses only glass's public names, apart from its tests, which patch `textual_glass._textual_hooks.driver_write` to capture output (the same `output` fixture glass's tests use).
@@ -46,7 +46,7 @@ Each step on the app thread is guarded on its own: what raises goes to `OrbitalA
 | `pyproject.toml` | The uv workspace root (not a package): the members, the `dev` dependency group, and the pytest, ruff and mypy settings for both packages. |
 | `uv.lock` | One lock file for the workspace. |
 | `LICENSE` | MIT-0 (MIT No Attribution). Each package carries a copy. |
-| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `docs/screenshots/`. |
+| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `docs/screenshots/`. |
 | `textual-orbital/` | `src/textual_orbital/` (the package), `tests/`, `examples/console/` (Mission Console, the demo dashboard), `docs/screenshots/`. |
 
 In the workspace, orbital's dependency on textual-glass resolves to the sibling directory (`[tool.uv.sources] textual-glass = { workspace = true }` in `textual-orbital/pyproject.toml`).
@@ -70,6 +70,7 @@ uv run pytest textual-orbital/tests/test_pilot.py
 uv run python textual-glass/tests/screenshots.py      # regenerate textual-glass/docs/screenshots
 uv run python textual-orbital/tests/screenshots.py    # regenerate textual-orbital/docs/screenshots
 uv run python textual-glass/tests/test_pty.py --png /tmp/glass-steps      # a composite of every pty step
+uv run python textual-glass/tests/flourish_sheet.py --out /tmp/fl          # contact sheets and GIFs of every flourish
 uv run python textual-orbital/tests/test_pty.py --png /tmp/orbital-steps
 ```
 
@@ -134,6 +135,7 @@ Everything glass draws is a kitty image. The table lists the z of each, top to b
 | Dialog of modal level k | Z0 + k x 100M | glass | The modal screen's own glass and its widgets' `pixel_items`. |
 | Scrim under modal level k | Z0 + k x 100M - 50M | glass | Dims everything below the modal; fades in and out at `subtle` motion. |
 | Float layer | Z0 + 30M | glass | Toasts, tooltips and other overlay widgets. |
+| Flourishes | Z0 + 20M | glass | `app.glass.flourish(...)`: one-shot effects the app plays, at the level of the anchor's screen (Z0 + k x 100M + 20M on modal level k), so under the next popup's scrim. Stepped by glass with `a=a,c=N` and deleted after the last frame. |
 | Ambient | Z0 + 10M | glass | `full` motion only: shimmer, glints, the pulsing focus halo (terminal-played). |
 | Backdrop | Z0 = -2,000,000,000 | glass | The bottom screen: the backdrop painter (gradient or nebula), panels, pills, header strips, badges, bars and every widget's `pixel_items`. One image per page (rule 19). |
 

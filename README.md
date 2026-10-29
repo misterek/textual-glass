@@ -78,6 +78,7 @@ Try the examples (in Ghostty):
 
 ```sh
 uv run python textual-glass/examples/showcase/app.py
+uv run python textual-glass/examples/flourishes/app.py
 uv run python textual-orbital/examples/console/app.py
 ```
 

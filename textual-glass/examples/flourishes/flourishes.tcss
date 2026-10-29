@@ -1,0 +1,99 @@
+/* textual-glass flourishes demo. Plain Textual CSS: nothing here knows about glass.
+   Breakpoints (on the screen): -narrow, -medium from 84 columns, -wide from 120. */
+
+#bar {
+    height: 1;
+    background: $panel;
+}
+
+#main {
+    height: 1fr;
+}
+
+/* -- the side: what played, and every kind ------------------------------------------------ */
+
+#side {
+    width: 34;
+}
+
+Screen.-narrow #side {
+    width: 27;
+}
+
+Screen.-wide #side {
+    width: 44;
+}
+
+#now {
+    height: 5;
+    padding: 0 1;
+    border: round $secondary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+}
+
+#now-top {
+    height: 1;
+}
+
+#now-name {
+    width: 1fr;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#now-count {
+    width: auto;
+}
+
+#now-about {
+    height: 1fr;
+    color: $text-muted;
+}
+
+#kinds {
+    height: 1fr;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+}
+
+#kinds:focus {
+    border: round $secondary;
+}
+
+/* -- the dashboard ------------------------------------------------------------------------- */
+
+#board {
+    grid-size: 2 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 1fr 1fr;
+}
+
+.panel {
+    width: 1fr;
+    height: 1fr;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    border-subtitle-color: $text-accent;
+    background: $surface;
+}
+
+.panel.-target {
+    border: round $accent;
+}
+
+#gauges RingGauge {
+    width: 1fr;
+}
+
+#launches, #log {
+    padding: 0 0 0 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#log {
+    color: $text-muted;
+}

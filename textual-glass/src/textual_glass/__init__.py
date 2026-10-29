@@ -12,7 +12,8 @@
 
 Ready-made widgets with pixels (``GlassPanel``, ``SelectList``, ``RingGauge``,
 ``Telemetry``, ``StatTile``, ``ProgressArc``, ``SpriteView``...) live in
-``textual_glass.widgets``.
+``textual_glass.widgets``. ``app.glass.flourish(name, at=widget)`` plays a short
+celestial animation when something happens; ``FLOURISHES`` lists the kinds.
 
 In terminals with the kitty graphics protocol (Ghostty, kitty) the app gets
 glass panels, gradient borders, a sliding selection pill and more, drawn in
@@ -21,6 +22,7 @@ pixels under the text. Everywhere else it is exactly stock Textual.
 
 from .detection import Support, detect
 from .engine import MOTIONS, GlassEngine
+from .flourishes import FLOURISHES
 from .glass import Glass, PixelContext, PixelMixin, terminal_write
 from .hard_exit import on_hard_exit
 from .images import LoadedImage, load_image
@@ -40,7 +42,7 @@ from .widgets import (
 
 __version__ = "0.3.0"
 __all__ = [
-    "MOTIONS", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard", "LoadedImage", "PixelContext",
-    "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile", "StatValue",
-    "Support", "Telemetry", "__version__", "detect", "load_image", "on_hard_exit", "terminal_write",
+    "FLOURISHES", "MOTIONS", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard", "LoadedImage",
+    "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile",
+    "StatValue", "Support", "Telemetry", "__version__", "detect", "load_image", "on_hard_exit", "terminal_write",
 ]
