@@ -2,13 +2,17 @@
 uploaded while stopped, placed over the stage at the anchor's level, stepped by
 glass, deleted after the last frame, and dropped whenever the window, the theme,
 the motion level or the anchor's popup changes. The makers are test kinds, so
-nothing here depends on how the real ones look.
+nothing here depends on how the real ones look; the demo's test fires every
+real kind.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -410,3 +414,57 @@ async def test_a_broken_maker_counts_as_an_error_and_leaves_nothing(output: Outp
         assert output.since(mark) == ""
     clean(output)
 
+
+# -- the demo -------------------------------------------------------------------------------------
+
+DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "flourishes", "app.py")
+
+
+def _demo() -> Any:
+    spec = importlib.util.spec_from_file_location("flourish_demo", DEMO)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+async def ended(app: Any, most: int = 0) -> None:
+    """Tick until at most ``most`` flourishes are left."""
+    for _ in range(400):
+        if app.glass.stats()["flourishes"] <= most:
+            return
+        app.glass.tick()
+        await asyncio.sleep(0.016)
+    raise AssertionError("the flourishes never ended")
+
+
+@pytest.mark.parametrize("size", [(70, 22), (90, 28), (140, 45)])
+async def test_the_demo_plays_every_kind(output: Output, size: tuple[int, int]) -> None:
+    demo = _demo()
+    app = demo.GlassDemo()
+    async with app.run_test(size=size) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        kinds = app.query_one(demo.KindList)
+        names = list(FLOURISHES)
+        played: list[int] = []
+        for n, name in enumerate(names):
+            await ended(app, MAX_FLOURISHES - 1)
+            kinds.select_index(n, animate=False)
+            await pilot.press("enter" if n % 2 else "space")
+            await pilot.pause()
+            assert app.last == name and engine.effects.fired == n + 1, name
+            played.append((await landed(app, pilot)).image_id)
+            if n % 3 == 2:
+                await pilot.press("t")  # the next target panel
+        await ended(app)
+        model = output.model()
+        assert engine.errors == 0 and not set(played) & set(model.images), "every one played and was deleted"
+        await pilot.press("f9", "f9")  # subtle, full, minimal
+        assert engine.motion == "minimal" and "minimal" in str(app.query_one("#bar", Static).content)
+        await pilot.press("space")
+        await pilot.pause()
+        assert engine.effects.fired == len(names), "minimal plays nothing"
+        assert "minimal" in str(app.query_one("#now-about", Static).content)
+    clean(output)
