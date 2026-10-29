@@ -1,0 +1,51 @@
+/* textual-glass scenes demo. Plain Textual CSS: nothing here knows about glass.
+   Breakpoints (on the screen): -narrow, -wide from 84 columns. */
+
+#bar {
+    height: 1;
+    background: $panel;
+}
+
+#main {
+    height: 1fr;
+}
+
+/* The show plays over this panel, and is cropped at its edge. */
+#stage {
+    width: 1fr;
+    height: 1fr;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    background: $surface;
+}
+
+#side {
+    width: 30;
+}
+
+Screen.-narrow #side {
+    width: 24;
+}
+
+#caption {
+    height: 5;
+    padding: 0 1;
+    border: round $secondary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    content-align: center middle;
+    text-style: bold;
+    color: $text-accent;
+}
+
+#log {
+    height: 1fr;
+    padding: 0 1;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

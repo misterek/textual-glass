@@ -142,7 +142,9 @@ class Actor:
 @dataclass(frozen=True)
 class Cue:
     """A moment the app hears about (``on_cue(data)`` on the app thread): to change a
-    caption as a ship lands, say."""
+    caption as a ship lands, say. ``t`` is from 0 to the scene's duration. A cue at or
+    before the time the scene starts at (``play_scene(start=...)``, 0 by default)
+    never comes: the app shows that state itself."""
 
     t: float
     data: Hashable
@@ -169,10 +171,14 @@ def check(scene: Any, stage: Stage) -> None:
         raise ValueError(f"a scene lasts more than 0 and at most {MAX_SECONDS:g} s, not {scene.duration:g}")
     if len(scene.actors) > MAX_ACTORS:
         raise ValueError(f"a scene has at most {MAX_ACTORS} actors, not {len(scene.actors)}")
+    if any(not 0 <= cue.t <= scene.duration for cue in scene.cues):
+        raise ValueError(f"a scene's cues are at 0 to its duration ({scene.duration:g} s): later ones never come")
     pixels = 0
     for n, actor in enumerate(scene.actors):
         size = actor.width * actor.height * 4
         frames = len(actor.frames)
+        if actor.width < 1 or actor.height < 1:
+            raise ValueError(f"actor {n} is {actor.width}x{actor.height}: it needs at least one pixel")
         if not 1 <= frames <= MAX_FRAMES or any(len(f) != size for f in actor.frames):
             raise ValueError(f"actor {n} has {frames} frames: it needs 1 to {MAX_FRAMES} of "
                              f"{actor.width}x{actor.height} RGBA bytes")
