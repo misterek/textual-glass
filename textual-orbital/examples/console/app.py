@@ -1,4 +1,4 @@
-"""Mission Console: the textual-orbital example. Four pages over a scripted
+"""Mission Console: the textual-orbital example. Five pages over a scripted
 demo world with five sources (Claude Code, GitHub, a ticket tracker, an infra
 monitor and a security scanner).
 
@@ -11,10 +11,11 @@ Run it from the repository root, in Ghostty::
     uv run python textual-orbital/examples/console/app.py --snooze-file ~/.cache/console-snoozes.json
     uv run python textual-orbital/examples/console/app.py --provider mydata:make_provider
 
-Keys: 1-4 pages, j/k or arrows to move, Enter for details, Tab between panels,
+Keys: 1-5 pages, j/k or arrows to move, Enter for details, Tab between panels,
 o to open in the browser, s to snooze, z for what is snoozed, h for source
 health, t for a test alert, m to switch alerts between popups and toasts, ?
 for help, q to quit. While a toast shows, s snoozes it and esc dismisses it.
+On the Replay page, p plays the week again and l draws it in the next look.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ WHY_COLORS.update({"incident": PALETTE["red"], "fix release": PALETTE["red"], "a
 ALERT_KINDS = ("waiting", RELEASE_FAILED, INCIDENT)
 
 HELP_KEYS = [  # at most 14 lines: a taller dialog covers the beacons at 90x28
-    ("1-4", "switch page"),
+    ("1-5", "switch page"),
     ("j k ↑ ↓", "move in a list"),
     ("← →", "beacons, dots"),
     ("tab", "next panel"),
@@ -95,9 +96,9 @@ HELP_KEYS = [  # at most 14 lines: a taller dialog covers the beacons at 90x28
     ("u z", "wake all / list snoozed"),
     ("space", "fold the be-aware list"),
     ("[ ]", "older / newer week"),
+    ("p l", "replay: again / look"),
     ("r h", "refresh / source health"),
-    ("t", "test alert"),
-    ("m", "alerts: popup or toast"),
+    ("t m", "test alert / toast mode"),
     ("? q", "this help / quit"),
 ]
 
@@ -122,6 +123,7 @@ class MissionConsole(OrbitalApp):
         Binding("2", "page(1)", show=False),
         Binding("3", "page(2)", show=False),
         Binding("4", "page(3)", show=False),
+        Binding("5", "page(4)", show=False),
         Binding("o", "open", show=False),
         Binding("s", "snooze", show=False),
         Binding("u", "wake", show=False),

@@ -497,8 +497,8 @@ LEGEND: list[tuple[str, str, str]] = [
     ("○", PALETTE["grey"], "track: parked"),
     ("╌●", PALETTE["text_soft"], "trail: time in stage (2 weeks = full)"),
     ("◉", PALETTE["red"], "pulsing dot: stuck (failing or 2+ days)"),
-    ("●", PALETTE["green"], "source: green fresh, amber stale"),
-    ("✕", PALETTE["red"], "source failing (h shows why)"),
+    ("●", PALETTE["green"], "source: green fresh, amber stale, ✕ failing"),
+    ("✦", PALETTE["accent"], "replay: a light per piece of work, by kind"),
 ]
 
 
