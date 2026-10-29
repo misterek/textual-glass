@@ -53,7 +53,7 @@ def test_check_holds_a_maker_to_the_limits() -> None:
         "leave after": Scene([actor(enter=2, leave=1)], 1),
         "more than the stage": Scene([actor(cells=(101, 1))], 1),
         "actors": Scene([actor()] * (scenes.MAX_ACTORS + 1), 1),
-        "pixels": Scene([actor(frames=[bytes(400 * 400 * 4)] * 64, width=400, height=400)] * 2, 1),
+        "pixels": Scene([actor(frames=[bytes(400 * 400 * 4)] * 64, width=400, height=400) for _ in range(2)], 1),
         "at least one pixel": Scene([actor(frames=[b""], width=0)], 1),
         "cues": Scene([actor()], 2, cues=[Cue(2.5, "late")]),
     }
@@ -61,6 +61,28 @@ def test_check_holds_a_maker_to_the_limits() -> None:
     for message, scene in bad.items():
         with pytest.raises(ValueError, match=message):
             check(scene, STAGE)
+
+
+def test_actors_with_the_same_frames_share_one_image_and_count_it_once() -> None:
+    """Stills and loops whose frames are the same object are one image: their pixels count once, so
+    they must agree on its size (and a loop on its gaps). One-shots never share, so each counts."""
+    big = [bytes(1000 * 1000 * 4)] * 9  # 9 million pixels
+    loops = [actor(frames=big, width=1000, height=1000, route=Route.still(k, k)) for k in range(30)]
+    check(Scene(loops, 1), STAGE)
+    with pytest.raises(ValueError, match="pixels"):
+        check(Scene([actor(frames=list(big), width=1000, height=1000) for _ in range(2)], 1), STAGE)
+    with pytest.raises(ValueError, match="pixels"):
+        check(Scene([actor(frames=big, width=1000, height=1000, loop=False) for _ in range(2)], 1), STAGE)
+    light = [bytes(4 * 4 * 4)]
+    check(Scene([actor(frames=light), actor(frames=light, gaps=(500,), loop=False)], 1), STAGE)
+    flame = [bytes(4 * 4 * 4)] * 3
+    with pytest.raises(ValueError, match="actors 0 and 1 share their frames"):
+        check(Scene([actor(frames=flame), actor(frames=flame, gaps=(40,))], 1), STAGE)
+    with pytest.raises(ValueError, match="share their frames"):
+        check(Scene([actor(frames=light), actor(frames=light, width=2, height=8)], 1), STAGE)
+    check(Scene([actor(frames=flame), actor(frames=flame, gaps=(40,), loop=False)], 1), STAGE)  # a one-shot: its own
+    assert scenes.shares(actor(frames=flame)) and scenes.shares(actor(loop=False))
+    assert not scenes.shares(actor(frames=flame, loop=False))
 
 
 def test_the_scenes_have_no_textual_imports() -> None:

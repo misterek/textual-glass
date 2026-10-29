@@ -1,0 +1,33 @@
+/* textual-glass week in review demo. Plain Textual CSS: nothing here knows about glass. */
+
+#bar {
+    height: 1;
+    background: $panel;
+}
+
+/* The page: the show plays over #stage, the panel's whole inside above the two lines of text. */
+#panel {
+    height: 1fr;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+}
+
+#stage {
+    height: 1fr;
+}
+
+#caption {
+    height: 1;
+    padding: 0 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#tally {
+    height: 1;
+    padding: 0 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

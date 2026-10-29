@@ -2,10 +2,13 @@
 come on, ships warping in and ships arriving. Pure numpy, no Textual imports.
 Exploratory.
 
-Every effect is a :class:`Sprite` that glass steps through once. The lights
-hold their last frame, which is the light itself; the others end empty, so
-nothing pops. One shape per kind of work, the same in every look, so a page
-can carry one legend:
+Every effect is a :class:`Sprite` that glass steps through once and that ends
+empty or hands over to what stays, so nothing pops. A light that stays is a
+still of its own (:func:`held_light`), the same picture for every light of its
+kind, so the terminal holds one image per kind however busy the week; the
+light coming on (:func:`light_on`, or the cheaper :func:`light_flash` when the
+week is busy) plays over it and goes. One shape per kind of work, the same in
+every look, so a page can carry one legend:
 
 * merged: a round light;  review: a ring round a point;  deploy: a diamond;
 * ticket: a small plain point;  release: a four-pointed star.
@@ -80,35 +83,42 @@ def glyph_reach(kind: str, size: float) -> float:
     return (3.7 if kind == "release" else 2.4) * size
 
 
-def light_on(stage: Stage, kind: str, colour: Array, style: str, seed: int = 0,
-             squash: tuple[float, float] = (1.0, 0.0)) -> Sprite:
-    """A light coming on: a white flash and a ring in the kind's colour, then the light settles. Its last
-    frame is the light, which stays for the rest of the show and after it.
+#: When a light coming on (:func:`light_on`) settles, in seconds: the held light takes over then.
+LIGHT_SETTLES = 0.8
+_LIGHT_TIMES = (0.0, 0.06, 0.13, 0.22, 0.33, 0.47, 0.62, LIGHT_SETTLES)
+#: Town lights round a city, per kind (``city`` style), at full size.
+_TOWNS = {"merged": 5, "review": 4, "deploy": 5, "ticket": 3, "release": 7}
 
-    ``style``: ``bead`` (a berth on the harbour's rail: the flash runs along the rail), ``city`` (lights
-    spread round it like a town, and stay), ``star`` (a twinkle that shrinks to the star's own spikes)."""
-    size = glyph_size(stage) * (1.25 if kind == "release" else 1.0) * (1.2 if style == "bead" else 1.0)
+
+def _light_size(stage: Stage, kind: str, style: str, scale: float) -> tuple[float, float, int]:
+    """A light's radius, how far its light reaches and its square canvas's side, in terminal pixels."""
+    size = glyph_size(stage) * scale * (1.25 if kind == "release" else 1.0) * (1.2 if style == "bead" else 1.0)
     reach = max(glyph_reach(kind, size), 3.0 * size) + 2.0
     side = math.ceil(2 * reach)
-    w = h = side + (side % 2)
+    return size, reach, side + (side % 2)
+
+
+def _light_frame(stage: Stage, kind: str, colour: Array, style: str, seed: int, squash: tuple[float, float],
+                 scale: float, e: float) -> bytes:
+    """A light ``e`` of the way (0 to 1) through coming on: a white flash and a ring in the kind's colour,
+    the light swelling a little past its level and settling; at 1, the light that stays."""
+    size, reach, w = _light_size(stage, kind, style, scale)
+    h = w
     cx = cy = w / 2
     rnd = np.random.default_rng(seed)
-    n_town = {"merged": 5, "review": 4, "deploy": 5, "ticket": 3, "release": 7}[kind] if style == "city" else 0
+    n_town = round(_TOWNS[kind] * min(1.0, scale) ** 2) if style == "city" else 0
     town_a = rnd.uniform(0, TAU, n_town)
     town_r = rnd.uniform(0.9, 2.0, n_town) * size
     town_k = rnd.uniform(0.25, 0.6, n_town)
     ratio, angle = squash
-    times = [0.0, 0.06, 0.13, 0.22, 0.33, 0.47, 0.62, 0.8]
-    out: list[bytes] = []
-    for t in times:
-        e = t / times[-1]
-        paint = Paint(w, h, stage.dark, margin=2.0)
-        flash = bump(e, 0.12, 0.6)
+    paint = Paint(w, h, stage.dark, margin=2.0)
+    flash = bump(e, 0.12, 0.6)
+    hot = WHITE if stage.dark else colour * 0.8
+    if e < 1.0:
         ring_r = size * (0.6 + 2.1 * ease_out(e / 0.75))
         r = np.sqrt((paint.xs - cx) ** 2 + (paint.ys - cy) ** 2)
         ring = np.exp(-(((r - ring_r) / (0.22 * size + 0.6)) ** 2)) * smoothstep(reach, reach - 2.5, r)
         paint.shine(colour, ring * (1 - ramp(0.2, 0.75, e)) * 0.8)
-        hot = WHITE if stage.dark else colour * 0.8
         paint.shine(hot, soft_glow(r, size * (0.8 + 1.4 * flash)) * 1.6 * flash)
         if style == "bead":  # the flash runs both ways along the rail (horizontal enough at this size)
             across = np.abs(paint.ys - cy)
@@ -118,35 +128,92 @@ def light_on(stage: Stage, kind: str, colour: Array, style: str, seed: int = 0,
             spikes = star(paint.xs, paint.ys, cx, cy, 0.4 * size, size * (1.2 + 2.0 * flash),
                           reach - 1.0, angle=math.pi / 4)
             paint.shine(hot, spikes * 1.2 * flash)
-        level = ease_in_out(ramp(0.1, 0.55, e)) * (1 + 0.35 * bump(e - 0.3, 0.15, 0.6))
-        glyph(paint, kind, cx, cy, size, colour, level, squash)
-        for k in range(n_town):
-            grow = ramp(0.25 + 0.08 * k, 0.6 + 0.08 * k, e)
-            tx = cx + town_r[k] * math.cos(town_a[k]) * (ratio if abs(math.cos(town_a[k] - angle)) > 0.7 else 1)
-            ty = cy + town_r[k] * math.sin(town_a[k])
-            d = np.sqrt((paint.xs - tx) ** 2 + (paint.ys - ty) ** 2)
-            paint.shine(blend(colour, WHITE, 0.3), soft_glow(d, 0.55 * size + 0.8) * town_k[k] * grow)
+    level = ease_in_out(ramp(0.1, 0.55, e)) * (1 + 0.35 * bump(e - 0.3, 0.15, 0.6))
+    glyph(paint, kind, cx, cy, size, colour, level, squash)
+    for k in range(n_town):
+        grow = ramp(0.25 + 0.08 * k, 0.6 + 0.08 * k, e)
+        tx = cx + town_r[k] * math.cos(town_a[k]) * (ratio if abs(math.cos(town_a[k] - angle)) > 0.7 else 1)
+        ty = cy + town_r[k] * math.sin(town_a[k])
+        d = np.sqrt((paint.xs - tx) ** 2 + (paint.ys - ty) ** 2)
+        paint.shine(blend(colour, WHITE, 0.3), soft_glow(d, 0.55 * size + 0.8) * town_k[k] * grow)
+    return paint.frame()
+
+
+def light_on(stage: Stage, kind: str, colour: Array, style: str, seed: int = 0,
+             squash: tuple[float, float] = (1.0, 0.0), scale: float = 1.0) -> Sprite:
+    """A light coming on: a white flash and a ring in the kind's colour, the light swelling and settling.
+    It plays for ``LIGHT_SETTLES`` seconds and goes: put the :func:`held_light` of the same arguments,
+    which is exactly where it settles, on stage then.
+
+    ``style``: ``bead`` (a berth on the harbour's rail: the flash runs along the rail), ``city`` (lights
+    spread round it like a town, and stay), ``star`` (a twinkle that shrinks to the star's own spikes).
+    ``scale`` makes it smaller (a busy week)."""
+    _, _, w = _light_size(stage, kind, style, scale)
+    times = _LIGHT_TIMES
+    out = [_light_frame(stage, kind, colour, style, seed, squash, scale, t / times[-1]) for t in times[:-1]]
+    gaps = [max(16, round((b - a) * 1000)) for a, b in zip(times, times[1:], strict=False)]
+    return Sprite(out, w, w, gaps, False, name=f"light-{kind}")
+
+
+def held_light(stage: Stage, kind: str, colour: Array, style: str, seed: int = 0,
+               squash: tuple[float, float] = (1.0, 0.0), scale: float = 1.0) -> Sprite:
+    """The light that stays, a still: what :func:`light_on` settles into. Make one per kind (and look)
+    and put every light of that kind on stage from it, so they share one image."""
+    _, _, w = _light_size(stage, kind, style, scale)
+    return Sprite([_light_frame(stage, kind, colour, style, seed, squash, scale, 1.0)], w, w, [1000], False,
+                  name=f"held-{kind}")
+
+
+#: When a :func:`light_flash` is at its brightest, in seconds: the held light comes on under it then.
+FLASH_PEAK = 0.07
+
+
+def light_flash(stage: Stage, x: float, y: float, colour: Array, scale: float = 1.0, big: bool = False,
+                max_px: int = 900) -> Sprite:
+    """A light coming on the cheap way, for a busy week: a white flash and a ring of the kind's colour
+    centred at (x, y) on the stage, soft, so drawn small and stretched over the cells round it. It ends
+    empty: the :func:`held_light` comes on under it at ``FLASH_PEAK``."""
+    from ._worlds import place  # the worlds draw with the effects: imported here, not at the top
+
+    size = glyph_size(stage) * scale * (1.6 if big else 1.0)
+    reach = 3.3 * size + 2.0
+    spot = place(stage, x, y, reach, reach)
+    w, h, s = stretched_size(stage, spot.cols, spot.rows, max_px)
+    cw, ch = stage.cell
+    ox, oy = (x - spot.col * cw) * s, (y - spot.row * ch) * s
+    paint0 = Paint(w, h, stage.dark)
+    r = np.sqrt((paint0.xs - ox) ** 2 + (paint0.ys - oy) ** 2) / s
+    fence = smoothstep(reach, reach - 3.0, r)
+    hot = WHITE if stage.dark else colour * 0.8
+    times = (0.0, 0.04, FLASH_PEAK, 0.12, 0.19, 0.28, 0.4)
+    out = []
+    for t in times:
+        e = t / times[-1]
+        flash = bump(e, 0.16, 0.7)
+        ring_r = size * (0.5 + 2.4 * ease_out(e))
+        ring = np.exp(-(((r - ring_r) / (0.25 * size + 0.8)) ** 2)) * (1 - ramp(0.3, 1.0, e)) * ramp(0.0, 0.15, e)
+        paint = Paint(w, h, stage.dark, margin=1.0)
+        paint.shine(colour, ring * 0.85 * fence)
+        paint.shine(hot, soft_glow(r, size * (0.7 + 1.3 * flash)) * 1.5 * flash * fence)
+        paint.shine(colour, soft_glow(r, 2.4 * size) * 0.45 * flash * fence)
         out.append(paint.frame())
-    gaps = [max(16, round((b - a) * 1000)) for a, b in zip(times, times[1:], strict=False)] + [1000]
-    return Sprite(out, w, h, gaps, False, name=f"light-{kind}")
-
-
-def final_light(sprite: Sprite) -> Sprite:
-    return Sprite([sprite.frames[-1]], sprite.width, sprite.height, [1000], False, name=sprite.name)
+    gaps = [max(16, round((b - a) * 1000)) for a, b in zip(times, times[1:], strict=False)] + [40]
+    return Sprite(out, w, h, gaps, False, (spot.cols, spot.rows), offset=spot.offset(stage), name="flash")
 
 
 # =============================================================== warp in ==
 
 
 def warp_in(stage: Stage, heading: float, colour: Array, style: str, big: bool = False,
-            max_px: int = 6_000) -> Sprite:
+            max_px: int = 6_000, brief: bool = False) -> Sprite:
     """A ship arriving out of nowhere at the centre of the picture, heading along ``heading``. The ship
     itself appears at about 120 ms, in the flash. It is soft light, so it is drawn small (at most
     ``max_px`` pixels a frame) and stretched over whole cells: place it, and start the ship, on
     :func:`warp_spot`. Its last frame is (nearly) empty.
 
     ``style``: ``gate`` (a ring opens across its path and closes behind it), ``streak`` (it drops out of a
-    streak of light), ``fold`` (space twinkles and folds open round it)."""
+    streak of light), ``fold`` (space twinkles and folds open round it). ``brief``: five frames, not
+    nine, for a busy week."""
     cols, rows = warp_cells(stage, style, big)
     w, h, sc = stretched_size(stage, cols, rows, max_px)
     L = standard_length(stage) * (1.8 if big else 1.0) * sc
@@ -155,7 +222,7 @@ def warp_in(stage: Stage, heading: float, colour: Array, style: str, big: bool =
     c, s = math.cos(heading), math.sin(heading)
     hot = WHITE if stage.dark else colour * 0.75
     bright = blend(colour, WHITE, 0.4)
-    times = [0.0, 0.05, 0.1, 0.16, 0.23, 0.31, 0.4, 0.5, 0.6]
+    times = [0.0, 0.1, 0.23, 0.4, 0.6] if brief else [0.0, 0.05, 0.1, 0.16, 0.23, 0.31, 0.4, 0.5, 0.6]
     out: list[bytes] = []
     for t in times:
         e = t / times[-1]
@@ -222,6 +289,28 @@ WARP_LEAD = 0.12
 # ================================================================ arrive ==
 
 
+def arrive_cost(stage: Stage, family: str, kind: str, heading: float, style: str) -> int:
+    """How many pixels :func:`arrive` draws (every frame), without drawing it."""
+    design = FAMILIES[family][kind]
+    L = standard_length(stage) * design.size
+    w, h, _, _ = ship_canvas(design, L, heading)
+    side = math.ceil(max(w, h, 1.5 * L) + 8)
+    side += side % 2
+    return side * side * len(_ARRIVE_TIMES[style])
+
+
+_ARRIVE_TIMES = {"dock": (0.0, 0.07, 0.14, 0.22, 0.31, 0.4, 0.5),
+                 "land": (0.0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.58, 0.7, 0.84, 1.0),
+                 "unfold": (0.0, 0.08, 0.17, 0.27, 0.38, 0.5, 0.62, 0.76, 0.9)}
+_LIGHT_AT = {"dock": 0.3, "land": 0.6, "unfold": 0.62}
+
+
+def light_cost(stage: Stage, kind: str, style: str, scale: float = 1.0) -> int:
+    """How many pixels :func:`light_on` draws (every frame), without drawing it."""
+    side = _light_size(stage, kind, style, scale)[2]
+    return side * side * (len(_LIGHT_TIMES) - 1)
+
+
 def arrive(stage: Stage, family: str, kind: str, heading: float, colour: Array, style: str,
            sun: tuple[float, float, float], squash: tuple[float, float] = (1.0, 0.0)) -> tuple[Sprite, float]:
     """A ship's last moments, centred where it stops: it starts as the flying ship (without its flame)
@@ -240,15 +329,7 @@ def arrive(stage: Stage, family: str, kind: str, heading: float, colour: Array, 
     inks = hull_inks(stage)
     c, s = math.cos(heading), math.sin(heading)
     hot = WHITE if stage.dark else colour * 0.75
-    if style == "dock":
-        times = [0.0, 0.07, 0.14, 0.22, 0.31, 0.4, 0.5]
-        light_at = 0.3
-    elif style == "land":
-        times = [0.0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.58, 0.7, 0.84, 1.0]
-        light_at = 0.6
-    else:
-        times = [0.0, 0.08, 0.17, 0.27, 0.38, 0.5, 0.62, 0.76, 0.9]
-        light_at = 0.62
+    times, light_at = list(_ARRIVE_TIMES[style]), _LIGHT_AT[style]
     end = times[-1]
     out: list[bytes] = []
     for t in times:
@@ -310,5 +391,12 @@ def folded_ship(stage: Stage, family: str, kind: str, heading: float, colour: Ar
     return Sprite(out, w, h, [gap], True, offset=(cx - w / 2, cy - h / 2), name=f"{family}-{kind}-folded")
 
 
-__all__ = ["WARP_LEAD", "arrive", "final_light", "folded_ship", "glyph", "glyph_reach", "glyph_size", "light_on",
-           "warp_cells", "warp_in", "warp_spot"]
+def warp_cost(stage: Stage, style: str, big: bool = False, max_px: int = 6_000, brief: bool = False) -> int:
+    """How many pixels :func:`warp_in` draws (every frame), without drawing it."""
+    w, h, _ = stretched_size(stage, *warp_cells(stage, style, big), max_px)
+    return w * h * (5 if brief else 9)
+
+
+__all__ = ["FLASH_PEAK", "LIGHT_SETTLES", "WARP_LEAD", "arrive", "arrive_cost", "folded_ship", "glyph", "glyph_reach",
+           "glyph_size", "held_light", "light_cost", "light_flash", "light_on", "warp_cells", "warp_cost", "warp_in",
+           "warp_spot"]

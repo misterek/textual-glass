@@ -10,6 +10,7 @@ so once the show ends glass sends nothing (rule 9).
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -23,6 +24,8 @@ from ._paint import TAU, WHITE, Noise, Paint, Sprite, blend, disc, ink, lum, rot
 LOOP_FRAMES, LOOP_GAP = 32, 160
 #: Pixels per frame of a stretched loop, and of a still drawn once.
 LOOP_PX, STILL_PX = 60_000, 400_000
+#: The halo's orbits at most: drawn at the terminal's own pixels up to this, stretched beyond it.
+ORBITS_PX = 1_500_000
 
 
 @dataclass(frozen=True)
@@ -112,10 +115,19 @@ class Giant:
     def rail_angle(self, s: float) -> float:
         """The angle round the ring of the point ``s`` (0 to 1) of the way along the front of the rail, on
         screen, from its left tip."""
+        phis, length = self._rail
+        return float(np.interp(s * length[-1], length, phis))
+
+    @property
+    def rail_length(self) -> float:
+        """How long the front of the rail is on screen, tip to tip, in terminal pixels."""
+        return float(self._rail[1][-1])
+
+    @functools.cached_property
+    def _rail(self) -> tuple[Array, Array]:
         phis = np.linspace(math.radians(170), math.radians(10), 160)
         pts = np.array([self.ring_point(self.rail, float(a))[:2] for a in phis])
-        length = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
-        return float(np.interp(s * length[-1], length, phis))
+        return phis, np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
 
     def ring_density(self, r: Array, seed: int) -> Array:
         """How opaque the ring is ``r`` radii out: ringlets, a dark gap, a faint inner ring."""
@@ -629,28 +641,39 @@ def corona_loop(stage: Stage, ec: Eclipse, frames: int = LOOP_FRAMES, max_px: in
 ORBIT_KINDS = ("ticket", "review", "merged", "deploy", "release")
 
 
-def orbit_lines(stage: Stage, ec: Eclipse, colours: dict[str, Array], days: int = 7) -> Sprite:
-    """The week's orbits, a still at terminal pixels: one dashed ellipse per kind, in its colour, and a tick
-    across them at each day's start, Monday at the top, going clockwise."""
+def orbit_lines(stage: Stage, ec: Eclipse, colours: dict[str, Array], days: int = 7,
+                max_px: int = ORBITS_PX) -> Sprite:
+    """The week's orbits, a still: one dashed ellipse per kind, in its colour, and a tick across them at
+    each day's start, Monday at the top, going clockwise. Drawn at the terminal's own pixels, or, when
+    that would be more than ``max_px`` (a big stage on a Retina screen), a little smaller and stretched
+    over whole cells."""
     b_out = ec.orbits[-1] * ec.radius
     a_out = b_out * ec.ratio
     half_w = abs(a_out * math.cos(ec.tilt)) + abs(b_out * math.sin(ec.tilt)) + 6
     half_h = abs(a_out * math.sin(ec.tilt)) + abs(b_out * math.cos(ec.tilt)) + 6
     w, h = math.ceil(2 * half_w), math.ceil(2 * half_h)
+    spot: Place | None = None
+    sc = 1.0
+    if w * h > max_px:
+        spot = place(stage, ec.cx, ec.cy, half_w, half_h)
+        w, h, sc = stretched_size(stage, spot.cols, spot.rows, max_px)
+        cw, ch = stage.cell
+        cx, cy = (ec.cx - spot.col * cw) * sc, (ec.cy - spot.row * ch) * sc
+    else:
+        cx, cy = w / 2, h / 2
     paint = Paint(w, h, stage.dark, margin=2.0)
-    cx, cy = w / 2, h / 2
-    dx, dy = paint.xs - cx, paint.ys - cy
+    dx, dy = (paint.xs - cx) / sc, (paint.ys - cy) / sc  # in terminal pixels from the centre
     c, s = math.cos(ec.tilt), math.sin(ec.tilt)
     x, y = dx * c + dy * s, -dx * s + dy * c
     fg = ink(stage, "foreground")
-    line = max(0.7, 0.055 * stage.cell[1])
+    line = max(0.7, 0.055 * stage.cell[1], 0.75 / sc)
     for k, kind in enumerate(ORBIT_KINDS):
         b = ec.orbits[k] * ec.radius
         q = np.sqrt((x / (ec.ratio * b)) ** 2 + (y / b) ** 2)
         dist = np.abs(q - 1) * b
         ang = np.arctan2(y / b, x / (ec.ratio * b))
         dashes = smoothstep(0.25, 0.45, 0.5 + 0.5 * np.cos(ang * (60 + 12 * k)))
-        stroke = np.clip(line + 0.5 - dist, 0, 1) * (0.35 + 0.65 * dashes)
+        stroke = np.clip((line - dist) * sc + 0.5, 0, 1) * (0.35 + 0.65 * dashes)  # half an image pixel of edge
         paint.shine(colours[kind], stroke * (0.42 if stage.dark else 0.55))
     # day ticks: across the orbits at each day's start
     for e in range(days):
@@ -660,9 +683,12 @@ def orbit_lines(stage: Stage, ec: Eclipse, colours: dict[str, Array], days: int 
         qb = np.sqrt((x / ec.ratio) ** 2 + y * y)  # how far out, in orbit heights
         rel = (np.arctan2(y, x / ec.ratio) - math.atan2(uy, ux) + math.pi) % TAU - math.pi
         across = np.abs(rel) * qb * (1 + (ec.ratio - 1) * abs(uy))
-        tick = np.clip(line * 0.8 + 0.5 - across, 0, 1) * smoothstep(b0, b0 + 4, qb) * smoothstep(b1, b1 - 4, qb)
+        tick = np.clip((line * 0.8 - across) * sc + 0.5, 0, 1) * smoothstep(b0, b0 + 4, qb) * smoothstep(b1, b1 - 4, qb)
         paint.shine(fg, tick * (0.32 if e == 0 else 0.16) * (1 if stage.dark else 0.7))
-    return Sprite([paint.frame()], w, h, [1000], False, name="orbits")
+    if spot is None:
+        return Sprite([paint.frame()], w, h, [1000], False, name="orbits")
+    return Sprite([paint.frame()], w, h, [1000], False, (spot.cols, spot.rows), offset=spot.offset(stage),
+                  name="orbits")
 
 
 def week_angle(hour: float) -> float:

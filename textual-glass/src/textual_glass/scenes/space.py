@@ -21,7 +21,14 @@ sends nothing (rule 9).
   top, going clockwise) and unfold into lights. A release flares the corona.
 
 ``make(stage, week, look)`` returns the :class:`~textual_glass.scenes.Scene`;
-an app plays it with ``lambda stage: make(stage, week, "halo")``.
+an app plays it with ``lambda stage: make(stage, week, "halo")``. Each light
+that comes on is a cue, ``("landed", i, kind)``, and the last one is ``END``.
+
+Space is always night: on a light theme the show paints its own sky behind
+everything and draws in the theme's hues lifted to glow (``_sky``). A busy
+week takes about as long as a quiet one: it comes in waves, a day at a time,
+its lights smaller, its ships and lights sharing pictures, and most of its
+ships arriving the cheaper way (``TIERS``), so it fits the contract's limits.
 """
 
 from __future__ import annotations
@@ -34,10 +41,28 @@ import numpy as np
 
 from ..flourishes._draw import bump, ease_out, ramp
 from ..render import Array, smoothstep
-from . import Actor, Cue, Route, Scene, Stage
-from ._effects import WARP_LEAD, arrive, final_light, folded_ship, glyph, glyph_size, light_on, warp_in, warp_spot
+from . import MAX_ACTORS, MAX_PIXELS, Actor, Cue, Route, Scene, Stage
+from ._effects import (
+    _LIGHT_AT,
+    FLASH_PEAK,
+    LIGHT_SETTLES,
+    WARP_LEAD,
+    arrive,
+    arrive_cost,
+    folded_ship,
+    glyph,
+    glyph_size,
+    held_light,
+    light_cost,
+    light_flash,
+    light_on,
+    warp_cost,
+    warp_in,
+    warp_spot,
+)
 from ._paint import WHITE, Noise, Paint, Sprite, blend, disc, ink, star, still_sprite, stretched_size
-from ._ships import ship_sprite, standard_length
+from ._ships import FAMILIES, ship_canvas, ship_sprite, standard_length
+from ._sky import night, night_sky
 from ._worlds import (
     ORBIT_KINDS,
     Eclipse,
@@ -62,6 +87,8 @@ LOOKS = ("harbour", "nightfall", "halo")
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 Point = tuple[float, float]
+#: A light that stays, as it is drawn: its kind, its town's seed and its slope (ratio, angle).
+Light = tuple[str, int, tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -97,6 +124,13 @@ def mini_week(seed: int = 2) -> list[Work]:
 # ================================================================ slots ==
 
 
+#: Ships fly in this many headings, so the ships of a kind that go the same way share a picture.
+HEADINGS = 24
+#: The lights shrink to fit a busy week, down to this share of their size, and no further.
+MIN_SCALE = 0.5
+_GOLDEN = math.pi * (3 - math.sqrt(5))
+
+
 @dataclass(frozen=True)
 class Slot:
     """Where one piece of work ends up: its light, where its ship stops and where it warps in (stage
@@ -108,14 +142,21 @@ class Slot:
     squash: tuple[float, float] = (1.0, 0.0)
 
 
+def heading_of(a: float) -> float:
+    """``a`` (radians) to the nearest of the ``HEADINGS`` directions ships fly in."""
+    step = 2 * math.pi / HEADINGS
+    return round(a / step) % HEADINGS * step
+
+
 def _launch(stage: Stage, target: Point, away: float, rnd: np.random.Generator, spread: float = 0.5,
             reach: float = 0.42, avoid: Callable[[Point], bool] | None = None) -> Point:
     """Where a ship bound for ``target`` warps in: about ``away`` (radians) from it, as far as the stage
-    allows (within ``reach`` of its width), never on the stage's edge, and not where ``avoid`` says."""
+    allows (within ``reach`` of its width), never on the stage's edge, and not where ``avoid`` says. The
+    direction is one of the ``HEADINGS``, so the ship's picture can be shared."""
     margin = 1.4 * standard_length(stage)
     best, best_d = (target[0] - margin, target[1]), -1.0
     for k in range(12):
-        a = away + (rnd.normal(0, spread) if k else 0.0)
+        a = heading_of(away + (rnd.normal(0, spread) if k else 0.0))
         c, s = math.cos(a), math.sin(a)
         lim = []
         if c > 1e-6:
@@ -136,25 +177,37 @@ def _launch(stage: Stage, target: Point, away: float, rnd: np.random.Generator, 
     return best
 
 
-def harbour_slots(stage: Stage, giant: Giant, week: Sequence[Work], seed: int = 0) -> list[Slot]:
+#: The harbour's lanes round the rail, in order of use: the rail itself, then outside, inside...
+_LANES = (0, 1, -1, 2, -2, 3, -3)
+
+
+def _harbour_room(giant: Giant, size: float) -> tuple[int, float]:
+    """How many lights fit along one day of the rail in one lane, and the lanes' spacing in planet radii
+    (the ring is seen at a slant: enough apart where it is most foreshortened, at the front)."""
+    return max(1, int(giant.rail_length / 7 / (2.7 * size))), 2.3 * size / (0.45 * giant.radius)
+
+
+def harbour_slots(stage: Stage, giant: Giant, week: Sequence[Work], seed: int = 0, size: float = 0.0) -> list[Slot]:
     """Berths on the docking rail: each day's work in its day's stretch of the rail, in order, left to
-    right; a second lane outside when a day is busy. A release goes to a moon's place above the ring."""
+    right; more lanes either side of it when a day is busy, each lane half a berth along from the last.
+    A release goes to a moon's place above the ring. ``size`` is a light's radius."""
     rnd = np.random.default_rng(seed * 101 + 7)
+    size = size or glyph_size(stage) * 1.2
     per_day: dict[int, list[int]] = {}
     for i, w in enumerate(week):
         if w.kind != "release":
             per_day.setdefault(w.day, []).append(i)
-    cap = 6
+    cap, lane_dr = _harbour_room(giant, size)
+    step = 2.7 * size / giant.rail_length
     out: dict[int, Slot] = {}
     for d, items in per_day.items():
-        lanes = 1 if len(items) <= cap else 2
-        per_lane = math.ceil(len(items) / lanes)
-        step = 1 / 7 / (cap + 0.6)
+        lanes = min(len(_LANES), math.ceil(len(items) / cap))
         for j, i in enumerate(items):
-            lane, k = (j % lanes, j // lanes) if lanes > 1 else (0, j)
-            phi = giant.rail_angle((d + 0.5) / 7 + (k - (per_lane - 1) / 2) * step)
-            r = giant.rail + 0.13 * lane
-            x, y, _ = giant.ring_point(r, phi)
+            lane, k = j % lanes, j // lanes
+            in_lane = len(range(lane, len(items), lanes))
+            along = (d + 0.5) / 7 + (k - (in_lane - 1) / 2 + (0.5 if lane % 2 else 0.0)) * step
+            phi = giant.rail_angle(min(1.0, max(0.0, along)))
+            x, y, _ = giant.ring_point(giant.rail + _LANES[lane] * lane_dr, phi)
             away = math.atan2(y - giant.cy, x - giant.cx)
             out[i] = Slot((x, y), (x, y), _launch(stage, (x, y), away, rnd, 0.55))
     moons = [(-1.78, -0.98), (1.86, -1.02), (-2.0, -0.42), (2.05, -0.5)]
@@ -169,53 +222,67 @@ def harbour_slots(stage: Stage, giant: Giant, week: Sequence[Work], seed: int = 
 
 
 NIGHT_LATITUDES = {"release": 54.0, "merged": 34.0, "review": 13.0, "deploy": -8.0, "ticket": -29.0}
-_CLUSTER = ((0.0, 0.0), (0.55, 0.5), (-0.55, -0.45), (0.5, -0.55), (-0.5, 0.55), (0.0, 0.95), (0.0, -0.95),
-            (0.95, 0.0), (-0.95, 0.0))
+#: The night side's columns, one per day, in sin(longitude): even on screen.
+_NIGHT_COLUMNS = (-0.88, 0.12)
 
 
-def nightfall_slots(stage: Stage, terra: Terra, week: Sequence[Work], seed: int = 0) -> list[Slot]:
+def _town_room(terra: Terra, kind: str) -> float:
+    """Half the width of a day's column on screen at a kind's latitude: how far a cluster may spread."""
+    lo, hi = _NIGHT_COLUMNS
+    return 0.5 * (hi - lo) / 7 * terra.radius * math.cos(math.radians(NIGHT_LATITUDES[kind]))
+
+
+def nightfall_slots(stage: Stage, terra: Terra, week: Sequence[Work], seed: int = 0, size: float = 0.0) -> list[Slot]:
     """Towns on the night side: the day is the column (Monday at the left limb), the kind the row; a
-    busy day's towns of one kind gather round each other. Landers come in from the night side."""
+    day's towns of one kind gather round each other in a sunflower, as tight as their size allows.
+    Landers come in from the night side. ``size`` is a light's radius."""
     rnd = np.random.default_rng(seed * 103 + 5)
-    lo, hi = -0.88, 0.12  # the columns, in sin(longitude): even on screen
+    size = size or glyph_size(stage)
+    lo, hi = _NIGHT_COLUMNS
     col_w = (hi - lo) / 7
-    count: dict[tuple[int, str], int] = {}
-    out = []
-    for w in week:
-        k = count.get((w.day, w.kind), 0)
-        count[(w.day, w.kind)] = k + 1
-        ox, oy = _CLUSTER[k % len(_CLUSTER)]
-        lat = NIGHT_LATITUDES[w.kind] + oy * 7.5 + float(rnd.uniform(-1.5, 1.5))
-        s = lo + col_w * (w.day + 0.5 + ox * 0.3) + float(rnd.uniform(-0.01, 0.01))
-        lon = math.degrees(math.asin(max(-0.99, min(0.99, s))))
-        x, y, n = terra.point(lat, lon)
-        squash = (max(0.3, float(n[2])), math.atan2(-float(n[1]), float(n[0])))
+    groups: dict[tuple[int, str], list[int]] = {}
+    for i, w in enumerate(week):
+        groups.setdefault((w.day, w.kind), []).append(i)
+    spacing = 2.9 * size
+    out: dict[int, Slot] = {}
 
-        def on_day_side(p: Point) -> bool:
-            return p[0] > terra.cx + 0.2 * terra.radius and abs(p[1] - terra.cy) < 1.05 * terra.radius
+    def on_day_side(p: Point) -> bool:
+        return p[0] > terra.cx + 0.2 * terra.radius and abs(p[1] - terra.cy) < 1.05 * terra.radius
 
-        away = math.pi + float(rnd.uniform(-0.75, 0.75)) + (0.35 if lat < 0 else -0.35)
-        out.append(Slot((x, y), (x, y), _launch(stage, (x, y), away, rnd, 0.4, avoid=on_day_side), squash))
-    return out
+    for (day, kind), items in groups.items():
+        lat = NIGHT_LATITUDES[kind]
+        lon = math.degrees(math.asin(lo + col_w * (day + 0.5)))
+        x0, y0, _ = terra.point(lat, lon)
+        for k, i in enumerate(items):
+            r = 0.0 if len(items) == 1 else 0.55 * spacing * math.sqrt(k + 0.5)
+            x = x0 + r * math.cos(k * _GOLDEN) + float(rnd.uniform(-0.06, 0.06)) * spacing
+            y = y0 + 1.3 * r * math.sin(k * _GOLDEN) + float(rnd.uniform(-0.06, 0.06)) * spacing
+            nx, ny = (x - terra.cx) / terra.radius, (terra.cy - y) / terra.radius
+            nz = math.sqrt(max(0.0, 1 - nx * nx - ny * ny))
+            squash = (max(0.3, nz), math.atan2(-ny, nx))
+            away = math.pi + float(rnd.uniform(-0.75, 0.75)) + (0.35 if lat < 0 else -0.35)
+            out[i] = Slot((x, y), (x, y), _launch(stage, (x, y), away, rnd, 0.4, avoid=on_day_side), squash)
+    return [out[i] for i in range(len(week))]
 
 
-def halo_slots(stage: Stage, ec: Eclipse, week: Sequence[Work], seed: int = 0) -> list[Slot]:
+def halo_slots(stage: Stage, ec: Eclipse, week: Sequence[Work], seed: int = 0, size: float = 0.0) -> list[Slot]:
     """Places on the orbits: the kind's orbit, at the time of the week (Monday at the top, clockwise),
-    nudged apart where two would touch. Probes come in from outside, a little behind their place."""
+    nudged apart where two would touch. Probes come in from outside, a little behind their place.
+    ``size`` is a light's radius."""
     rnd = np.random.default_rng(seed * 107 + 3)
     angles = [week_angle(w.hour) for w in week]
-    size = glyph_size(stage)
+    size = size or glyph_size(stage)
     for k, kind in enumerate(ORBIT_KINDS):
         idx = sorted((i for i, w in enumerate(week) if w.kind == kind), key=lambda i: angles[i])
         if len(idx) < 2:
             continue
         b = ec.orbits[k] * ec.radius
-        gap = 2.7 * size / (b * (1 + ec.ratio) / 2)
-        for _ in range(40):  # push neighbours apart until no two touch
+        gap = min(2.7 * size / (b * (1 + ec.ratio) / 2), 2 * math.pi / len(idx))
+        for _ in range(40 + 2 * len(idx)):  # push neighbours apart until no two touch
             moved = False
             for a, c in zip(idx, idx[1:], strict=False):
                 d = angles[c] - angles[a]
-                if d < gap:
+                if d < gap - 1e-9:
                     push = (gap - d) / 2
                     angles[a] -= push
                     angles[c] += push
@@ -229,6 +296,37 @@ def halo_slots(stage: Stage, ec: Eclipse, week: Sequence[Work], seed: int = 0) -
         away = math.atan2(y - ec.cy, x - ec.cx) - 0.55
         out.append(Slot((x, y), (x, y), _launch(stage, (x, y), away, rnd, 0.3)))
     return out
+
+
+def light_scale(stage: Stage, week: Sequence[Work], look: str) -> float:
+    """How big the lights can be for this week (1 is full size): as big as fits the busiest day (and, at
+    night, the busiest town), down to ``MIN_SCALE``. Below that, lights crowd rather than shrink."""
+    base = glyph_size(stage)
+    per: dict[tuple[int, str], int] = {}
+    for w in week:
+        per[(w.day, w.kind)] = per.get((w.day, w.kind), 0) + 1
+    fit = base
+    if look == "harbour":
+        giant = Giant.on(stage)
+        days: dict[int, int] = {}
+        for (day, kind), m in per.items():
+            if kind != "release":
+                days[day] = days.get(day, 0) + m
+        busiest = max(days.values(), default=0)
+        if busiest:  # three lanes at most
+            fit = giant.rail_length / 7 / (2.7 * math.ceil(busiest / 3)) / 1.2
+    elif look == "nightfall":
+        terra = Terra.on(stage)
+        for (_, kind), m in per.items():
+            if m > 1:
+                fit = min(fit, 0.9 * _town_room(terra, kind) / (0.55 * math.sqrt(m - 0.5)) / 2.9)
+    else:
+        ec = Eclipse.on(stage)
+        for (_, kind), m in per.items():  # a day's office hours, about a twelfth of the orbit
+            b = ec.orbits[ORBIT_KINDS.index(kind)] * ec.radius
+            arc = 2 * math.pi * b * (1 + ec.ratio) / 2 / 12
+            fit = min(fit, arc / (2.7 * m))
+    return min(1.0, max(MIN_SCALE, fit / base))
 
 
 # ======================================================= release moments ==
@@ -438,6 +536,9 @@ STYLES = {
 
 
 def colours(stage: Stage) -> dict[str, Array]:
+    """Each kind's colour as the show draws it: the theme's, lifted to glow on the night on a light
+    theme (``_sky.night``)."""
+    stage = night(stage)
     return {k: ink(stage, ROLE[k]) for k in KINDS}
 
 
@@ -454,15 +555,24 @@ def _glide(u: float) -> float:
 
 @dataclass
 class World:
-    """A look's world on a stage: its actors, the slots for the week and what a release does."""
+    """A look's world on a stage: its actors, the slots for the week and what a release does besides its
+    light (``release_lit``: what it does is its light, as the harbour's new moon is)."""
 
     actors: list[Actor]
     slots: list[Slot]
     release: Callable[[int, Slot, float, Array], list[Actor]]
     light_z: int = 20
+    release_lit: bool = False
 
 
-def _harbour(stage: Stage, week: Sequence[Work], frames: int) -> World:
+def _moment_px(week: Sequence[Work]) -> int:
+    """Pixels a frame for a release's moment (a flare, a wave of light): soft light, drawn small, and
+    smaller when the week has several releases."""
+    releases = sum(w.kind == "release" for w in week)
+    return max(16_000, round(60_000 * min(1.0, 1.25 / max(1, releases))))
+
+
+def _harbour(stage: Stage, week: Sequence[Work], frames: int, size: float) -> World:
     giant = Giant.on(stage)
     at = Route.still(giant.cx, giant.cy)
     loop = giant_loop(stage, giant, frames=frames)
@@ -476,15 +586,15 @@ def _harbour(stage: Stage, week: Sequence[Work], frames: int) -> World:
         count[0] += 1
         moon = moon_sprite(stage, giant, colour, seed=stage.seed + count[0])
         if stage.still:
-            return [final_light(moon).actor(Route.still(*slot.light), z=21)]
-        wave = rail_wave(stage, giant, colour)
+            return [still_sprite(moon).actor(Route.still(*slot.light), z=21)]
+        wave = rail_wave(stage, giant, colour, max_px=_moment_px(week))
         return [moon.actor(Route.still(*slot.light), enter=t, z=21),
                 wave.actor(Route.still(giant.cx, giant.cy), enter=t + 0.25, leave=t + 0.25 + _duration(wave), z=22)]
 
-    return World(actors, harbour_slots(stage, giant, week, stage.seed), release)
+    return World(actors, harbour_slots(stage, giant, week, stage.seed, size), release, release_lit=True)
 
 
-def _nightfall(stage: Stage, week: Sequence[Work], frames: int) -> World:
+def _nightfall(stage: Stage, week: Sequence[Work], frames: int, size: float) -> World:
     terra = Terra.on(stage)
     at = Route.still(terra.cx, terra.cy)
     clouds = terra_clouds(stage, terra, frames=frames)
@@ -493,19 +603,17 @@ def _nightfall(stage: Stage, week: Sequence[Work], frames: int) -> World:
     actors = [terra_base(stage, terra).actor(at, z=2), clouds.actor(at, z=4)]
 
     def release(i: int, slot: Slot, t: float, colour: Array) -> list[Actor]:
-        town = light_on(stage, "release", colour, "city", seed=stage.seed * 31 + i, squash=slot.squash)
         if stage.still:
-            return [final_light(town).actor(Route.still(*slot.light), z=20)]
-        up = beam(stage, slot.light[0], slot.light[1], colour)
-        flash = sky_flash(stage, terra.cx, terra.cy, terra.radius, colour)
-        return [town.actor(Route.still(*slot.light), enter=t, z=20),
-                up.actor(Route.still(*slot.light), enter=t, leave=t + _duration(up), z=24),
+            return []
+        up = beam(stage, slot.light[0], slot.light[1], colour, max_px=_moment_px(week) // 2)
+        flash = sky_flash(stage, terra.cx, terra.cy, terra.radius, colour, max_px=_moment_px(week))
+        return [up.actor(Route.still(*slot.light), enter=t, leave=t + _duration(up), z=24),
                 flash.actor(Route.still(terra.cx, terra.cy), enter=t + 0.1, leave=t + 0.1 + _duration(flash), z=22)]
 
-    return World(actors, nightfall_slots(stage, terra, week, stage.seed), release)
+    return World(actors, nightfall_slots(stage, terra, week, stage.seed, size), release)
 
 
-def _halo(stage: Stage, week: Sequence[Work], frames: int) -> World:
+def _halo(stage: Stage, week: Sequence[Work], frames: int, size: float) -> World:
     ec = Eclipse.on(stage)
     at = Route.still(ec.cx, ec.cy)
     corona = corona_loop(stage, ec, frames=frames)
@@ -515,72 +623,283 @@ def _halo(stage: Stage, week: Sequence[Work], frames: int) -> World:
               orbit_lines(stage, ec, colours(stage)).actor(at, z=6)]
 
     def release(i: int, slot: Slot, t: float, colour: Array) -> list[Actor]:
-        light = light_on(stage, "release", colour, "star", seed=stage.seed * 31 + i)
         if stage.still:
-            return [final_light(light).actor(Route.still(*slot.light), z=20)]
-        flare = diamond_flare(stage, ec, colour)
-        return [light.actor(Route.still(*slot.light), enter=t, z=20),
-                flare.actor(Route.still(ec.cx, ec.cy), enter=t - 0.15, leave=t - 0.15 + _duration(flare), z=22)]
+            return []
+        flare = diamond_flare(stage, ec, colour, max_px=_moment_px(week))
+        return [flare.actor(Route.still(ec.cx, ec.cy), enter=t - 0.15, leave=t - 0.15 + _duration(flare), z=22)]
 
-    return World(actors, halo_slots(stage, ec, week, stage.seed), release)
+    return World(actors, halo_slots(stage, ec, week, stage.seed, size), release)
 
 
-WORLDS: dict[str, Callable[[Stage, Sequence[Work], int], World]] = {
+WORLDS: dict[str, Callable[[Stage, Sequence[Work], int, float], World]] = {
     "harbour": _harbour, "nightfall": _nightfall, "halo": _halo}
+
+
+# ================================================================ the show ==
+
+
+#: Of the contract's limits (``scenes.MAX_PIXELS``, ``scenes.MAX_ACTORS``), what a show plans to use,
+#: however busy the week: the rest is headroom.
+PIXEL_SHARE, ACTOR_SHARE = 0.66, 0.85
+#: How a piece of work arrives, from the most to the least the terminal holds for it:
+#:
+#: * ``full``: it warps in, flies, lands or docks (its own arrival) and its light comes on;
+#: * ``busy``: it warps in briefly, flies and stops, and its light flashes on where it stops;
+#: * ``spark``: its light flashes on, no ship (only when the week is too big for ships);
+#: * ``still``: its light just comes on.
+#:
+#: A release is always ``full``. Every one leaves its light, one shared picture per kind.
+TIERS = ("full", "busy", "spark", "still")
+_TIER_ACTORS = {"full": 5, "busy": 4, "spark": 2, "still": 1}  # warp, ship, arrival, light on, held light
+#: The show's last cue, at its end: what is on stage now holds.
+END = ("end",)
+#: At most this many pieces of work are shown (the latest): a light each, and room for the world.
+MAX_WORK = int(ACTOR_SHARE * MAX_ACTORS) - 80
+#: Launches before the first one, and the time a show needs after its last one.
+FIRST, TAIL = 0.9, 4.3
+#: Room round a release, before and after (seconds).
+RELEASE_ROOM = 0.8
+
+
+def schedule(week: Sequence[Work], length: float = 20.0) -> list[float]:
+    """When each piece of work's ship sets off, in order, so the show lasts about ``length`` seconds: no
+    more than 1.4 s apart however quiet the week, with room round each release, and in waves, a day at
+    a time with a pause between the days, once the week is busy."""
+    n = len(week)
+    if not n:
+        return []
+    releases = sum(w.kind == "release" for w in week)
+    busy = min(1.0, max(0.0, (n - 25) / 50))
+    days = len({w.day for w in week})
+    pause = busy * 0.3 * (n - 1) / max(1, days - 1)  # in launches: the days' pauses, about 30% of a busy show
+    units = [0.0]
+    for a, b in zip(week, week[1:], strict=False):
+        units.append(units[-1] + 1.0 + (pause if b.day != a.day else 0.0))
+    span = max(0.5, length - FIRST - TAIL - 2 * RELEASE_ROOM * releases)
+    unit = min(1.4, span / units[-1]) if units[-1] else 0.0
+    out, extra = [], 0.0
+    for w, u in zip(week, units, strict=True):
+        if w.kind == "release":
+            extra += RELEASE_ROOM
+        out.append(FIRST + u * unit + extra)
+        if w.kind == "release":
+            extra += RELEASE_ROOM
+    return out
+
+
+def _spread(count: int) -> list[int]:
+    """0 to ``count - 1`` in an order whose every start is spread evenly through them (golden ratio)."""
+    return sorted(range(count), key=lambda k: ((k + 0.5) * 0.6180339887) % 1.0)
+
+
+@dataclass
+class _Item:
+    """One piece of work on its way: where it starts and stops, how it flies and how it arrives."""
+
+    index: int
+    work: Work
+    slot: Slot
+    launch: float
+    start: Point
+    heading: float
+    flight: float
+    tier: str = "busy"
+
+
+def _pixels(actors: Sequence[Actor]) -> int:
+    """The pixels the terminal holds for ``actors``: an image shared by stills and loops counts once."""
+    seen: dict[int, Actor] = {}
+    for a in actors:
+        seen[id(a.frames) if len(a.frames) == 1 or a.loop else id(a)] = a
+    return sum(a.width * a.height * len(a.frames) for a in seen.values())
+
+
+#: A ship's plume flickers over this many frames; two in a busy week (more than ``BUSY`` pieces of work).
+PLUME_FRAMES, BUSY = 3, 60
+
+
+def _ship_px(stage: Stage, style: Style, kind: str, heading: float, frames: int) -> int:
+    design = FAMILIES[style.family][kind]
+    w, h, _, _ = ship_canvas(design, standard_length(stage) * design.size, heading)
+    return w * h * frames
+
+
+def _tiers(stage: Stage, style: Style, items: list[_Item], fixed_px: int, fixed_actors: int, scale: float) -> None:
+    """Choose how each piece of work arrives (``TIERS``) so the show fits ``PIXEL_SHARE`` of the pixel
+    limit and ``ACTOR_SHARE`` of the actor limit: every one ``busy`` to start with (fewer if that is
+    already too much), then as many ``full`` as fit, spread through the week."""
+    budget, room = PIXEL_SHARE * MAX_PIXELS, int(ACTOR_SHARE * MAX_ACTORS) - fixed_actors
+    for it in items:
+        it.tier = "full" if it.work.kind == "release" else "busy"
+    plain = [it for it in items if it.work.kind != "release"]
+    flash = 900 * 7
+
+    def busy_px(it: _Item) -> int:
+        return warp_cost(stage, style.warp, brief=True, max_px=BRIEF_WARP_PX) + flash
+
+    def full_px(it: _Item) -> int:
+        kind, h = it.work.kind, it.heading
+        big = kind == "release"
+        return (warp_cost(stage, style.warp, big) + arrive_cost(stage, style.family, kind, h, style.arrive)
+                + light_cost(stage, kind, style.light, scale))
+
+    plume = PLUME_FRAMES if len(items) <= BUSY else 2
+
+    def total() -> tuple[int, int]:
+        ships = {(it.work.kind, it.heading): _ship_px(stage, style, it.work.kind, it.heading, plume)
+                 for it in items if it.tier in ("full", "busy")}
+        px = fixed_px + sum(ships.values())
+        px += sum(full_px(it) if it.tier == "full" else busy_px(it) if it.tier == "busy"
+                  else flash if it.tier == "spark" else 0 for it in items)
+        return px, sum(_TIER_ACTORS[it.tier] for it in items)
+
+    order = [plain[k] for k in _spread(len(plain))]
+    px, actors = total()
+    for lower in ("spark", "still"):  # a week too big for ships, then for flashes
+        for it in reversed(order):
+            if px <= budget and actors <= room:
+                break
+            if _TIER_ACTORS[lower] < _TIER_ACTORS[it.tier]:
+                it.tier = lower
+                px, actors = total()
+    if any(it.tier != "busy" for it in plain):
+        return
+    for it in order:  # then as many full arrivals as fit
+        cost = full_px(it) - busy_px(it)
+        if px + cost > budget or actors + 1 > room:
+            break
+        it.tier = "full"
+        px, actors = px + cost, actors + 1
+
+
+#: A brief warp-in's pixels a frame (``busy``): soft light, drawn small.
+BRIEF_WARP_PX = 1_500
 
 
 def make(stage: Stage, week: Sequence[Work], look: str = "halo", length: float = 20.0,
          loop_frames: int = 32) -> Scene:
-    """The week in review on ``stage``, in ``look`` (``LOOKS``): about ``length`` seconds of ships, then
-    the summary holds. Under ``minimal`` motion (``stage.still``) only the summary is drawn, one frame
-    per actor."""
+    """The week in review on ``stage``, in ``look`` (``LOOKS``): about ``length`` seconds of ships, however
+    busy the week, then the summary holds. A busy week comes in waves, a day at a time, its lights
+    smaller (``light_scale``) and most of its ships arriving the cheaper way (``TIERS``), so the show
+    fits the contract's limits. On a light theme the show brings its own night (``_sky``). Under
+    ``minimal`` motion (``stage.still``) only the summary is drawn, one frame per actor.
+
+    Each light that comes on is a cue, ``("landed", i, kind)``, ``i`` the work's index in ``week``, and the
+    last one, ``END``, comes as the show is done, just before the summary holds. A week
+    of more than ``MAX_WORK`` pieces of work shows its latest ``MAX_WORK``: one light each is all the
+    terminal holds."""
+    picked = list(range(len(week)))[-MAX_WORK:]
+    if len(picked) < len(week):
+        week = [week[k] for k in picked]
+    sky = night_sky(stage)  # on a light theme, a window into space behind everything
+    stage = night(stage)
     style = STYLES[look]
-    world = WORLDS[look](stage, week, loop_frames)
+    scale = light_scale(stage, week, look)
+    world = WORLDS[look](stage, week, loop_frames, glyph_size(stage) * scale * (1.2 if style.light == "bead" else 1))
     inks = colours(stage)
-    actors = list(world.actors)
+    actors = sky + list(world.actors)
     cues: list[Cue] = []
-    n = max(1, len(week))
-    spacing = min(1.4, max(0.5, length / n))
-    t = 0.9
-    end = 1.0
-    for i, (work, slot) in enumerate(zip(week, world.slots, strict=True)):
-        colour = inks[work.kind]
-        big = work.kind == "release"
-        if stage.still:
-            if big:
-                actors += world.release(i, slot, 0.0, colour)
-            else:
-                light = light_on(stage, work.kind, colour, style.light, seed=stage.seed * 31 + i,
-                                 squash=slot.squash)
-                actors.append(final_light(light).actor(Route.still(*slot.light), z=world.light_z))
-            continue
-        if big:
-            t += 0.8
-        (dx, dy) = slot.dock
-        sx, sy = warp_spot(stage, *slot.start, style.warp, big)
-        heading = math.atan2(dy - sy, dx - sx)
-        dist = math.hypot(dx - sx, dy - sy)
-        flight = 1.35 + 1.1 * dist / stage.width + (0.6 if big else 0.0)
-        warp = warp_in(stage, heading, colour, style.warp, big=big)
-        actors.append(warp.actor(Route.still(sx, sy), enter=t, leave=t + _duration(warp), z=50))
-        make_ship = folded_ship if style.folded else ship_sprite
-        ship = make_ship(stage, style.family, work.kind, heading, colour, style.sun)
-        go, land = t + WARP_LEAD, t + WARP_LEAD + flight
-        actors.append(ship.actor(Route.line((sx, sy), (dx, dy), go, land, ease=_glide), enter=go, leave=land,
-                                 z=41 if big else 40))
-        last, light_at = arrive(stage, style.family, work.kind, heading, colour, style.arrive, style.sun,
-                                squash=slot.squash)
-        actors.append(last.actor(Route.still(dx, dy), enter=land, leave=land + _duration(last), z=30))
-        lit = land + light_at
-        if big:
-            actors += world.release(i, slot, lit, colour)
+    held: dict[Light, Sprite] = {}
+
+    def held_for(kind: str, i: int, squash: tuple[float, float]) -> tuple[Light, Sprite]:
+        """The light that stays for a kind: one picture per kind (and, at night, per slope and town),
+        and what it is drawn from (kind, town seed, slope)."""
+        if style.light == "city":
+            ratio, angle = squash
+            ratio = round(ratio * 10) / 10
+            angle = 0.0 if ratio > 0.95 else round(angle / (math.pi / 12)) * (math.pi / 12)
+            key: Light = (kind, stage.seed * 31 + i % 3, (ratio, angle))
         else:
-            light = light_on(stage, work.kind, colour, style.light, seed=stage.seed * 31 + i, squash=slot.squash)
-            actors.append(light.actor(Route.still(*slot.light), enter=lit, z=world.light_z))
-        cues.append(Cue(lit, ("landed", i, work.kind)))
+            key = (kind, stage.seed * 31, (1.0, 0.0))
+        if key not in held:
+            held[key] = held_light(stage, kind, inks[kind], style.light, key[1], key[2], scale)
+        return key, held[key]
+
+    if stage.still:
+        for i, (work, slot) in enumerate(zip(week, world.slots, strict=True)):
+            if work.kind == "release" and world.release_lit:
+                actors += world.release(i, slot, 0.0, inks[work.kind])
+                continue
+            actors.append(held_for(work.kind, i, slot.squash)[1].actor(Route.still(*slot.light), z=world.light_z))
+            actors += world.release(i, slot, 0.0, inks[work.kind]) if work.kind == "release" else []
+        return Scene(actors, 0.1, [Cue(0.1, END)])
+
+    items = []
+    for i, (work, slot, launch) in enumerate(zip(week, world.slots, schedule(week, length), strict=True)):
+        big = work.kind == "release"
+        dx, dy = slot.dock
+        sx, sy = warp_spot(stage, *slot.start, style.warp, big)
+        flight = 1.35 + 1.1 * math.hypot(dx - sx, dy - sy) / stage.width + (0.6 if big else 0.0)
+        items.append(_Item(i, work, slot, launch, (sx, sy), heading_of(math.atan2(dy - sy, dx - sx)), flight))
+    extras = []  # what the releases do besides their lights: drawn now, so the budget knows them
+    for it in items:
+        if it.work.kind == "release":
+            land = it.launch + WARP_LEAD + it.flight
+            extras += world.release(it.index, it.slot, land + _LIGHT_AT[style.arrive], inks["release"])
+    fixed = _pixels(actors + extras) + sum(h.width * h.height for h in
+                                           (held_for(w.kind, i, sl.squash)[1] for i, (w, sl) in
+                                            enumerate(zip(week, world.slots, strict=True))))
+    _tiers(stage, style, items, fixed, len(actors) + len(extras), scale)
+    actors += extras
+
+    ships: dict[tuple[str, float], Sprite] = {}
+    drawn: dict[tuple[object, ...], Sprite] = {}  # one-shots drawn once (each still has an image of its own)
+    arrivals: dict[tuple[object, ...], tuple[Sprite, float]] = {}
+    end = 1.0
+    for it in items:
+        work, slot, i = it.work, it.slot, it.index
+        kind, colour, big = work.kind, inks[work.kind], work.kind == "release"
+        (sx, sy), (dx, dy) = it.start, slot.dock
+        t, heading = it.launch, it.heading
+        go, land = t + WARP_LEAD, t + WARP_LEAD + it.flight
+        if it.tier in ("full", "busy"):
+            brief = it.tier == "busy"
+            key = ("warp", kind, heading, big, brief)
+            if key not in drawn:
+                drawn[key] = warp_in(stage, heading, colour, style.warp, big=big, brief=brief,
+                                     max_px=BRIEF_WARP_PX if brief else 6_000)
+            warp = drawn[key]
+            actors.append(warp.actor(Route.still(sx, sy), enter=t, leave=t + _duration(warp), z=50))
+            if (kind, heading) not in ships:
+                make_ship = folded_ship if style.folded else ship_sprite
+                ships[(kind, heading)] = make_ship(stage, style.family, kind, heading, colour, style.sun,
+                                                   frames=PLUME_FRAMES if len(items) <= BUSY else 2)
+            ship = ships[(kind, heading)]
+            actors.append(ship.actor(Route.line((sx, sy), (dx, dy), go, land, ease=_glide), enter=go, leave=land,
+                                     z=41 if big else 40))
+        if it.tier == "full":
+            squash_key = (round(slot.squash[0], 1), round(slot.squash[1], 1))
+            akey = (kind, heading, squash_key)
+            if akey not in arrivals:
+                arrivals[akey] = arrive(stage, style.family, kind, heading, colour, style.arrive, style.sun,
+                                        squash=slot.squash)
+            last, light_at = arrivals[akey]
+            actors.append(last.actor(Route.still(dx, dy), enter=land, leave=land + _duration(last), z=30))
+            lit = land + light_at
+        else:
+            lit = land if it.tier == "busy" else t + WARP_LEAD
+        if not (big and world.release_lit):
+            hkey, keep = held_for(kind, i, slot.squash)
+            if it.tier == "full":
+                okey = ("on", *hkey)
+                if okey not in drawn:  # the same light as the one that stays, coming on
+                    drawn[okey] = light_on(stage, kind, colour, style.light, hkey[1], hkey[2], scale)
+                on = drawn[okey]
+                actors.append(on.actor(Route.still(*slot.light), enter=lit, leave=lit + LIGHT_SETTLES,
+                                       z=world.light_z + 1))
+                stays = lit + LIGHT_SETTLES
+            elif it.tier in ("busy", "spark"):
+                flash = light_flash(stage, *slot.light, colour, scale, big=big)
+                actors.append(flash.actor(Route.still(*slot.light), enter=lit, leave=lit + _duration(flash),
+                                          z=world.light_z + 1))
+                stays = lit + FLASH_PEAK
+            else:
+                stays = lit
+            actors.append(keep.actor(Route.still(*slot.light), enter=stays, z=world.light_z))
+        cues.append(Cue(lit, ("landed", picked[i], kind)))
         end = max(end, lit + (2.0 if big else 1.0))
-        t += spacing + (0.8 if big else 0.0)
-    return Scene(actors, (end + 0.6) if not stage.still else 0.1, cues)
+    cues.append(Cue(end + 0.6, END))
+    return Scene(actors, end + 0.6, cues)
 
 
 def summary_glyph(paint: Paint, kind: str, x: float, y: float, stage: Stage) -> None:
@@ -588,5 +907,5 @@ def summary_glyph(paint: Paint, kind: str, x: float, y: float, stage: Stage) -> 
     glyph(paint, kind, x, y, glyph_size(stage), colours(stage)[kind])
 
 
-__all__ = ["DAYS", "KINDS", "LOOKS", "ROLE", "STYLES", "Slot", "Style", "Work", "World", "colours",
+__all__ = ["DAYS", "END", "KINDS", "LOOKS", "ROLE", "STYLES", "Slot", "Style", "Work", "World", "colours",
            "day_edges", "make", "mini_week", "sample_week", "summary_glyph"]

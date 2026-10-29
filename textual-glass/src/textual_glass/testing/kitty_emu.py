@@ -157,9 +157,15 @@ class KittyModel:
         if a == "d":
             d = k.get("d", "a")
             if d in ("i", "I"):
-                self.placements = {key: p for key, p in self.placements.items() if key[0] != iid}
-                if d == "I":
-                    self.images.pop(iid, None)
+                pid = gi("p")
+                if pid:  # only that placement; with I, the image too once nothing shows it
+                    self.placements.pop((iid, pid), None)
+                    if d == "I" and not any(key[0] == iid for key in self.placements):
+                        self.images.pop(iid, None)
+                else:
+                    self.placements = {key: p for key, p in self.placements.items() if key[0] != iid}
+                    if d == "I":
+                        self.images.pop(iid, None)
             elif d in ("a", "A"):  # Ghostty 1.4: visible placements only (graphics_storage.zig)
                 self._delete_visible(free=d == "A")
             elif d in ("r", "R"):  # every placement of the ids in x..y, virtual ones included

@@ -43,6 +43,7 @@ uv run python examples/showcase/app.py --plain              # stock Textual, for
 uv run python examples/showcase/app.py --image ~/cat.gif    # your picture in the modal (PNG, JPEG, GIF...)
 uv run python examples/flourishes/app.py                    # every flourish, over a small dashboard
 uv run python examples/scenes/app.py                        # a small scene, in placeholder art
+uv run python examples/week/app.py                          # the week in review: three looks, busy weeks, light themes
 ```
 
 | Key | Action |
@@ -260,12 +261,13 @@ showing = self.glass.play_scene(arrival, at=self.query_one("#panel"), on_cue=sel
 
 `app.glass.play_scene(make, at=None, start=0.0, on_cue=None, on_end=None) -> Showing | None`:
 
-- `make(stage) -> Scene` runs in glass's worker thread, so the app never waits. The `Stage` (in `textual_glass.scenes`) is the anchor's visible cells in terminal pixels: `width`, `height`, `cols`, `rows`, one `cell`, the theme's `colors` by role (`scenes.ROLES`), `dark`, `still` and a `seed`. A maker that raises, or whose scene breaks the limits (`scenes.check`: at most 256 actors, 64 frames each, 16 million pixels in all and 300 seconds), counts as a glass error and ends the scene as `"failed"`.
+- `make(stage) -> Scene` runs in glass's worker thread, so the app never waits. The `Stage` (in `textual_glass.scenes`) is the anchor's visible cells in terminal pixels: `width`, `height`, `cols`, `rows`, one `cell`, the theme's `colors` by role (`scenes.ROLES`), `dark`, `still`, a `seed`, and the theme's deep-space colours, `space` (top and bottom) and `nebula` (three), the nebula backdrop's (`glass-space-*`, `glass-nebula-*`; their defaults when the theme sets none), for a scene that paints its own night on a light theme. A maker that raises, or whose scene breaks the limits (`scenes.check`: at most 1024 actors, 64 frames each, 16 million pixels in all and 300 seconds), counts as a glass error and ends the scene as `"failed"`.
 - `at` is a widget, a `Region` in screen cells (on the top screen) or `None` for the whole window. The scene plays on the anchor's screen, under the next popup's scrim.
 - A `Scene` has `actors`, a `duration` in seconds and `cues`. An `Actor` has straight-alpha RGBA `frames` (fully transparent at their border, rule 17), its `width` and `height`, a `Route` for its centre (keys of `(t, x, y)` with straight lines between them; `Route.line`, `Route.sample` for curves, `Route.still`), `gaps` in ms, `loop`, `enter` and `leave` times, a `z` from 0 to 99, and `cells`:
   - with `cells=None` it is drawn at its own pixels, moves smoothly and is cropped at the stage's edge;
   - with `cells=(cols, rows)` the terminal stretches it over that many cells (a big, soft picture drawn small), placed at whole cells and kept inside the stage.
 - A loop (`loop=True`, the default) is played by the terminal. A one-shot (`loop=False`) is stepped through once by glass from its entrance and holds its last frame.
+- **Actors whose `frames` is the same object share one image**: it goes up once, and each actor is a placement of it with a placement id of its own, so a hundred lights of one kind cost one picture (and count once against the pixel limit). Give them the same size and, for a loop, the same gaps; all of a loop's placements show the frame the terminal is on. Only stills and loops share: glass steps a one-shot with `a=a,c=N`, which moves the image, not a placement, so each one-shot has an image of its own, whatever its frames. An actor that leaves deletes its placement, and the last one of an image deletes the image.
 - The clock starts when the pictures are sent, `start` seconds in. `start=math.inf` shows the end at once: what an app does to put a summary back after a resize.
 - `on_cue(data)` hears each `Cue(t, data)` once and in order, on the app thread. A cue at or before `start` never comes (one at 0 included): the app shows that state itself.
 - It returns a `Showing` (`textual_glass.player`): `stop()`, `elapsed` (seconds into the scene), `holding` (it has reached its end and stays) and `ended` (why it went, or `None`). It returns `None` and does nothing while glass is off, when the anchor isn't on a visible screen or has no area, and while two (`textual_glass.player.MAX_SCENES`) others are showing or being made (a scene on the same anchor as one of them replaces it instead).
@@ -287,6 +289,34 @@ A scene goes, with every image deleted, and `on_end(reason)` hears why, once, on
 Glass checks the anchor at every frame, holding or not. To put the end back after a resize, a new theme or a move, play the scene again from `on_end` with `start=math.inf` (after a refresh, once the layout has settled). What `on_cue` or `on_end` raises counts as a glass error.
 
 The demo shows six dots flying in from beyond a panel's edge on curves, cropped there, each docking with a flash on a ring around a big soft disc that breathes, and a caption that follows the cues: `uv run python textual-glass/examples/scenes/app.py` from the repository root, in Ghostty. Keys: `r` plays it again, `f9` the motion level, `l` a light theme and back, `q` quits.
+
+### The week in review
+
+`textual_glass.scenes.space` is a finished scene: a planet, and a ship for each piece of work done in a week. Each ship warps in, in the order the work happened, flies to its place, lands or docks, and its light comes on; when the show ends the summary holds, one light per piece of work, its shape and colour the kind, its place the time of the week.
+
+```python
+from textual_glass.scenes import space
+
+week = [space.Work("merged", 10.5), space.Work("review", 14.0), space.Work("release", 88.0)]  # hours since Monday 00:00
+showing = self.glass.play_scene(lambda stage: space.make(stage, week, look="halo", length=20.0),
+                                at=self.query_one("#week"), on_cue=self.cue)
+# each light that comes on is a cue: ("landed", i, kind), i the work's index in week;
+# the last cue, ("end",) (space.END), comes as the show is done, just before the summary holds
+```
+
+| Look (`space.LOOKS`) | The world | Where a light goes | A release |
+| --- | --- | --- | --- |
+| `harbour` | a banded giant whose bands flow under a still ring | a berth on the docking rail round the ring, cut into the seven days (Monday at the left); more lanes either side on a busy day | a new moon, and a pulse of light along the rail |
+| `nightfall` | a world at night, its clouds drifting | a town on the night side: the day is the longitude, the kind the latitude; a day's towns of one kind gather in a cluster | a capital in the north, a beam of light, and the atmosphere flaring |
+| `halo` | an eclipsed planet, its corona shimmering | one orbit per kind, at the hour of the week (Monday at the top, clockwise), nudged apart where two would touch | the corona flares and a ring of light sweeps the orbits |
+
+Kinds (`space.KINDS`) and their lights: merged is a round light (`secondary`), review a ring round a point (`success`), deploy a diamond (`primary`), ticket a small point (`foreground`), release a four-pointed star (`accent`). `space.summary_glyph` draws one on any canvas, for a legend.
+
+- **Space is always night.** On a dark theme the dashboard's own space shows through. On a light one the show paints its own sky behind everything: one actor stretched over the whole stage, a rounded viewport in the theme's `space` colours with faint `nebula` and a few crisp stars (three images, shared), its edge fading to transparent (rule 17), like a window into space set into the light page. The art is then drawn as on a dark theme, in the theme's hues lifted to glow on it: each role keeps its hue, its lightness and saturation raised (`scenes._sky.lift`). The viewport covers the whole stage, so captions over the stage should be light on dark there.
+- **Big weeks.** The show lasts about `length` seconds whatever the count: launches are at most 1.4 s apart, and a busy week comes in overlapping waves, a day at a time with a pause between the days. Its lights shrink to fit the busiest day (down to half their size) and stay one per piece of work. Ships fly in 24 headings, so ships of a kind going the same way share a picture; every light of a kind (at night, of a slope and town) is one image. The maker plans to use at most 66% of the pixel limit and 85% of the actor limit: every piece of work arrives in full (its own landing, the light coming on) while that fits, the rest more cheaply (a brief warp-in, the ship, a flash where it stops); a release always arrives in full. 150 items at 140x45 cells on a Retina screen use about 62% of the pixels and 60% of the actors, and upload 2 to 3 MB once. A week of more than `space.MAX_WORK` (790) items shows its latest 790.
+- At `minimal` motion it is the summary alone, one frame per actor.
+
+The showcase plays a made-up week over a full-page panel, with a caption that follows the cues ("merged #412 fix the flaky test") and a tally that counts up and holds at the end: `uv run python textual-glass/examples/week/app.py` from the repository root, in Ghostty. Keys: `1` `2` `3` the look, `+` `-` a busier or quieter week (12, 25, 60 or 150 items), `r` plays it again, `f9` the motion level, `l` a light theme and back, `q` quits. `--look` and `--items` pick them at the start, `--plain` runs stock Textual (the tally, no show). A resize or a new theme ends the show and the page puts the summary straight back with `start=math.inf`. `uv run python textual-glass/tests/scene_sheet.py --out /tmp/looks` writes contact sheets, finals on both themes and of a 150-item week, and prints each look's budgets at 25, 75 and 150 items.
 
 ## Supported terminals and fallback
 
@@ -587,13 +617,15 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 | `tests/test_widgets.py` | Every pixel widget in both modes with identical layout, `Telemetry`'s one scale with and without glass, the `SelectList` pill (slides, settles, goes quiet) and its section headers staying in view, `GlassPanel` titles and accents, clipping in scrolling containers, `strip` never cutting a placeholder run. |
 | `tests/test_images.py` | `load_image` and `GlassImage`: GIF compositing, timing and loop counts, PNG transparency, EXIF rotation, limits, bad input, resampling, half blocks, play counts in the terminal, the memory budget. Tests with real pictures run when `GLASS_TEST_ART` points at a folder. |
 | `tests/test_flourishes.py` | Every flourish kind by itself: every frame transparent at the stage's border (rule 17) at five window and cell sizes, the limits, determinism, an `about` line and palette roles, no Textual imports, the stage's geometry. |
-| `tests/test_scenes.py` | The scene contract: routes and the limits `scenes.check` holds a maker to. |
-| `tests/test_scene_pilot.py` | `play_scene()` in a running app, with test actors and a fake clock: every actor uploaded, loops started after their frames, one-shots stepped and holding their last frame; native actors placed at offsets below the cell size (four cell sizes, fractional ones too), cropped at the stage's edge and unplaced outside it; stretched actors on whole cells; entrances, exits and cues; `start`; the hold in silence; every end reason, playing and holding, with images deleted and ids freed; a page switch while holding; the anchor's level; `minimal` motion; broken makers; the limit of two scenes; a long show and thirty replays staying bounded; the kitty model's offsets and source rectangles. The demo plays to its hold at 70x22, 90x28 and 140x45. |
+| `tests/test_scenes.py` | The scene contract: routes, the limits `scenes.check` holds a maker to, and actors with the same frames counted as one image (stills and loops only, of one size and, for a loop, the same gaps). |
+| `tests/test_scene_art.py` | The week in review (`scenes.space`) by itself: every look within the limits and every frame transparent at its border (rule 17), on both themes and in a busy week; determinism; `minimal` motion; seamless loops; the night a light theme brings (the viewport over the whole stage, its stars, the lifted hues); 150 items at 140x45 Retina cells well within the limits, a cue and a light each, the lights and ships sharing images; the show's length from 3 to 150 items, and the waves; a week too big for the terminal; a light coming on handing over to the one that stays; no Textual imports. |
+| `tests/test_scene_pilot.py` | `play_scene()` in a running app, with test actors and a fake clock: every actor uploaded, loops started after their frames, one-shots stepped and holding their last frame; native actors placed at offsets below the cell size (four cell sizes, fractional ones too), cropped at the stage's edge and unplaced outside it; stretched actors on whole cells; entrances, exits and cues; `start`; the hold in silence; every end reason, playing and holding, with images deleted and ids freed; a page switch while holding; the anchor's level; `minimal` motion; broken makers; the limit of two scenes; a long show and thirty replays staying bounded; actors sharing an image (one upload, a placement each, each placement deleted as its actor leaves and the image with the last, one-shots apart, every id freed); the kitty model's offsets and source rectangles. The demo plays to its hold at 70x22, 90x28 and 140x45; the week in review plays to its hold in each look at those sizes in silence, takes a 150-item week, and puts its summary back after a new theme and a resize. |
 | `tests/test_flourish_pilot.py` | `flourish()` in a running app: frames uploaded while stopped, placed at the anchor's level, stepped in order and deleted after the last one, then silence; the no-op cases; `MAX_FLOURISHES`; dropped on a resize, a theme change, `minimal` motion, a popup closing, suspend and resume; a broken maker. The demo plays every kind at 70x22, 90x28 and 140x45. |
 | `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` (with `textual_glass.testing.screenshots.shoot`). |
 | `tests/flourish_sheet.py` | Contact sheets and GIFs of each flourish kind (see [`AGENTS.md`](AGENTS.md#adding-a-flourish)). |
+| `tests/scene_sheet.py` | Contact sheets, finals (dark, light, 150 items), storyboards, GIFs and budgets of each look of the week in review. |
 
 ## Limitations
 
