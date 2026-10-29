@@ -57,3 +57,7 @@ Screen.-tall #tiles { height: 12; }
 Screen.-narrow #done-panel { display: none; }
 Screen.-short #goals-panel { height: 8; }
 Screen.-tall #goals-panel { height: 14; }
+
+/* -------------------------------------------------------------- replay -- */
+#replay-panel { height: 1fr; }
+#week-replay { height: 1fr; }

@@ -45,6 +45,7 @@ TOUR = [
     Step(0.6, "releases", "2"),
     Step(1.6, "week", "3"),
     Step(1.6, "board", "4"),
+    Step(1.6, "replay", "5"),
     Step(1.6, "console", "1"),
     Step(1.4, "help", "?"),
     Step(1.0, "help_close", "escape"),
@@ -136,7 +137,8 @@ def test_cursor_moves_with_partial_edits(tour: tuple[Capture, dict[str, Replay]]
 def test_every_page_has_its_panels(tour: tuple[Capture, dict[str, Replay]]) -> None:
     _, snaps = tour
     # each snapshot is taken just before its step's key: "week" shows page 2, and so on
-    expected = {"week": "RELEASE TRACK", "board": "THIS WEEK", "console": "GOALS", "help": "NEEDS ATTENTION"}
+    expected = {"week": "RELEASE TRACK", "board": "THIS WEEK", "replay": "GOALS", "console": "WEEK IN REVIEW",
+                "help": "NEEDS ATTENTION"}
     for label, text in expected.items():
         assert text in snaps[label].all_text(), label
         assert len([p for p in _placements(snaps[label]) if p["z"] == Z0]) == 1
@@ -217,7 +219,8 @@ def test_resize_rerenders(tour: tuple[Capture, dict[str, Replay]]) -> None:
 ])
 def test_window_sizes(size: tuple[int, int], wants: list[str], absent: list[str]) -> None:
     steps = [Step(4.0, "console"), Step(0.0, "p2", "2"), Step(1.6, "releases"), Step(0.0, "p3", "3"),
-             Step(1.6, "week"), Step(0.0, "p4", "4"), Step(1.6, "board"), Step(0.0, "q", "q")]
+             Step(1.6, "week"), Step(0.0, "p4", "4"), Step(1.6, "board"), Step(0.0, "p5", "5"),
+             Step(1.6, "replay"), Step(0.0, "q", "q")]
     capture = run_app(STATIC, steps, size=size)
     snaps = _snaps(capture, size, f"{size[0]}x{size[1]}")
     assert capture.code == 0 and b"Traceback" not in capture.raw
@@ -227,7 +230,7 @@ def test_window_sizes(size: tuple[int, int], wants: list[str], absent: list[str]
     for word in absent:
         assert word not in text, (size, word)
     assert "IN FLIGHT" in snaps["p3"].all_text() and "THIS WEEK" in snaps["p4"].all_text()
-    assert "GOALS" in snaps["q"].all_text()
+    assert "GOALS" in snaps["p5"].all_text() and "WEEK IN REVIEW" in snaps["q"].all_text()
     model = snaps["end"].model
     assert not model.errors and not model.images
 

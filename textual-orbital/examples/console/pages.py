@@ -1,10 +1,12 @@
-"""The four pages of Mission Console, built only from orbital and glass widgets.
+"""The five pages of Mission Console, built only from orbital and glass widgets.
 
 Each page gets ``update_snapshot(snapshot)`` whenever the data changes (and
 when items are snoozed) and ``minute_tick(at)`` for ages and timers. The Week
 page steps through past weeks with ``[`` and ``]``: last week from the
 snapshot (``Snapshot.week(on)``), older ones fetched on demand from the
-provider's ``history(first, last)`` (``OrbitalApp.fetch``).
+provider's ``history(first, last)`` (``OrbitalApp.fetch``). The Replay page
+plays the week in review (``WeekReplay``) each time it shows; ``p`` plays it
+again and ``l`` draws it in the next look.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from textual_orbital import (
     TrackHealth,
     TrackItem,
     TrackTable,
+    WeekReplay,
     WeekStats,
     queue_load,
 )
@@ -69,7 +72,7 @@ def releases_title(panel: GlassPanel, name: str, items: list[TrackItem], track: 
 class ConsolePage(Page):
     """Page 1: what needs me, at a glance, in a corner window."""
 
-    KEYS = [("1-4", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "panel"), ("o", "browser"),
+    KEYS = [("1-5", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "panel"), ("o", "browser"),
             ("s", "snooze"), ("space", "be aware"), ("h", "sources"), ("?", "help"), ("q", "quit")]
     DEFAULT_FOCUS = "#queue"
 
@@ -160,7 +163,7 @@ class ConsolePage(Page):
 class ReleasesPage(Page):
     """Page 2: every release on the big track, and in a table."""
 
-    KEYS = [("1-4", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "track/table"), ("o", "browser"),
+    KEYS = [("1-5", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "track/table"), ("o", "browser"),
             ("h", "sources"), ("?", "help"), ("q", "quit")]
     DEFAULT_FOCUS = "#release-table"
 
@@ -199,7 +202,7 @@ TILES: list[tuple[str, str, tuple[str, ...], tuple[str, str], str]] = [
 class WeekPage(Page):
     """Page 3: a week in brief, as telemetry. ``[`` and ``]`` step through past weeks."""
 
-    KEYS = [("1-4", "pages"), ("j/k", "move"), ("[ ]", "weeks"), ("⏎", "open"), ("o", "browser"), ("?", "help"),
+    KEYS = [("1-5", "pages"), ("j/k", "move"), ("[ ]", "weeks"), ("⏎", "open"), ("o", "browser"), ("?", "help"),
             ("q", "quit")]
     DEFAULT_FOCUS = "#events"
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -308,7 +311,7 @@ class WeekPage(Page):
 class BoardPage(Page):
     """Page 4: goals as progress arcs, the work in flight, and what landed."""
 
-    KEYS = [("1-4", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "tasks/done"), ("o", "browser"),
+    KEYS = [("1-5", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "tasks/done"), ("o", "browser"),
             ("?", "help"), ("q", "quit")]
     DEFAULT_FOCUS = "#tasks"
     MAX_ARCS = 6
@@ -354,11 +357,54 @@ class BoardPage(Page):
                                                             (str(len(done)), f"bold {PALETTE['green']}"))
 
 
+# =================================================================== replay ==
+
+#: The demo world's event kinds and the ship each one flies as. "ticket opened" and
+#: "incident" fly none: they count as "other" in the tally.
+SHIPS = {"merged": "merged", "reviewed": "review", "shipped": "deploy", "ticket closed": "ticket"}
+
+
+class ReplayPage(Page):
+    """Page 5: the week in review, as a show each time the page opens, then held as its summary."""
+
+    KEYS = [("1-5", "pages"), ("p", "play again"), ("l", "look"), ("h", "sources"), ("?", "help"), ("q", "quit")]
+    DEFAULT_FOCUS = "#week-replay"
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("p", "replay", "play again", show=False),
+        Binding("l", "look", "next look", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with GlassPanel(title="WEEK IN REVIEW", id="replay-panel"):
+            yield WeekReplay(ships=SHIPS, id="week-replay")
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        self.query_one("#week-replay", WeekReplay).set_week(snapshot.week())
+        self.set_title()
+
+    def set_title(self) -> None:
+        replay = self.query_one("#week-replay", WeekReplay)
+        week = replay.week
+        since = f"since {week.start:%a %b} {week.start.day}" if week is not None else ""
+        self.query_one("#replay-panel", GlassPanel).set_title(
+            "WEEK IN REVIEW", (since, PALETTE["text_soft"]), (f"{replay.landed} landed", f"bold {PALETTE['accent']}"),
+            (replay.look, PALETTE["text_dim"]))
+
+    def action_replay(self) -> None:
+        self.query_one("#week-replay", WeekReplay).replay()
+
+    def action_look(self) -> None:
+        replay = self.query_one("#week-replay", WeekReplay)
+        replay.set_look(replay.next_look())
+        self.set_title()
+
+
 #: (id, tab name, page class), in key order.
 PAGES: list[tuple[str, str, type[Page]]] = [
     ("console", "Console", ConsolePage),
     ("releases", "Releases", ReleasesPage),
     ("week", "Week", WeekPage),
     ("board", "Board", BoardPage),
+    ("replay", "Replay", ReplayPage),
 ]
 

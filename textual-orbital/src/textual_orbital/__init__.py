@@ -3,7 +3,8 @@
 * :class:`OrbitalApp` (:mod:`textual_orbital.app`): polls a provider, raises
   alerts, notifies, badges the window title.
 * The widgets (:mod:`textual_orbital.widgets`): beacons, the priority queue,
-  the track, tables and lists, the header and key bar, pages and popups.
+  the track, tables and lists, the header and key bar, pages and popups, and
+  the week in review (``WeekReplay``).
 * The data layer: generic records (:mod:`textual_orbital.model`), the source
   seam (:mod:`textual_orbital.provider`), alert rules and the queue
   (:mod:`textual_orbital.alerts`), notifications (:mod:`textual_orbital.notify`)
@@ -83,6 +84,7 @@ from .widgets import (
     TaskBoard,
     Track,
     TrackTable,
+    WeekReplay,
 )
 
 __version__ = "0.2.0"
@@ -90,7 +92,7 @@ __version__ = "0.2.0"
 __all__ = [
     "AlertScreen", "AlertToast", "BeaconRow", "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip",
     "HelpScreen", "KeyBar", "OrbitalApp", "OrbitalModal", "Page", "PriorityList", "SourceHealth", "SourcesScreen",
-    "TaskBoard", "Track", "TrackTable",
+    "TaskBoard", "Track", "TrackTable", "WeekReplay",
     "ALERT_STYLES", "ENTITY_URGENCY", "ORBITAL", "ORBITAL_NAVY", "PALETTE", "SOURCE_COLORS", "SOURCE_NAMES",
     "WHY_COLORS",
     "Alert", "AlertQueue", "AlertRules", "AttentionItem", "Condition", "DayCount", "DoneTask", "Entity",
