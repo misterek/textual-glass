@@ -30,10 +30,18 @@ class Output:
     def since(self, mark: int) -> str:
         return "".join(self.chunks[mark:])
 
-    def model(self) -> KittyModel:
-        model = KittyModel()
-        for body in re.findall(r"\x1b_G([^\x1b]*)\x1b\\", self.text):
-            model.apc(body.encode(), (0, 0))
+    def model(self, cell: tuple[float, float] | None = None) -> KittyModel:
+        """Everything written so far, applied to a :class:`KittyModel` (with the cell
+        size, to check placement offsets). Placements are at the cursor position
+        written just before them (``ESC [ row ; col H``)."""
+        model = KittyModel(cell)
+        cursor = (0, 0)
+        for match in re.finditer(r"\x1b\[(\d+);(\d+)H|\x1b_G([^\x1b]*)\x1b\\", self.text):
+            body = match.group(3)
+            if body is None:
+                cursor = (int(match.group(2)) - 1, int(match.group(1)) - 1)
+            else:
+                model.apc(body.encode(), cursor)
         return model
 
 

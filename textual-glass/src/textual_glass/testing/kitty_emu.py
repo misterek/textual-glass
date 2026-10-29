@@ -36,7 +36,11 @@ NAMED = {
 
 
 class KittyModel:
-    def __init__(self) -> None:
+    """``cell`` is the terminal's cell size in pixels, when known: a placement's ``X``
+    or ``Y`` offset at or beyond it is then recorded as a mistake."""
+
+    def __init__(self, cell: tuple[float, float] | None = None) -> None:
+        self.cell = cell
         self.images: dict[int, dict] = {}
         self.placements: dict[tuple[int, int], dict] = {}
         self.errors: list[str] = []
@@ -237,9 +241,17 @@ class KittyModel:
 
         virtual = gi("U") == 1
         p = dict(c=gi("c"), r=gi("r"), z=gi("z"), X=gi("X"), Y=gi("Y"), virtual=virtual,
-                 col=cursor[0], row=cursor[1])
+                 col=cursor[0], row=cursor[1], x=gi("x"), y=gi("y"), w=gi("w"), h=gi("h"))
         if k.get("C") != "1" and not virtual:
             self.err("placement moves the cursor (no C=1)", k)
+        if min(p["X"], p["Y"], p["x"], p["y"], p["w"], p["h"]) < 0:
+            self.err("EINVAL negative placement offset or source rectangle", k)
+        if self.cell is not None and (p["X"] >= self.cell[0] or p["Y"] >= self.cell[1]):
+            self.err(f"placement offset X/Y at or beyond the cell size {self.cell}", k)
+        img = self.images.get(iid)
+        if img is not None and (p["x"] + p["w"] > img["w"] or p["y"] + p["h"] > img["h"]
+                                or p["x"] >= img["w"] or p["y"] >= img["h"]):
+            self.err("source rectangle runs off the image", k)
         self.placements[(iid, gi("p"))] = p
 
 
@@ -326,8 +338,22 @@ def composite(screen: Any, model: KittyModel, cw: int, ch: int, default_bg: str 
                 if cid == iid and len(marks) >= 2 and diacritics:
                     r_, c_ = diacritic_index(marks[0], diacritics), diacritic_index(marks[1], diacritics)
                     draw(img, frame, x * cw, y * ch, cw, ch, (c_ * cw - ox) / s, (r_ * ch - oy) / s, cw / s, ch / s)
-        else:
-            draw(img, frame, p["col"] * cw + p["X"], p["row"] * ch + p["Y"], p["c"] * cw, p["r"] * ch)
+        else:  # the source rectangle (0 for "to the image's edge"), over c x r cells or at its own pixels
+            sx, sy = p.get("x", 0), p.get("y", 0)
+            sw, sh = p.get("w", 0) or img["w"] - sx, p.get("h", 0) or img["h"] - sy
+            if sw <= 0 or sh <= 0:
+                return
+            if p["c"] and p["r"]:
+                dw, dh = p["c"] * cw, p["r"] * ch
+            elif p["c"]:
+                dw = p["c"] * cw
+                dh = round(sh * dw / sw)
+            elif p["r"]:
+                dh = p["r"] * ch
+                dw = round(sw * dh / sh)
+            else:
+                dw, dh = sw, sh
+            draw(img, frame, p["col"] * cw + p["X"], p["row"] * ch + p["Y"], dw, dh, sx, sy, sw, sh)
 
     def order(kv: tuple[tuple[int, int], dict]) -> tuple[int, int]:
         (iid, _), p = kv
