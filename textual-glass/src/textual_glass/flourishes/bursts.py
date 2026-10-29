@@ -8,9 +8,8 @@
 Each one is radial about the anchor's centre, so a maker works out each
 pixel's distance and angle from it once and reuses them in every frame. It
 draws into windows of the frame, never more of it than the light can reach:
-particles into small boxes round them. Every frame goes through
-:func:`_pack`, which drops light too faint to see and rounds the rest, so the
-upload is about half the size.
+particles into small boxes round them. On a light theme the light is painted
+a little deeper and never quite opaque (:data:`PAINT`).
 """
 
 from __future__ import annotations
@@ -19,19 +18,33 @@ import math
 
 import numpy as np
 
-from ..render import F32, Array, col, smoothstep
+from ..render import F32, Array, smoothstep
 from . import MAX_PX, Flourish, Stage
-from ._draw import Light, blank, border, bump, centre, coords, ease_out, rng, unit
+from ._draw import (
+    Light,
+    blank,
+    bump,
+    centre,
+    coords,
+    ease_out,
+    ramp,
+    rng,
+    segment,
+    shade,
+    timeline,
+    unit,
+    white_hot,
+    window,
+)
 
 TAU = 2 * math.pi
-WHITE = np.ones(3, F32)
+#: On a light theme, how opaque the brightest light is painted.
+PAINT = 0.85
 
 
 # =============================================================== helpers ==
 
-#: A window of a frame: rows, columns.
-Where = tuple[slice, slice]
-EVERYWHERE: Where = (slice(None), slice(None))
+NOWHERE = (slice(0, 0), slice(0, 0))
 
 
 class _Polar:
@@ -46,35 +59,15 @@ class _Polar:
         self.d = np.sqrt(self.dx * self.dx + self.dy * self.dy)
         self.phi = np.arctan2(self.dy, self.dx)
 
-    def box(self, rx: float, ry: float | None = None) -> Where:
-        """The window that holds everything within (rx, ry) of the centre."""
-        return _box(self.stage, self.cx, self.cy, rx, rx if ry is None else ry)
+    def box(self, rx: float, ry: float | None = None) -> tuple[slice, slice]:
+        """The window that holds everything within (rx, ry) of the centre, and a pixel more on the right and
+        below."""
+        ry = rx if ry is None else ry
+        win = window(self.stage, self.cx - rx, self.cy - ry, self.cx + rx + 1, self.cy + ry + 1)
+        return NOWHERE if win is None else win[0]
 
 
-def _ramp(e0: float, e1: float, x: float) -> float:
-    """``smoothstep`` for one number: 0 at ``e0``, 1 at ``e1``."""
-    t = min(1.0, max(0.0, (x - e0) / (e1 - e0)))
-    return t * t * (3 - 2 * t)
-
-
-def _box(stage: Stage, x: float, y: float, rx: float, ry: float) -> Where:
-    x0, x1 = max(0, int(x - rx)), min(stage.width, int(x + rx) + 2)
-    y0, y1 = max(0, int(y - ry)), min(stage.height, int(y + ry) + 2)
-    return slice(y0, max(y0, y1)), slice(x0, max(x0, x1))
-
-
-def _empty(where: Where) -> bool:
-    return where[0].stop <= where[0].start or where[1].stop <= where[1].start
-
-
-def _grid(where: Where) -> tuple[Array, Array]:
-    """Pixel centres of a window: a row of x and a column of y."""
-    xs = np.arange(where[1].start, where[1].stop, dtype=F32)[None, :] + F32(0.5)
-    ys = np.arange(where[0].start, where[0].stop, dtype=F32)[:, None] + F32(0.5)
-    return xs, ys
-
-
-def _room(stage: Stage, cx: float, cy: float) -> tuple[float, float]:
+def _reach(stage: Stage, cx: float, cy: float) -> tuple[float, float]:
     """How far light may reach from (cx, cy), across and down: to the stage's
     nearer faded side, less the fade. Light may run off a side on the window's
     edge, so those sides don't count unless both do."""
@@ -102,46 +95,22 @@ def _ellipse(rx: float, ry: float, angle: Array | float) -> Array:
 
 
 class _Ink:
-    """How a burst lights a theme. On a dark theme light adds up and burns to
-    white; on a light one it is painted in deep, saturated colour instead,
-    because white light doesn't show on white."""
+    """A burst's colours: a little deeper on a light theme, where soft haze is
+    fainter too (it reads as light on a dark theme, and as a stain on a light one)."""
 
     def __init__(self, stage: Stage) -> None:
-        self.dark = stage.dark
-        self.color = col(stage.color)
-        self.accent = col(stage.accent)
-        self.hot = WHITE if stage.dark else self.color * 0.8
-        #: Soft haze reads as light on a dark theme, and as a stain on a light one.
+        self.color, self.accent = shade(stage, stage.color, 0.9), shade(stage, stage.accent, 0.9)
+        self.hot = white_hot(stage, stage.color, 0.72)
         self.haze = 1.0 if stage.dark else 0.45
 
-    def shine(self, light: Light, colour: Array, amount: Array | float, where: Where = EVERYWHERE) -> None:
-        """Light (``Light.add``) on a dark theme, paint (``Light.over``) on a light one, in a window."""
-        rgb, a = light.rgb[where], light.a[where]
-        k = np.broadcast_to(np.asarray(amount, F32), a.shape)
-        if self.dark:
-            k = np.maximum(k, 0)
-            rgb += colour * k[..., None]
-            a[...] = 1 - (1 - a) * (1 - np.minimum(k, 1))
-        else:
-            self.shade(light, colour * (0.9 / max(1.0, float(colour.max()))), np.clip(k, 0, 1) * 0.85, where)
 
-    @staticmethod
-    def shade(light: Light, colour: Array, alpha: Array | float, where: Where = EVERYWHERE) -> None:
-        """Paint (``Light.over``) in a window, on any theme: a shadow, a solid core."""
-        rgb, a = light.rgb[where], light.a[where]
-        al = np.clip(np.broadcast_to(np.asarray(alpha, F32), a.shape), 0, 1)
-        rgb[...] = colour * al[..., None] + rgb * (1 - al)[..., None]
-        a[...] = al + a * (1 - al)
-
-
-def _spark(ink: _Ink, light: Light, x: float, y: float, size: float, colour: Array, amount: float,
-           spikes: float = 0.0) -> None:
+def _spark(light: Light, x: float, y: float, size: float, colour: Array, amount: float, spikes: float = 0.0) -> None:
     """A small star: a soft dot, with four thin spikes when ``spikes`` > 0."""
     reach = size * (3.0 + 5.0 * spikes)
-    where = _box(light.stage, x, y, reach, reach)
-    if _empty(where) or amount <= 0:
+    win = window(light.stage, x - reach, y - reach, x + reach, y + reach)
+    if win is None or amount <= 0:
         return
-    xs, ys = _grid(where)
+    where, xs, ys = win
     ax, ay = np.abs(xs - x), np.abs(ys - y)
     d2 = ax * ax + ay * ay
     shape = np.exp(-d2 / (size * size))
@@ -149,25 +118,22 @@ def _spark(ink: _Ink, light: Light, x: float, y: float, size: float, colour: Arr
         thin = 0.35 * size + 0.3
         long = reach * 0.45
         shape = shape + spikes * (np.exp(-ay / thin - ax / long) + np.exp(-ax / thin - ay / long))
-    ink.shine(light, colour, shape * smoothstep(reach, reach * 0.6, np.sqrt(d2)) * amount, where)
+    light.shine(colour, shape * smoothstep(reach, reach * 0.6, np.sqrt(d2)) * amount, where)
 
 
-def _dash(ink: _Ink, light: Light, x0: float, y0: float, x1: float, y1: float, width: float, colour: Array,
+def _dash(light: Light, x0: float, y0: float, x1: float, y1: float, width: float, colour: Array,
           amount: float) -> None:
     """A soft streak from a faint tail (x0, y0) to a bright head (x1, y1)."""
     pad = width * 2.5
-    where = _box(light.stage, (x0 + x1) / 2, (y0 + y1) / 2, abs(x1 - x0) / 2 + pad, abs(y1 - y0) / 2 + pad)
-    if _empty(where) or amount <= 0:
+    win = window(light.stage, min(x0, x1) - pad, min(y0, y1) - pad, max(x0, x1) + pad, max(y0, y1) + pad)
+    if win is None or amount <= 0:
         return
-    xs, ys = _grid(where)
-    vx, vy = x1 - x0, y1 - y0
-    t = np.clip(((xs - x0) * vx + (ys - y0) * vy) / max(1e-6, vx * vx + vy * vy), 0, 1)
-    dist = np.sqrt((xs - x0 - t * vx) ** 2 + (ys - y0 - t * vy) ** 2)
-    shape = np.exp(-((dist / width) ** 2)) * t * t * smoothstep(pad, pad * 0.6, dist)
-    ink.shine(light, colour, shape * amount, where)
+    where, xs, ys = win
+    dist, t = segment(xs, ys, x0, y0, x1, y1)
+    light.shine(colour, np.exp(-((dist / width) ** 2)) * t * t * smoothstep(pad, pad * 0.6, dist) * amount, where)
 
 
-def _trail(ink: _Ink, light: Light, points: list[tuple[float, float]], levels: list[float], width: float,
+def _trail(light: Light, points: list[tuple[float, float]], levels: list[float], width: float,
            colour: Array) -> None:
     """A soft line through ``points``, as bright as ``levels`` along it: a
     curved trail, drawn once (pieces drawn one by one would double up where
@@ -175,66 +141,18 @@ def _trail(ink: _Ink, light: Light, points: list[tuple[float, float]], levels: l
     pad = width * 2.5
     xs_ = [x for x, _ in points]
     ys_ = [y for _, y in points]
-    where = _box(light.stage, (min(xs_) + max(xs_)) / 2, (min(ys_) + max(ys_)) / 2,
-                 (max(xs_) - min(xs_)) / 2 + pad, (max(ys_) - min(ys_)) / 2 + pad)
-    if _empty(where) or max(levels) <= 0:
+    win = window(light.stage, min(xs_) - pad, min(ys_) - pad, max(xs_) + pad, max(ys_) + pad)
+    if win is None or max(levels) <= 0:
         return
-    xs, ys = _grid(where)
+    where, xs, ys = win
     near = np.full(np.broadcast_shapes(xs.shape, ys.shape), np.inf, F32)
     level = np.zeros_like(near)
     for (x0, y0), (x1, y1), l0, l1 in zip(points, points[1:], levels, levels[1:], strict=False):
-        vx, vy = x1 - x0, y1 - y0
-        t = np.clip(((xs - x0) * vx + (ys - y0) * vy) / max(1e-6, vx * vx + vy * vy), 0, 1)
-        dist = np.sqrt((xs - x0 - t * vx) ** 2 + (ys - y0 - t * vy) ** 2)
+        dist, t = segment(xs, ys, x0, y0, x1, y1)
         closer = dist < near
         near = np.where(closer, dist, near)
         level = np.where(closer, l0 + (l1 - l0) * t, level)
-    ink.shine(light, colour, np.exp(-((near / width) ** 2)) * level * smoothstep(pad, pad * 0.6, near), where)
-
-
-def _pack(light: Light, mask: Array) -> bytes:
-    """The frame's bytes, made cheap to upload: light too faint to see is
-    dropped, alpha is rounded to 7 bits and colour to 6 (4 where alpha is
-    under a quarter, where nobody can tell). In light that moves this doesn't
-    show, and it makes the compressed upload half the size."""
-    px = np.frombuffer(light.frame(mask), np.uint8).reshape(-1, 4).copy()
-    words = px.view(np.uint32)
-    words &= _ROUND[px[:, 3]]
-    return px.tobytes()
-
-
-def _rounding() -> Array:
-    """Per alpha value, the bit mask for a pixel's four bytes (one 32-bit word each)."""
-    table = np.zeros((256, 4), np.uint8)
-    table[4:, :3] = 0xF0
-    table[64:, :3] = 0xFC
-    table[4:, 3] = 0xFE
-    return table.view(np.uint32)
-
-
-_ROUND = _rounding()
-
-
-def _timeline(*spans: tuple[int, int]) -> tuple[list[float], list[int]]:
-    """Frame times (s) and gaps (ms) for spans of (milliseconds, frames): fast
-    frames where things move fast, slow ones where they fade."""
-    times: list[float] = []
-    gaps: list[int] = []
-    now = 0
-    for ms, count in spans:
-        each = max(16, round(ms / count))
-        for _ in range(count):
-            times.append(now / 1000)
-            gaps.append(each)
-            now += each
-    return times, gaps
-
-
-def _end(stage: Stage, frames: list[bytes], gaps: list[int]) -> tuple[list[bytes], list[int]]:
-    """Finish on an empty frame, so the image is deleted without a pop."""
-    frames.append(blank(stage))
-    gaps.append(max(16, gaps[-1] if gaps else 40))
-    return frames, gaps
+    light.shine(colour, np.exp(-((near / width) ** 2)) * level * smoothstep(pad, pad * 0.6, near), where)
 
 
 def _shell(d: Array, radius: float, width: float) -> Array:
@@ -263,11 +181,10 @@ def sunburst(stage: Stage) -> tuple[list[bytes], list[int]]:
     u = unit(stage)
     cw, ch = stage.cell
     _, _, aw, ah = stage.at
-    rx, ry = _room(stage, cx, cy)
+    rx, ry = _reach(stage, cx, cy)
     rx, ry = min(rx, aw / 2 + 7 * cw), min(ry, ah / 2 + 3.6 * ch)
     rx = min(rx, 3.0 * ry)
     p = _Polar(stage, cx, cy)
-    mask = border(stage)
     r = rng(stage)
 
     n = int(r.integers(7, 10)) * 2  # 14 to 18 rays, long and short in turn
@@ -298,19 +215,19 @@ def sunburst(stage: Stage) -> tuple[list[bytes], list[int]]:
     frames: list[bytes] = []
     for f in range(drawn):
         t = f / (drawn - 1)
-        light = Light(stage)
+        light = Light(stage, PAINT)
         # the halo swells behind the rays: bright and warm in the middle, gone before it can muddy the glass
         hr = halo_r * (0.45 + 0.55 * ease_out(t / 0.5))
         where = p.box(hr)
         q = p.d[where] / hr
         swell = bump(t, 0.1, 0.5)
-        ink.shine(light, glow, np.exp(-5.0 * q * q) * smoothstep(1.0, 0.5, q) * 0.85 * swell * ink.haze, where)
+        light.shine(glow, np.exp(-5.0 * q * q) * smoothstep(1.0, 0.5, q) * 0.85 * swell * ink.haze, where)
 
         grow = 0.92 * ease_out(t / 0.38) + 0.08 * t  # out fast, then drifting on
         turn = spin * ease_out(t)
         cs, sn = math.cos(turn), math.sin(turn)
-        let_go = 0.95 * _ramp(0.3, 1.0, t)  # the base lets go first, the tips last
-        level = 1.0 - _ramp(0.75, 1.0, t)
+        let_go = 0.95 * ramp(0.3, 1.0, t)  # the base lets go first, the tips last
+        level = 1.0 - ramp(0.75, 1.0, t)
         for (perp0, along0, length, width), colour in zip(sets, colours, strict=True):
             perp = perp0 * cs - along0 * sn
             along = along0 * cs + perp0 * sn
@@ -319,14 +236,14 @@ def sunburst(stage: Stage) -> tuple[list[bytes], list[int]]:
             w = width * (1.0 - 0.6 * sc) + 0.35 * u
             shape = np.exp(-((perp / w) ** 2)) * smoothstep(1.0, 0.78, s) * smoothstep(-0.02, 0.05, s)
             shape = shape * smoothstep(let_go - 0.1, let_go + 0.06, s)
-            ink.shine(light, colour, shape * (1.7 - 0.9 * sc) * level)
+            light.shine(colour, shape * (1.7 - 0.9 * sc) * level)
 
         for i, at, size in glints:
             g = bump(t - at, 0.06, 0.42)
             if g > 0:
                 a = angles[i] + turn
                 tip = float(lengths[i]) * grow * 0.96
-                _spark(ink, light, cx + tip * math.cos(a), cy + tip * math.sin(a), 0.11 * ch * size,
+                _spark(light, cx + tip * math.cos(a), cy + tip * math.sin(a), 0.11 * ch * size,
                        ink.hot * 0.6 + ink.color * 0.4, 1.4 * g, spikes=0.7)
 
         # the core: a white-hot flash, then a warm glow that cools
@@ -335,10 +252,10 @@ def sunburst(stage: Stage) -> tuple[list[bytes], list[int]]:
         where = p.box(core_r * 1.6)
         d = p.d[where]
         core = np.exp(-2.0 * (d / core_r) ** 2) * smoothstep(core_r * 1.6, core_r, d)
-        ink.shine(light, ink.hot, core * 2.6 * flash, where)
-        ink.shine(light, ink.color, core * 1.1 * bump(t, 0.08, 0.5), where)
-        frames.append(_pack(light, mask))
-    return _end(stage, frames, [gap] * len(frames))
+        light.shine(ink.hot, core * 2.6 * flash, where)
+        light.shine(ink.color, core * 1.1 * bump(t, 0.08, 0.5), where)
+        frames.append(light.frame())
+    return [*frames, blank(stage)], [gap] * (len(frames) + 1)
 
 
 # ============================================================= supernova ==
@@ -353,14 +270,13 @@ def supernova(stage: Stage) -> tuple[list[bytes], list[int]]:
     u = unit(stage)
     cw, ch = stage.cell
     _, _, aw, ah = stage.at
-    rx, ry = _room(stage, cx, cy)
+    rx, ry = _reach(stage, cx, cy)
     rx, ry = min(rx, aw / 2 + 13 * cw), min(ry, ah / 2 + 5.5 * ch)
     # the shockwave is round, as big as the shorter way allows (and a frame's pixels can pay for)
     big = min(min(rx, ry) / 1.06, 0.42 * math.sqrt(MAX_PX))
     line = min(ch, 0.11 * big)  # strokes follow the cell, but never get heavy for the size of the blast
     sc = min(ch, big / 9)  # the star's size
     p = _Polar(stage, cx, cy)
-    mask = border(stage)
     r = rng(stage)
     hot = ink.hot
 
@@ -390,9 +306,10 @@ def supernova(stage: Stage) -> tuple[list[bytes], list[int]]:
         radii = np.array([rad - 4 * w, rad * (1 + abs(slope) * span) + 4 * w])
         xs_, ys_ = cx + np.outer(radii, np.cos(ends)), cy + np.outer(radii, np.sin(ends))
         x0, x1, y0, y1 = float(np.min(xs_)), float(np.max(xs_)), float(np.min(ys_)), float(np.max(ys_))
-        where = _box(stage, (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2)
-        if _empty(where):
+        win = window(stage, x0, y0, x1 + 1, y1 + 1)  # and a pixel more, where its faint edge still shows
+        if win is None:
             continue
+        where = win[0]
         rel = (p.phi[where] - a0 + math.pi) % TAU - math.pi
         off = p.d[where] - rad * (1 + slope * rel + wave * np.sin(rel * 9 + i))
         along = np.abs(rel) / (span / 2)
@@ -401,24 +318,24 @@ def supernova(stage: Stage) -> tuple[list[bytes], list[int]]:
         lit = 0.3 + 0.95 * (1 - (1 - (frac - 0.05) / 0.95) ** (1 / 3.2))
         arcs.append((where, field.astype(F32), tone, lit))
 
-    times, gaps = _timeline((280, 6), (960, 26), (800, 8))
+    times, gaps = timeline((280, 6), (960, 26), (800, 8))
     frames: list[bytes] = []
     for T in times:
-        light = Light(stage)
+        light = Light(stage, PAINT)
         # 5. the remnant: each filament flares as the shock passes, then glows and fades
-        fade_out = 1 - _ramp(1.25, 2.05, T)
+        fade_out = 1 - ramp(1.25, 2.05, T)
         for where, field, tone, lit in arcs:
             if lit < T:
-                level = (0.32 + 0.68 * math.exp(-(T - lit) / 0.2)) * _ramp(lit, lit + 0.06, T) * fade_out
-                ink.shine(light, tone, field * 0.75 * level, where)
+                level = (0.32 + 0.68 * math.exp(-(T - lit) / 0.2)) * ramp(lit, lit + 0.06, T) * fade_out
+                light.shine(tone, field * 0.75 * level, where)
 
         # the flash's own light races out ahead of the shock: one thin ring
         e = (T - 0.27) / 0.3
         if 0 < e < 1:
             R = big * 1.02 * (1 - (1 - e) ** 2)
             where = p.box(R + 4 * line)
-            ink.shine(light, hot * 0.5 + ink.accent * 0.5, _shell(p.d[where], R, 0.05 * line + 0.6 * u)
-                      * 1.4 * (1 - e) ** 1.5, where)
+            light.shine(hot * 0.5 + ink.accent * 0.5, _shell(p.d[where], R, 0.05 * line + 0.6 * u)
+                        * 1.4 * (1 - e) ** 1.5, where)
 
         # 3. the shockwave: a ragged bright front with a soft wake inside it
         e = (T - 0.3) / 0.95
@@ -430,9 +347,9 @@ def supernova(stage: Stage) -> tuple[list[bytes], list[int]]:
             front = np.exp(-((gap / front_w) ** 2))
             wake = np.exp(np.minimum(gap, 0) / (0.08 * R + 2)) * smoothstep(0.5 * front_w, -1.5 * front_w, gap)
             fade = (1 - e) ** 1.6
-            ink.shine(light, ink.accent, wake * 0.34 * (1 - e) ** 2.4 * ink.haze, where)
-            ink.shine(light, ink.color, front * knots[where] * 1.3 * fade, where)
-            ink.shine(light, hot, front * knots[where] * 0.8 * fade * (1 - e) ** 2, where)
+            light.shine(ink.accent, wake * 0.34 * (1 - e) ** 2.4 * ink.haze, where)
+            light.shine(ink.color, front * knots[where] * 1.3 * fade, where)
+            light.shine(hot, front * knots[where] * 0.8 * fade * (1 - e) ** 2, where)
 
         # 4. debris with short trails
         for i in range(n_bits):
@@ -446,45 +363,45 @@ def supernova(stage: Stage) -> tuple[list[bytes], list[int]]:
             tone = ink.color * (1 - bit_tone[i]) + ink.accent * bit_tone[i]
             x1, y1 = cx + dist * ca, cy + dist * sa
             size = (0.06 * line + 0.4 * u) * bit_size[i]
-            _dash(ink, light, cx + back * ca, cy + back * sa, x1, y1, size * 1.1, tone, 1.1 * level)
-            _spark(ink, light, x1, y1, size, hot * 0.5 + tone * 0.5, 1.6 * level)
+            _dash(light, cx + back * ca, cy + back * sa, x1, y1, size * 1.1, tone, 1.1 * level)
+            _spark(light, x1, y1, size, hot * 0.5 + tone * 0.5, 1.6 * level)
 
         # 1. the star brightens and shrinks, while a faint ring falls into it
         pre = min(1.0, T / 0.28)
         if T < 0.3:
             fall = 0.3 * sc + 2.6 * sc * (1 - pre) ** 1.4
             where = p.box(fall + 2 * sc)
-            ink.shine(light, ink.accent, _shell(p.d[where], fall, 0.12 * sc + 0.5 * u) * (0.25 + 0.75 * pre) * 0.7,
-                      where)
+            light.shine(ink.accent, _shell(p.d[where], fall, 0.12 * sc + 0.5 * u) * (0.25 + 0.75 * pre) * 0.7,
+                        where)
         # 2. the flash, white into colour, with a cinematic streak across
         flash = bump(T - 0.27, 0.04, 0.34)
         shrink = 1 - 0.35 * pre * pre
-        star = (0.35 + 1.9 * pre * pre) * (1 - _ramp(0.28, 0.5, T))
+        star = (0.35 + 1.9 * pre * pre) * (1 - ramp(0.28, 0.5, T))
         core_r = 0.32 * sc * shrink + 1.6 * sc * flash
         where = p.box(core_r * 1.8)
         d = p.d[where]
-        ink.shine(light, hot, np.exp(-2.0 * (d / core_r) ** 2) * smoothstep(core_r * 1.8, core_r, d)
-                  * (star + 3.0 * flash), where)
+        light.shine(hot, np.exp(-2.0 * (d / core_r) ** 2) * smoothstep(core_r * 1.8, core_r, d)
+                    * (star + 3.0 * flash), where)
         glow_r = 2.4 * sc * shrink ** 2 + 5.0 * sc * flash
         where = p.box(glow_r)
         d = p.d[where]
-        ink.shine(light, ink.color, np.exp(-3.0 * (d / glow_r) ** 2) * smoothstep(glow_r, glow_r * 0.5, d)
-                  * (0.4 * star + 0.9 * flash) * ink.haze, where)
-        spike = 0.7 * star * (1 - _ramp(0.26, 0.4, T)) + 1.3 * flash
+        light.shine(ink.color, np.exp(-3.0 * (d / glow_r) ** 2) * smoothstep(glow_r, glow_r * 0.5, d)
+                    * (0.4 * star + 0.9 * flash) * ink.haze, where)
+        spike = 0.7 * star * (1 - ramp(0.26, 0.4, T)) + 1.3 * flash
         if spike > 0.01:
             thick = (0.07 * sc + 0.5 * u) * (1 + flash)
             reach = (1.2 + 1.4 * pre) * sc + rx * 0.95 * flash
             where = p.box(reach, 6 * thick)
             ax, ay = np.abs(p.dx[where]), np.abs(p.dy[where])
             streak = np.exp(-ay / thick - ax / (reach * 0.35)) * smoothstep(reach, reach * 0.4, ax)
-            ink.shine(light, hot * 0.6 + ink.accent * 0.4, streak * spike, where)
+            light.shine(hot * 0.6 + ink.accent * 0.4, streak * spike, where)
             reach = (0.9 + 0.8 * pre) * sc + 1.2 * sc * flash
             where = p.box(6 * thick, reach)
             ax, ay = np.abs(p.dx[where]), np.abs(p.dy[where])
             streak = np.exp(-ax / thick - ay / (reach * 0.4)) * smoothstep(reach, reach * 0.4, ay)
-            ink.shine(light, hot * 0.6 + ink.color * 0.4, streak * spike * 0.6, where)
-        frames.append(_pack(light, mask))
-    return _end(stage, frames, gaps)
+            light.shine(hot * 0.6 + ink.color * 0.4, streak * spike * 0.6, where)
+        frames.append(light.frame())
+    return [*frames, blank(stage)], [*gaps, gaps[-1]]
 
 
 def _smax(a: Array, b: Array, k: float) -> Array:
@@ -507,7 +424,7 @@ def pulsar(stage: Stage) -> tuple[list[bytes], list[int]]:
     u = unit(stage)
     cw, ch = stage.cell
     _, _, aw, ah = stage.at
-    rx, ry = _room(stage, cx, cy)
+    rx, ry = _reach(stage, cx, cy)
     # the anchor's outline, through the middle of its edge cells, as glass draws a panel's border
     hw, hh = max(1.0, aw / 2 - 0.5 * cw), max(1.0, ah / 2 - 0.5 * ch)
     rad = max(0.0, min(0.55 * ch, hw, hh))
@@ -520,7 +437,6 @@ def pulsar(stage: Stage) -> tuple[list[bytes], list[int]]:
     qx, qy = np.abs(dx) - (hw - rad), np.abs(dy) - (hh - rad)
     outline = (np.sqrt(np.maximum(qx, 0) ** 2 + np.maximum(qy, 0) ** 2) + np.minimum(np.maximum(qx, qy), 0) - rad)
     corner = math.hypot(hw, hh) + out
-    mask = border(stage)
     r = rng(stage)
     hot = ink.hot
     sc = max(0.55 * ch, min(ch, 0.5 * math.sqrt(hw * hh)))  # the star's size
@@ -536,11 +452,11 @@ def pulsar(stage: Stage) -> tuple[list[bytes], list[int]]:
     beam_w = 0.06 * ch + 0.4 * u + d * 0.03
     beam_hot = beam_fall * (1.0 + 2.2 * np.exp(-d / (2.5 * sc)))  # white-hot near the star
 
-    times, gaps = _timeline((1600, 38))
+    times, gaps = timeline((1600, 38))
     frames: list[bytes] = []
     for T in times:
-        light = Light(stage)
-        alive = _ramp(-0.06, 0.12, T) * (1 - _ramp(1.15, 1.45, T))
+        light = Light(stage, PAINT)
+        alive = ramp(-0.06, 0.12, T) * (1 - ramp(1.15, 1.45, T))
         theta = theta0 + omega * T
 
         # the rings: a circle from the star, held by the outline as it reaches it, then pushed out past it
@@ -550,33 +466,33 @@ def pulsar(stage: Stage) -> tuple[list[bytes], list[int]]:
                 continue
             grow = 1 - (1 - e) ** 2.2
             circle = d - corner * 1.05 * min(1.0, grow / 0.7)
-            push = -0.25 * ch + (out + 0.25 * ch) * _ramp(0.3, 1.0, e)
+            push = -0.25 * ch + (out + 0.25 * ch) * ramp(0.3, 1.0, e)
             field = _smax(circle, outline - push, 0.5 * ch) / (w_ring * (1 + 0.4 * e))
             level = (1 - e) ** 1.6 * (1.2 + 1.6 * (1 - e) ** 3)  # white-hot as it leaves the star
-            cool = 0.8 * _ramp(0.15, 0.85, e)  # and cooling into the second tone as it spreads
-            ink.shine(light, ink.color * (1 - cool) + ink.accent * cool, np.exp(-field * field) * level, where)
+            cool = 0.8 * ramp(0.15, 0.85, e)  # and cooling into the second tone as it spreads
+            light.shine(ink.color * (1 - cool) + ink.accent * cool, np.exp(-field * field) * level, where)
 
         # the beams: one line through the star, bright near it
         if alive > 0:
             across = np.abs(dx * math.sin(theta) - dy * math.cos(theta)) / beam_w
-            ink.shine(light, ink.color, np.exp(-across * across) * beam_hot * alive, where)
+            light.shine(ink.color, np.exp(-across * across) * beam_hot * alive, where)
 
         # the star: a white core with a halo and four spikes, a beat brighter at each ring
         beat = sum(bump(T - t0, 0.03, 0.22) for t0 in emit)
         level = alive * (0.85 + 0.6 * beat)
-        _spark(ink, light, cx, cy, 0.28 * sc * (1 + 0.25 * beat), hot, 2.4 * level, spikes=0.0)
+        _spark(light, cx, cy, 0.28 * sc * (1 + 0.25 * beat), hot, 2.4 * level, spikes=0.0)
         wh = p.box(2.2 * sc)
         dd = p.d[wh]
-        ink.shine(light, ink.color, np.exp(-3.0 * (dd / (2.2 * sc)) ** 2) * smoothstep(2.2 * sc, 1.1 * sc, dd)
-                  * 0.55 * level * ink.haze, wh)
+        light.shine(ink.color, np.exp(-3.0 * (dd / (2.2 * sc)) ** 2) * smoothstep(2.2 * sc, 1.1 * sc, dd)
+                    * 0.55 * level * ink.haze, wh)
         spikes = p.box(2.6 * sc)
         ax, ay = np.abs(p.dx[spikes]), np.abs(p.dy[spikes])
         thin = 0.05 * sc + 0.4 * u
         cross = (np.exp(-ay / thin - ax / (0.7 * sc)) + np.exp(-ax / thin - ay / (0.7 * sc)))
-        ink.shine(light, hot * 0.5 + ink.color * 0.5, cross * smoothstep(2.6 * sc, 1.2 * sc, np.maximum(ax, ay))
-                  * 0.9 * level, spikes)
-        frames.append(_pack(light, mask))
-    return _end(stage, frames, gaps)
+        light.shine(hot * 0.5 + ink.color * 0.5, cross * smoothstep(2.6 * sc, 1.2 * sc, np.maximum(ax, ay))
+                    * 0.9 * level, spikes)
+        frames.append(light.frame())
+    return [*frames, blank(stage)], [*gaps, gaps[-1]]
 
 
 # ============================================================ black hole ==
@@ -596,7 +512,7 @@ def black_hole(stage: Stage) -> tuple[list[bytes], list[int]]:
     u = unit(stage)
     _, ch = stage.cell
     _, _, aw, _ = stage.at
-    rx, ry = _room(stage, cx, cy)
+    rx, ry = _reach(stage, cx, cy)
     tilt = 0.3
     # the shadow's radius: it follows the cell, but the disc round it never covers more than a sixth of a full frame
     hole = min(1.45 * ch, 0.42 * ry, 0.22 * rx, 0.08 * math.sqrt(MAX_PX))
@@ -605,7 +521,6 @@ def black_hole(stage: Stage) -> tuple[list[bytes], list[int]]:
     p = _Polar(stage, cx, cy)
     where = p.box(outer * 1.02 + 2, max(outer * tilt, 1.7 * hole) + 2)
     dx, dy, d, phi = p.dx[where], p.dy[where], p.d[where], p.phi[where]
-    mask = border(stage)
     r = rng(stage)
     hot = ink.hot
     spin = float(r.choice([-1.0, 1.0]))
@@ -645,13 +560,13 @@ def black_hole(stage: Stage) -> tuple[list[bytes], list[int]]:
         """Behind the shadow: on the far side of the disc, inside the hole's outline."""
         return at[1] < cy and math.hypot(at[0] - cx, at[1] - cy) < hole * squeeze * 1.1
 
-    times, gaps = _timeline((960, 24), (300, 9), (180, 4))
+    times, gaps = timeline((960, 24), (300, 9), (180, 4))
     frames: list[bytes] = []
     for T in times:
-        light = Light(stage)
-        form = _ramp(-0.08, 0.32, T)
+        light = Light(stage, PAINT)
+        form = ramp(-0.08, 0.32, T)
         # the collapse: everything shrinks to a point, spinning faster
-        fall = _ramp(0.92, 1.25, T) ** 1.6
+        fall = ramp(0.92, 1.25, T) ** 1.6
         squeeze = max(0.02, 1 - fall)
         spin_t = spin * (4.2 * T + 6.0 * fall)
         if squeeze > 0.03:
@@ -665,49 +580,49 @@ def black_hole(stage: Stage) -> tuple[list[bytes], list[int]]:
             # the far half of the disc, then the shadow over it, then the near half in front
             for half in (1 - front, None, front):
                 if half is not None:
-                    ink.shine(light, ink.color, gas * half * 0.95, where)
-                    ink.shine(light, ink.accent, gas * heat * half * 1.3, where)
+                    light.shine(ink.color, gas * half * 0.95, where)
+                    light.shine(ink.accent, gas * heat * half * 1.3, where)
                     continue
                 # the shadow, the photon ring round it, and the far side of the disc bent over its top
                 hr = hole * squeeze * (0.4 + 0.6 * form)
                 dq = d / max(hr, 0.5)
-                ink.shade(light, VOID, smoothstep(1.08, 0.9, dq) * (0.88 if ink.dark else 0.7) * form, where)
+                light.over(VOID, smoothstep(1.08, 0.9, dq) * (0.88 if stage.dark else 0.7) * form, where)
                 over_top = 0.3 + 0.7 * np.clip(-dy / np.maximum(d, 1.0), 0, 1)
                 lens = np.exp(-(((dq - 1.3) / 0.17) ** 2)) * over_top * form * (
                     0.75 + 0.25 * np.cos(arms * (phi - spin_t * 0.8) + phase))
-                ink.shine(light, ink.color, lens * 0.9, where)
-                ink.shine(light, ink.accent, lens * np.exp(-(((dq - 1.2) / 0.08) ** 2)) * 0.8, where)
+                light.shine(ink.color, lens * 0.9, where)
+                light.shine(ink.accent, lens * np.exp(-(((dq - 1.2) / 0.08) ** 2)) * 0.8, where)
                 thin = (0.5 * u + 0.025 * hr) / max(hr, 0.5)
-                ink.shine(light, hot * 0.5 + ink.accent * 0.5, np.exp(-(((dq - 1.03) / thin) ** 2)) * form
-                          * (0.75 + 0.45 * np.cos(phi + spin * math.pi / 2)), where)
+                light.shine(hot * 0.5 + ink.accent * 0.5, np.exp(-(((dq - 1.03) / thin) ** 2)) * form
+                            * (0.75 + 0.45 * np.cos(phi + spin * math.pi / 2)), where)
 
         # sparks spiralling in, each with a short curved trail
         for i in range(n_sparks):
             if not spark_t0[i] < T < spark_t0[i] + spark_life[i]:
                 continue
-            level = _ramp(0.0, 0.08, T - spark_t0[i]) * 1.3
+            level = ramp(0.0, 0.08, T - spark_t0[i]) * 1.3
             tone = ink.color * (1 - spark_tone[i]) + ink.accent * spark_tone[i]
             size = 0.05 * ch + 0.45 * u
             head = spark_at(i, T, squeeze)
-            near = _ramp(inner * 0.9, inner * 1.3, head[2])  # each one fades into the disc's bright inner edge
+            near = ramp(inner * 0.9, inner * 1.3, head[2])  # each one fades into the disc's bright inner edge
             if level * near <= 0 or hidden(head, squeeze):
                 continue
-            _spark(ink, light, head[0], head[1], size, hot * 0.5 + tone * 0.5, level * near)
+            _spark(light, head[0], head[1], size, hot * 0.5 + tone * 0.5, level * near)
             # the trail bends with the orbit: where the spark was a moment ago, and before that
             trail = [head] + [spark_at(i, T - 0.012 * k, squeeze) for k in range(1, 6)]
-            _trail(ink, light, [(x, y) for x, y, _ in trail],
+            _trail(light, [(x, y) for x, y, _ in trail],
                    [0.0 if hidden(at, squeeze) else level * near * (1 - k / 5) for k, at in enumerate(trail)], size,
                    tone)
 
         # the last of it: a tiny flash where it all went, and nothing
         pop = bump(T - 1.16, 0.04, 0.2)
         if pop > 0:
-            _spark(ink, light, cx, cy, 0.18 * hole + 0.6 * u, hot, 2.2 * pop, spikes=0.9)
+            _spark(light, cx, cy, 0.18 * hole + 0.6 * u, hot, 2.2 * pop, spikes=0.9)
             echo = hole * (0.3 + 1.6 * (T - 1.16) / 0.2)
             box = p.box(echo + 2.0 * ch)
-            ink.shine(light, ink.accent, _shell(p.d[box], echo, 0.6 * u + 0.04 * ch) * 0.7 * pop, box)
-        frames.append(_pack(light, mask))
-    return _end(stage, frames, gaps)
+            light.shine(ink.accent, _shell(p.d[box], echo, 0.6 * u + 0.04 * ch) * 0.7 * pop, box)
+        frames.append(light.frame())
+    return [*frames, blank(stage)], [*gaps, gaps[-1]]
 
 
 KINDS = {

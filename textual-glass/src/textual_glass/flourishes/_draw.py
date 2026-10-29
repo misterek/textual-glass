@@ -101,11 +101,11 @@ class Light:
         else:
             self.over(color, np.clip(np.asarray(amount, F32), 0, 1) * F32(self.paint), where)
 
-    def frame(self, mask: Array | None = None) -> bytes:
-        """Straight-alpha RGBA bytes, faded out at the stage's border (``mask``, default :func:`border`).
-        Only the lit pixels are worked on: light under 4/255 is dropped and the rest packed (:func:`_packing`),
-        which more than halves the compressed upload and changes nothing anyone can see."""
-        a = (self.a * (border(self.stage) if mask is None else mask)).reshape(-1)
+    def frame(self) -> bytes:
+        """Straight-alpha RGBA bytes, faded out at the stage's border (:func:`border`). Only the lit pixels are
+        worked on: light under 4/255 is dropped and the rest packed (:func:`_packing`), which more than halves
+        the compressed upload and changes nothing anyone can see."""
+        a = (self.a * border(self.stage)).reshape(-1)
         lit = np.flatnonzero(a >= 3.5 / 255)
         s = self.rgb.reshape(-1, 3)[lit] / np.maximum(self.a.reshape(-1)[lit], 1e-4)[:, None]
         if self.stage.dark:  # light beyond full brightness turns white
