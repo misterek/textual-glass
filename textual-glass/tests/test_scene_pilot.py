@@ -4,7 +4,8 @@ stepped by glass; native actors re-placed at pixel offsets below the cell size a
 cropped at the stage's edge, stretched ones on whole cells; cues once and in
 order; the hold in silence; and each way a scene ends, its images deleted and its
 ids freed. The actors here are tiny test pictures and the scenes' clock is a fake
-one the tests move; the demo's test plays the demo's real show.
+one the tests move; the demos' tests play their real shows (the week in review
+in each look, at three sizes, a busy week and the summary put back).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Hashable, Iterator
 from typing import Any
 
@@ -1072,3 +1074,111 @@ def test_the_demos_pictures_are_transparent_at_their_border() -> None:
                 alpha = np.frombuffer(f, np.uint8).reshape(a.height, a.width, 4)[..., 3]
                 ring = np.concatenate([alpha[0], alpha[-1], alpha[:, 0], alpha[:, -1]])
                 assert ring.max() == 0, f"actor {n} frame {k}: light at its border (rule 17)"
+
+
+# -- the week in review ---------------------------------------------------------------------------------
+
+WEEK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "week", "app.py")
+
+
+def _week_demo() -> Any:
+    spec = importlib.util.spec_from_file_location("week_demo", WEEK)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+async def summary(app: Any, before: Any = None, timeout: float = 40.0) -> Showing:
+    """Wait until a show other than ``before`` holds with its summary up (both stay until it ends).
+    Headless, Textual draws no frames of its own (glass's frame hook never runs), so this stands in
+    for them: a new theme or size reaches glass at its next frame."""
+    deadline = time.monotonic() + timeout
+    while True:
+        app.glass.on_frame()
+        show = app.showing
+        if show is not None and show is not before and show.holding and app.done:
+            await asyncio.sleep(0.01)  # the callbacks glass queued as it got there
+            return show
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the week never held: {show!r}, {app.state()}, ends {app.ends}")
+        await asyncio.sleep(0.02)
+
+
+def fast(app: Any, times: float) -> None:
+    base = time.monotonic()
+    app.glass.player.clock = lambda: base + times * (time.monotonic() - base)
+
+
+async def silent(app: Any, pilot: Any, output: Output) -> None:
+    quiet = output.mark()
+    await frames(app, pilot)
+    app.glass.tick()
+    assert output.since(quiet) == "", "it holds in silence (rule 9)"
+
+
+@pytest.mark.parametrize("size", [(70, 22), (90, 28), (140, 45)])
+@pytest.mark.parametrize("key", ["1", "2", "3"])
+async def test_the_week_plays_each_look_to_its_hold(output: Output, cell: Any, size: tuple[int, int], key: str) -> None:
+    demo = _week_demo()
+    app = demo.WeekDemo()
+    async with app.run_test(size=size) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        fast(app, 8)
+        await pilot.press(key)
+        show = await summary(app)
+        assert app.look == demo.LOOKS[key] and show.scene is not None and app.state() == "holding"
+        cues = [c.data for c in sorted(show.scene.cues, key=lambda c: c.t)]
+        assert len(cues) == len(app.week) + 1 and app.heard == cues, "every landing, in order, then the end"
+        assert app.tally == Counter(w.kind for w in app.week) and "That was the week" in app.caption_text()
+        assert engine.errors == 0 and output.model(CELL).errors == []
+        stage = cells_of(app.query_one("#stage"))
+        assert (show.stage.cols, show.stage.rows) == stage[2:]
+        await silent(app, pilot, output)
+    clean(output)
+
+
+async def test_the_week_takes_a_busy_week_and_puts_its_summary_back(output: Output, cell: Any) -> None:
+    demo = _week_demo()
+    app = demo.WeekDemo(items=60)
+    async with app.run_test(size=(120, 36)) as pilot:
+        await start(app, pilot)
+        engine = app.glass
+        fast(app, 10)
+        await pilot.press("plus")
+        assert app.count == 150 and len(app.week) == 150
+        busy = await summary(app)
+        assert busy.scene is not None and len(busy.scene.cues) == 151 and len(app.heard) == 151
+        assert engine.errors == 0 and output.model(CELL).errors == []
+        await silent(app, pilot, output)
+
+        await pilot.press("l")  # a light theme: the show ends, and the page puts the summary back at once
+        lit = await summary(app, busy)
+        assert app.ends[-1] == "theme" and app.heard == [] and lit.scene is not None
+        assert lit.elapsed == lit.scene.duration and app.tally == Counter(w.kind for w in app.week)
+        assert not lit.stage.dark and lit.scene.actors[0].cells == (lit.stage.cols, lit.stage.rows), "its own night"
+        await silent(app, pilot, output)
+        await pilot.resize_terminal(100, 30)
+        again = await summary(app, lit)
+        assert app.ends[-1] == "resized" and again.stage.cols < lit.stage.cols
+        await silent(app, pilot, output)
+
+        await pilot.press("minus", "minus", "minus", "minus")
+        assert app.count == 12
+        await pilot.press("f9", "f9")  # full, minimal: the summary as a still
+        assert engine.motion == "minimal"
+        await pilot.press("r")
+        still = await summary(app, again)
+        assert still.stage.still and app.tally == Counter(w.kind for w in app.week)
+        assert engine.errors == 0
+    clean(output)
+
+
+def test_the_weeks_titles_are_made_up_and_the_same_every_time() -> None:
+    demo = _week_demo()
+    week = demo.make_week(150)
+    titles = [demo.title(w, i) for i, w in enumerate(week)]
+    assert titles == [demo.title(w, i) for i, w in enumerate(week)] and len(set(titles)) > 100
+    assert sum(w.kind == "release" for w in week) == 2 and demo.make_week(25) == demo.make_week(25)
