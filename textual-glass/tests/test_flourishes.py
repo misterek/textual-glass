@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -64,6 +65,12 @@ def test_every_flourish_says_what_it_could_mean() -> None:
         assert kind.about, name
         for role in (kind.color, kind.accent):
             assert role in ("primary", "secondary", "accent", "success", "warning", "error", "foreground"), role
+
+
+def test_the_readme_lists_every_kind_with_what_it_could_mean() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    for name, kind in FLOURISHES.items():
+        assert f"| `{name}` | {kind.about} |" in readme, f"README.md: the row of {name}"
 
 
 def test_the_flourishes_have_no_textual_imports() -> None:

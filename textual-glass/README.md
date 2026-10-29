@@ -171,13 +171,13 @@ When it plays, and when it doesn't:
 
 | Kind | What it could mean |
 | --- | --- |
-| `comet` | something moved: it flies from one widget to another |
-| `shooting-star` | small news |
-| `meteors` | a lot happened at once (across the whole window) |
+| `comet` | something moved or arrived: it flies from one widget to another |
+| `shooting-star` | small news: one quick streak over a widget |
+| `meteors` | a lot happened at once: a shower across the window |
 | `warp` | launch: a deploy or a release starts |
-| `sunburst` | a win, right here |
-| `supernova` | the big win |
-| `pulsar` | look here |
+| `sunburst` | a win, right here: merged, passed, shipped |
+| `supernova` | the big win: a release out, a milestone reached |
+| `pulsar` | look here: this needs you |
 | `black-hole` | gone: closed, archived or snoozed |
 | `eclipse` | something went dark: a failure, a source down |
 | `aurora` | all clear |
