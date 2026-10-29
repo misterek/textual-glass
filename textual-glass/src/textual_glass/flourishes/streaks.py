@@ -665,7 +665,7 @@ def _warp_core(cv: _Canvas, x: float, y: float, ch: float, color: Array, accent:
 
 
 KINDS = {
-    "comet": Flourish(comet, grow=(4, 3), color="primary", accent="secondary",
+    "comet": Flourish(comet, grow=(4, 3), color="primary", accent="secondary", travels=True,
                       about="something moved or arrived: it flies from one widget to another"),
     "shooting-star": Flourish(shooting_star, grow=(6, 2), color="foreground", accent="primary",
                               about="small news: one quick streak over a widget"),

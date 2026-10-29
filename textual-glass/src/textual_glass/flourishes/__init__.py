@@ -79,6 +79,9 @@ class Flourish:
     accent: str = "secondary"
     #: The stage is the whole window, wherever the anchor is.
     screen: bool = False
+    #: It goes somewhere: the stage covers the target too, and the maker gets ``Stage.to``.
+    #: Other kinds ignore a target.
+    travels: bool = False
     #: One line: what it could mean on a dashboard.
     about: str = ""
 
@@ -97,14 +100,14 @@ FLOURISHES: dict[str, Flourish] = _collect()
 
 
 def stage_cells(kind: Flourish, at: Rect | None, to: Rect | None, screen: tuple[int, int]) -> Rect:
-    """The cells a flourish covers: the anchor (and the target) grown by
-    ``kind.grow``, clamped to the window; the whole window for ``kind.screen``
-    or without an anchor."""
+    """The cells a flourish covers: the anchor (and the target, for a kind that
+    travels) grown by ``kind.grow``, clamped to the window; the whole window
+    for ``kind.screen`` or without an anchor."""
     cols, rows = screen
     if kind.screen or at is None:
         return 0, 0, cols, rows
     x0, y0, x1, y1 = at[0], at[1], at[0] + at[2], at[1] + at[3]
-    if to is not None:
+    if to is not None and kind.travels:
         x0, y0, x1, y1 = min(x0, to[0]), min(y0, to[1]), max(x1, to[0] + to[2]), max(y1, to[1] + to[3])
     gx, gy = kind.grow
     x0, y0, x1, y1 = max(0, x0 - gx), max(0, y0 - gy), min(cols, x1 + gx), min(rows, y1 + gy)
@@ -129,6 +132,6 @@ def make_stage(kind: Flourish, at: Rect | None, to: Rect | None, screen: tuple[i
     cols, rows = screen
     edges = (sy == 0, sx + sw >= cols, sy + sh >= rows, sx == 0)
     anchor = box(at) if at is not None else (0.0, 0.0, float(width), float(height))
-    stage = Stage(width, height, scale, (cx, cy), anchor, box(to) if to is not None else None, color, accent, dark,
-                  edges, seed)
+    target = box(to) if to is not None and kind.travels else None
+    stage = Stage(width, height, scale, (cx, cy), anchor, target, color, accent, dark, edges, seed)
     return cells, stage

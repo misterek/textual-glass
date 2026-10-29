@@ -74,9 +74,12 @@ def test_the_flourishes_have_no_textual_imports() -> None:
 
 
 def test_the_stage_grows_around_the_anchor_and_the_target_within_the_window() -> None:
-    kind = Flourish(_draw.soft_flash, grow=(4, 2))
+    kind = Flourish(_draw.soft_flash, grow=(4, 2), travels=True)
     assert stage_cells(kind, (10, 5, 20, 6), None, (90, 28)) == (6, 3, 28, 10)
     assert stage_cells(kind, (10, 5, 20, 6), (60, 20, 10, 4), (90, 28)) == (6, 3, 68, 23)
+    still = Flourish(_draw.soft_flash, grow=(4, 2))
+    assert stage_cells(still, (10, 5, 20, 6), (60, 20, 10, 4), (90, 28)) == (6, 3, 28, 10), "only travellers reach"
+    assert make_stage(still, (10, 5, 20, 6), (60, 20, 10, 4), (90, 28), (9.0, 19.0), CYAN, VIOLET)[1].to is None
     assert stage_cells(kind, (0, 0, 10, 3), None, (90, 28)) == (0, 0, 14, 5), "clamped to the window"
     assert stage_cells(kind, None, None, (90, 28)) == (0, 0, 90, 28), "no anchor: the whole window"
     screen = Flourish(_draw.soft_flash, screen=True)
