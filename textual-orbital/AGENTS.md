@@ -877,6 +877,7 @@ async def test_it_plays_when_its_page_shows_and_holds_its_summary(output: Output
         replay = app.query_one(WeekReplay)
         await until(lambda: replay.showing is not None and replay.showing._t0 is not None)  # in the terminal
         show = replay.showing
+        assert show is not None and show.scene is not None and show._t0 is not None
         assert replay.status == "this week · 0 of 3 landed"
         for cue in sorted(show.scene.cues, key=lambda c: c.t):
             clock.now = show._t0 + cue.t + 0.001  # just past the landing
