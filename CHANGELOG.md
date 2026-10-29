@@ -1,5 +1,35 @@
 # Changelog
 
+## textual-glass 0.5.0 and textual-orbital 0.3.0 (2026-10-29)
+
+Scenes, and the week in review built on them: a show that plays the week's work as ships arriving at a planet, then holds its last frame as the week's summary. Nothing changes for an app that doesn't use them. Upgrade both together: orbital 0.3 needs glass 0.5.
+
+### textual-glass
+
+**Scenes** (`textual_glass.scenes`, `player.py`)
+- `app.glass.play_scene(make, at=None, start=0.0, on_cue=None, on_end=None)` plays a scene over a widget, a region or the whole window, and returns a `Showing` (`stop()`, `elapsed`, `holding`, `ended`), or None while glass is off or the anchor isn't shown. Glass never plays one by itself, and the player is only made on the first call.
+- A scene is `Actor`s on `Route`s, not a movie. Each actor is a small image uploaded once: its frames loop in the terminal by itself, or glass steps through them once and holds the last. Glass moves it by re-placing it at pixel offsets inside the cells, cropped at the stage's edge. `cells=(cols, rows)` stretches a big, soft picture over whole cells instead.
+- Actors whose `frames` is the same object share one image, with a placement each, so a week of 150 lights of five kinds is five images.
+- `make(stage) -> Scene` runs in the worker, and `scenes.check` holds it to the limits (`MAX_ACTORS` 1024, `MAX_FRAMES` 64, `MAX_PIXELS` 16M, `MAX_SECONDS` 300). The `Stage` carries the anchor's size in terminal pixels, the theme's colours by role, its space colours, and `still` for `minimal` motion.
+- After its duration a scene **holds**: what is on stage stays, only terminal-played loops move, and glass sends nothing. `Cue`s reach `on_cue(data)` on the app thread, once and in order.
+- `on_end(reason)` says why a scene went: `stopped`, `replaced`, `moved`, `hidden` (a page switch counts), `resized`, `theme`, `off` or `failed`. An app puts the summary back after a resize with `start=math.inf`. At `minimal` motion a scene plays as a still: its end, with the loops on frame 1.
+- A new layer, `Z_SCENE` (Z0 + 15M): over the ambient effects, under flourishes and the next popup's scrim. `stats()` counts `scenes`, `actors` and `scene_images`.
+- `kitty.place_px` (an image at its own pixels, with X/Y offsets and a source rect), `kitty.play`, `kitty.animation(start=False)` and `kitty.unplace(image_id, placement_id)`. The kitty model checks offsets against the cell size and applies source rects. `Output.model(cell)` tracks the cursor.
+
+**The week in review, as a scene** (`textual_glass.scenes.space`)
+- `space.make(stage, week, look="halo", length=20.0)`: one ship per `Work(kind, hour)` (`merged`, `review`, `deploy`, `ticket`, `release`), arriving in the order the work happened, each leaving a light. A cue `("landed", i, kind)` marks each landing and `space.END` the end. It runs about `length` seconds, from a dozen items to 150 (busy weeks come in waves).
+- Three looks (`space.LOOKS`): `halo` (an eclipse, one orbit per kind, the hour as the angle), `nightfall` (towns light up on a planet's night side, the day as the longitude) and `harbour` (a ringed giant, ships docking on a rail of seven days). Each light keeps its kind's shape in every look.
+- Space is always night: on a light theme the show paints its own night sky behind itself, with the theme's hues brightened to glow.
+- `examples/scenes/` is a small show in plain placeholder art; `examples/week/` is a made-up week in all three looks (`1` `2` `3`, `+` `-` for a busier or quieter week). `tests/scene_sheet.py` draws contact sheets.
+
+### textual-orbital
+
+- `WeekReplay(look="halo", ships=None, length=20.0)`: the week in review as a dashboard widget. Feed it `set_week(snapshot.week())`. It plays when its page shows, `replay()` plays it again, `set_look()`/`next_look()` change the look, a caption follows each landing ("Tue 14:02 · merged · Fix the flaky test (GH)"), and the tally follows at the end ("this week: 6 merged · 5 reviews · 3 deploys · 4 tickets · 1 release · 2 other"). Without glass it shows the same counts as a table by day.
+- `ships` maps an app's `Event.kind` words to the five ship classes (`SHIP_CLASSES`); `SHIPS` knows the common words. Other kinds count as "other". `week_hours(when, monday)` converts by the local wall clock, DST weeks included.
+- `REPLAY_LEGEND`: the legend row for an app with the page (`HelpScreen(keys, [*LEGEND, REPLAY_LEGEND])`). The default `LEGEND` is unchanged.
+- The console's page 5, Replay: `p` plays it again, `l` changes the look.
+- `AGENTS.md` has a new recipe: "Add a week-in-review page".
+
 ## textual-glass 0.4.0 (2026-10-28)
 
 Flourishes: short celestial animations your app plays when something happens. Nothing changes for an app that doesn't call them. textual-orbital stays at 0.2.0 and works with either glass.
