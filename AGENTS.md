@@ -46,7 +46,7 @@ Each step on the app thread is guarded on its own: what raises goes to `OrbitalA
 | `pyproject.toml` | The uv workspace root (not a package): the members, the `dev` dependency group, and the pytest, ruff and mypy settings for both packages. |
 | `uv.lock` | One lock file for the workspace. |
 | `LICENSE` | MIT-0 (MIT No Attribution). Each package carries a copy. |
-| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `examples/scenes/` (a small scene over a panel), `docs/screenshots/`. |
+| `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `examples/scenes/` (a small scene over a panel), `examples/week/` (the week in review, the space scene, over a page), `docs/screenshots/`. |
 | `textual-orbital/` | `src/textual_orbital/` (the package), `tests/`, `examples/console/` (Mission Console, the demo dashboard), `docs/screenshots/`. |
 
 In the workspace, orbital's dependency on textual-glass resolves to the sibling directory (`[tool.uv.sources] textual-glass = { workspace = true }` in `textual-orbital/pyproject.toml`).
@@ -136,7 +136,7 @@ Everything glass draws is a kitty image. The table lists the z of each, top to b
 | Scrim under modal level k | Z0 + k x 100M - 50M | glass | Dims everything below the modal; fades in and out at `subtle` motion. |
 | Float layer | Z0 + 30M | glass | Toasts, tooltips and other overlay widgets. |
 | Flourishes | Z0 + 20M | glass | `app.glass.flourish(...)`: one-shot effects the app plays, at the level of the anchor's screen (Z0 + k x 100M + 20M on modal level k), so under the next popup's scrim. Stepped by glass with `a=a,c=N` and deleted after the last frame. |
-| Scenes | Z0 + 15M | glass | `app.glass.play_scene(...)`: the app's actors moving over a widget, at the level of the anchor's screen (Z0 + k x 100M + 15M + actor z x 1000 + its index), so under the next popup's scrim. Re-placed by glass at pixel offsets as they move, nothing sent once the scene holds; deleted when it ends. |
+| Scenes | Z0 + 15M | glass | `app.glass.play_scene(...)`: the app's actors moving over a widget, at the level of the anchor's screen (Z0 + k x 100M + 15M + actor z x 1024 + its index), so under the next popup's scrim. Re-placed by glass at pixel offsets as they move, nothing sent once the scene holds; deleted when it ends. Actors with the same frames are placements of one image. |
 | Ambient | Z0 + 10M | glass | `full` motion only: shimmer, glints, the pulsing focus halo (terminal-played). |
 | Backdrop | Z0 = -2,000,000,000 | glass | The bottom screen: the backdrop painter (gradient or nebula), panels, pills, header strips, badges, bars and every widget's `pixel_items`. One image per page (rule 19). |
 
