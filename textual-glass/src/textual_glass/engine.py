@@ -12,6 +12,8 @@ backdrop           Z0                     the bottom screen: the backdrop
                                           badges, bars, ``pixel_items``
 ambient            Z0 + 10M               full motion only: shimmer, glints,
                                           the pulsing focus halo
+flourish           Z0 + 20M               ``flourish()``: one-shot effects the
+                                          app plays, over a level's glass
 float              Z0 + 30M               toasts and other overlay widgets
 scrim (level k)    Z0 + k*100M - 50M      dims everything below a modal screen
 dialog (level k)   Z0 + k*100M            the modal screen's own glass
@@ -26,9 +28,9 @@ same synchronized update as Textual's text, big ones rendered in a worker
 thread. The bottom screen's backdrop is kept per page (its set of panels):
 a page seen before is placed again at once, a new one is rendered at half
 resolution inside the frame and replaced by the full one from the worker.
-Images that Python steps through (scrim fades) are uploaded once and moved with
-``a=a,c=N``; ambient effects and sprites are animations the terminal plays by
-itself, so an idle app sends nothing at all.
+Images that Python steps through (scrim fades, flourishes) are uploaded once and
+moved with ``a=a,c=N``; ambient effects and sprites are animations the terminal
+plays by itself, so an idle app sends nothing at all.
 """
 
 from __future__ import annotations
@@ -50,21 +52,23 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from textual.color import Color, ColorParseError
+from textual.geometry import Region
 
 from . import _textual_hooks as hooks
 from . import backdrop, kitty
 from .detection import Support, detect
 from .effects import Effects
 from .filter import NO_RULES, GlassFilter, Rules
+from .flourishes import FLOURISHES, make_stage
 from .hard_exit import on_hard_exit
-from .palette import Palette, hex_of
+from .palette import RGB, Palette, hex_of
 from .render import Box, Canvas, Grid, Item, paint, to_u8
 from .scene import GLASS_EDGES, PixelContext, Scene, Tweens, build, rules_for, visible_screens
 from .sprites import dim_frame
 
 if TYPE_CHECKING:
     from textual.app import App
-    from textual.geometry import Region
     from textual.screen import Screen
     from textual.strip import Strip
     from textual.widget import Widget
@@ -74,6 +78,7 @@ MOTIONS = ("minimal", "subtle", "full")
 Z0 = -2_000_000_000
 LEVEL_STEP = 100_000_000
 Z_AMBIENT = 10_000_000
+Z_FLOURISH = 20_000_000  # above the level's glass and ambient effects, below its float layer and the next scrim
 Z_FLOAT = 30_000_000
 Z_SCRIM = -50_000_000
 MAX_LEVELS = 9
@@ -86,6 +91,7 @@ SPRITE_MAX_PX = 192     # sprite frames are rendered at most this big per side
 SPRITE_HOLD = 2         # Textual frames a new sprite is kept unshown, while its widgets redraw to show it
 SPRITE_RETRY = (5.0, 30.0, 300.0)  # a sprite whose maker raised is tried again after these delays (then every 300 s)
 PAGE_CACHE = 4          # pages whose backdrops stay in the terminal for instant switches
+MAX_FLOURISHES = 4      # flourishes playing or rendering at once; flourish() refuses more
 
 ERROR_LIMIT = 5         # more errors than this within ERROR_WINDOW seconds turn glass off...
 ERROR_WINDOW = 60.0
@@ -526,6 +532,8 @@ class GlassEngine:
         if self.active:
             if motion != "full":
                 self.effects.clear_ambient()
+            if motion == "minimal":
+                self.effects.clear_flourishes()
             self.kick()
 
     # -- the line filter ---------------------------------------------------------------
@@ -725,7 +733,9 @@ class GlassEngine:
         self.effects.update_scrims(levels, now, lambda level: Z0 + level * LEVEL_STEP + Z_SCRIM)
         if self.motion == "full":
             self.effects.update_ambient(levels, Z0 + Z_AMBIENT, lambda level: Z0 + level * LEVEL_STEP + Z_AMBIENT)
-        self._update_dimming(visible_screens(app)[:MAX_LEVELS])
+        screens = visible_screens(app)[:MAX_LEVELS]
+        self._update_dimming(screens)
+        self.effects.update_flourishes(screens, now)
         self.frames_synced += 1
         if scene.busy:
             self.kick()
@@ -1171,6 +1181,64 @@ class GlassEngine:
         done(result)
         self.writer.flush()
 
+    # -- flourishes: one-shot effects the app plays (textual_glass.flourishes) ---------------------
+
+    def flourish(self, name: str, at: Widget | Region | None = None, to: Widget | Region | None = None,
+                 color: Any = None) -> bool:
+        """Play the flourish ``name`` (a key of ``FLOURISHES``) once, over ``at``: a
+        widget, a ``Region`` in screen cells (on the top screen), or None for the
+        whole window. ``to`` is where a kind that travels goes (a comet flies from
+        ``at`` to ``to``); a target that isn't on screen is left out. ``color``
+        replaces the kind's main colour: "#rrggbb", an RGB tuple or a Textual
+        ``Color``. Unknown names and colours raise ValueError.
+
+        Returns True if it will play. It returns False and does nothing at all while
+        glass is off, at ``minimal`` motion, when the anchor isn't on a visible
+        screen or has no area, and while ``MAX_FLOURISHES`` are playing or rendering.
+        Glass never plays one by itself.
+        """
+        kind = FLOURISHES.get(name)
+        if kind is None:
+            raise ValueError(f"flourish must be one of {tuple(FLOURISHES)}")
+        main = None if color is None else _flourish_rgb(color)
+        palette = self.palette
+        if not self.active or self.motion == "minimal" or palette is None:
+            return False
+        screens = visible_screens(self.app)[:MAX_LEVELS]
+        if not screens or self.effects.flourishes >= MAX_FLOURISHES:
+            return False
+        anchor = self._flourish_cells(at, screens)
+        if anchor is None:
+            return False
+        screen, at_cells = anchor
+        target = self._flourish_cells(to, screens) if to is not None else None
+        level = next(i for i, s in enumerate(screens) if s is screen)
+        cells, stage = make_stage(kind, at_cells, target[1] if target is not None else None, self.app.size,
+                                  self.cell_pixels(), main or getattr(palette, kind.color),
+                                  getattr(palette, kind.accent), palette.dark, self.effects.fired)
+        self.effects.flourish(kind, stage, cells, Z0 + level * LEVEL_STEP + Z_FLOURISH, screen)
+        return True
+
+    def _flourish_cells(self, target: Any, screens: list[Screen[Any]]) -> tuple[Screen[Any], Rect | None] | None:
+        """The screen a flourish's anchor (or target) is on, and its cells on screen,
+        clipped to the window: None if it isn't on a visible screen or has no area."""
+        if target is None:
+            return screens[-1], None
+        if isinstance(target, tuple):  # a Region, on the top screen
+            screen, region = screens[-1], Region(*target)
+        else:
+            try:
+                screen = target.screen
+            except Exception:  # noqa: BLE001 - not mounted
+                return None
+            if not any(s is screen for s in screens):
+                return None
+            region = hooks.visible_region(target)
+        region = region.intersection(Region(0, 0, *self.app.size))
+        if not region.area:
+            return None
+        return screen, (region.x, region.y, region.width, region.height)
+
     # -- sprites: small terminal-played images behind placeholder cells -----------------------
 
     def cell_pixels(self) -> tuple[float, float]:
@@ -1396,4 +1464,16 @@ class GlassEngine:
                     layers=sorted(self.layers), pages=len(self.page_cache), sprites=len(self.sprites),
                     frames=self.frames_synced, motion=self.motion, render_ms=dict(self.render_ms),
                     support=self.support.reason if self.support else None, active=self.active,
-                    errors=self.errors, retry_in=self.retry_in)
+                    errors=self.errors, retry_in=self.retry_in, flourishes=self.effects.flourishes)
+
+
+def _flourish_rgb(color: Any) -> RGB:
+    """A flourish's colour: "#rrggbb", an RGB tuple or a Textual ``Color`` (a tuple too)."""
+    if isinstance(color, tuple) and len(color) >= 3:
+        r, g, b = color[:3]
+        return int(r), int(g), int(b)
+    try:
+        parsed = Color.parse(color)
+    except (ColorParseError, TypeError) as error:
+        raise ValueError(f"not a colour: {color!r}") from error
+    return parsed.r, parsed.g, parsed.b

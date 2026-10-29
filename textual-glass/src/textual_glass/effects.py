@@ -1,24 +1,33 @@
-"""Transitions and ambient motion: modal scrims and the terminal-played
-effects of ``full`` motion (shimmer, glints, a pulsing halo).
+"""Transitions and ambient motion: modal scrims, the terminal-played
+effects of ``full`` motion (shimmer, glints, a pulsing halo), and flourishes.
 
 Scrims are 1x1 images stretched over the window. Their frames are alpha steps
 uploaded once; Python moves between them with ``a=a,c=N`` during a fade (a few
 small commands), and nothing at all once the fade is done. How dark a scrim
 gets is the theme's (``Palette.scrim_alpha``, the ``glass-scrim-alpha``
 variable). Ambient effects are uploaded once and looped by the terminal itself.
+
+Flourishes (``GlassEngine.flourish``) are rendered in the worker, uploaded
+while stopped and stepped the same way as a fade, one ``a=a,c=N`` when each
+frame's time comes; after the last frame the image is deleted.
 """
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import random
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from . import kitty
+from .scene import visible_screens
 from .sprites import glint_frames, halo_frames, shimmer_frames, solid_frames
 
 if TYPE_CHECKING:
     from .engine import GlassEngine
+    from .flourishes import Flourish, Rect, Stage
     from .palette import RGB
     from .scene import LevelScene
 
@@ -59,6 +68,17 @@ class Ambient:
         return ids + self.glints + [image_id for image_id, _ in self.halos.values()]
 
 
+@dataclass
+class Flight:
+    """A flourish on screen: its frames uploaded while stopped, stepped through by glass."""
+
+    image_id: int
+    screen: Any         # the screen it plays on: it goes when that screen does
+    ends: list[float]   # when each frame ends, in seconds after t0
+    t0: float           # when the upload was sent
+    shown: int = 1      # the frame on screen (1-based)
+
+
 class Effects:
     """Owned by the engine; uses its writer, ids, size, palette and motion level."""
 
@@ -67,6 +87,9 @@ class Effects:
         self.scrims: dict[int, Fade] = {}
         self.ambient = Ambient()
         self._restore: dict[int, int] = {}  # scrim frames to come back at after a theme change
+        self.flights: list[Flight] = []
+        self.rendering: set[int] = set()  # image ids of flourishes still in the worker
+        self.fired = 0  # flourishes fired so far: each one's seed
 
     # -- helpers -----------------------------------------------------------------------
 
@@ -78,13 +101,15 @@ class Effects:
         self.engine.ids.free(image_id)
 
     def animating(self, now: float) -> bool:
-        return any(f.busy(now) for f in self.scrims.values())
+        return bool(self.flights) or any(f.busy(now) for f in self.scrims.values())
 
     def reset(self) -> None:
         """Forget everything (the engine has already deleted every image)."""
         self.scrims.clear()
         self.ambient = Ambient()
         self._restore.clear()
+        self.flights.clear()
+        self.rendering.clear()  # their results are dropped when they land
 
     def recolour(self) -> None:
         """The theme changed: rebuild the images in the new colours, keeping open
@@ -94,6 +119,7 @@ class Effects:
             self._delete(fade.image_id)
         self.scrims.clear()
         self.clear_ambient()
+        self.clear_flourishes()
 
     def stretch(self) -> None:
         """The window was resized: stretch the fades over the new size at once."""
@@ -102,6 +128,7 @@ class Effects:
             if fade.shown:
                 self._queue(kitty.place(fade.image_id, 0, 0, cols, rows, fade.z))
         self.clear_ambient()
+        self.clear_flourishes()
 
     # -- fades ------------------------------------------------------------------------
 
@@ -264,3 +291,65 @@ class Effects:
                 self._delete(old_id)
 
         engine.background_job(halo, halo_ready)
+
+    # -- flourishes ------------------------------------------------------------------------
+
+    @property
+    def flourishes(self) -> int:
+        """Flourishes playing or still rendering."""
+        return len(self.flights) + len(self.rendering)
+
+    def clear_flourishes(self) -> None:
+        """Delete every flourish now; the ones still rendering are dropped when they land."""
+        for flight in self.flights:
+            self._delete(flight.image_id)
+        self.flights.clear()
+        self.rendering.clear()
+
+    def flourish(self, kind: Flourish, stage: Stage, cells: Rect, z: int, screen: Any) -> None:
+        """Render a flourish in the worker, then upload it and place it over ``cells``."""
+        engine = self.engine
+        image_id = engine.ids.new()
+        self.rendering.add(image_id)
+        self.fired += 1
+
+        def work() -> tuple[str | None, Any]:
+            try:
+                frames, gaps = kind.make(stage)
+                size = stage.width * stage.height * 4
+                if not frames or len(gaps) != len(frames) or any(len(f) != size for f in frames):
+                    raise ValueError(f"a flourish maker returned {len(frames)} frames and {len(gaps)} gaps, "
+                                     f"not one gap per frame of {stage.width}x{stage.height} RGBA bytes")
+                return kitty.frames_stopped(image_id, stage.width, stage.height, frames), list(gaps)
+            except Exception as error:  # noqa: BLE001 - counted in done, which also frees the id
+                return None, error
+
+        def done(result: tuple[str | None, Any]) -> None:
+            command, gaps = result  # or (None, the maker's error)
+            dropped = image_id not in self.rendering  # a resize, a new theme or minimal motion meanwhile
+            self.rendering.discard(image_id)
+            if dropped or command is None or not any(s is screen for s in visible_screens(engine.app)):
+                engine.ids.free(image_id)
+                if command is None:
+                    engine._failed(gaps)
+                return
+            self._queue(command + kitty.place(image_id, *cells, z))
+            ends = list(itertools.accumulate(max(1, g) / 1000 for g in gaps))
+            self.flights.append(Flight(image_id, screen, ends, time.monotonic()))  # the clock starts now
+            engine.kick()
+
+        engine.background_job(work, done)
+
+    def update_flourishes(self, screens: list[Any], now: float) -> None:
+        """Show each flourish's frame for ``now``; delete the ones past their last
+        frame, and the ones whose screen has gone (their popup closed)."""
+        for flight in list(self.flights):
+            elapsed = now - flight.t0
+            if elapsed >= flight.ends[-1] or not any(s is flight.screen for s in screens):
+                self._delete(flight.image_id)
+                self.flights.remove(flight)
+                continue
+            frame = bisect.bisect_right(flight.ends, elapsed) + 1  # the frame whose time has come
+            if frame != flight.shown:
+                self._queue(kitty.animate(flight.image_id, c=frame))
+                flight.shown = frame
