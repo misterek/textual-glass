@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### textual-glass
+
+**Flourishes**
+- `app.glass.flourish(name, at=None, to=None, color=None) -> bool` plays a short celestial animation once (a comet, a sunburst, an eclipse...) over a widget, a region or the whole window. A comet flies from `at` to `to`. `textual_glass.FLOURISHES` lists the twelve kinds, each with what it could mean on a dashboard.
+- Glass never plays one by itself: an app that doesn't call it sees no change.
+- It plays at `subtle` and `full` motion, on the anchor's screen, at a new z (`Z_FLOURISH`: over a level's glass, under its float layer and the next popup's scrim). It returns False and does nothing while glass is off, at `minimal` motion, for an anchor that isn't shown, and while four (`MAX_FLOURISHES`) play.
+- The frames are drawn in the worker, uploaded while stopped, stepped by glass and deleted after the last one. A resize, a theme change, `minimal` motion and the anchor's popup closing stop every flourish.
+- `stats()` counts `flourishes`.
+- `examples/flourishes/`: every kind over a small made-up dashboard, to try them in Ghostty. `tests/flourish_sheet.py` draws contact sheets and GIFs of each kind.
+
 ## textual-glass 0.3.0 and textual-orbital 0.2.0 (2026-10-28)
 
 Hardening for a dashboard that stays open all day, on a laptop that sleeps and wakes, plus the features a corner window needed. Each new invariant is a rule in [`AGENTS.md`](AGENTS.md), with tests that guard it: rules 21 to 24 for glass, 25 to 30 for orbital. Upgrade both together: orbital 0.2 needs glass 0.3.

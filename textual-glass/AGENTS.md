@@ -1,6 +1,6 @@
 # Working on textual-glass
 
-Read [`README.md`](README.md) first: it says what textual-glass does and documents its public API. The rules that keep it working in Ghostty, the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything here. This file covers where things live, how to add support for a stock widget, a pixel widget, an item or a sprite, the theme variables glass reads, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
+Read [`README.md`](README.md) first: it says what textual-glass does and documents its public API. The rules that keep it working in Ghostty, the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything here. This file covers where things live, how to add support for a stock widget, a pixel widget, an item, a sprite or a flourish, the theme variables glass reads, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
 
 ## Where things live
 
@@ -8,9 +8,9 @@ Modules in `src/textual_glass/`:
 
 | Module | What it does |
 | --- | --- |
-| `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `on_hard_exit`, `detect`, `MOTIONS`. |
+| `__init__.py` | The public names: `Glass`, `GlassEngine`, `PixelMixin`, `PixelContext`, the widgets, `GlassImage`, `load_image`, `terminal_write`, `on_hard_exit`, `detect`, `MOTIONS`, `FLOURISHES`. |
 | `glass.py` | The `Glass` mixin (`class MyApp(Glass, App)`): the `GLASS_*` options, `f9`/`shift+f9`, the palette's "Glass: ..." commands, detection before the driver starts, the suspend and resume subscriptions, `GLASS_CSS` (transparent modals), `terminal_write`. |
-| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites (freed once no widget shows them, rule 21), dimming placeholder images under popups, the image cache, `background_job` and the one path every worker callback takes (`_from_worker`, rule 22), the error budget and its retries, suspend and resume, glass's hard-exit sequence. The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`...). |
+| `engine.py` | `GlassEngine` (`app.glass`): owns the terminal images. Layers keyed `(level, "main" or "float")`, the ident-aware diff, in-place edits and worker renders, one cached backdrop per page (half resolution inside the frame for a new page), sprites (freed once no widget shows them, rule 21), dimming placeholder images under popups, the image cache, `background_job` and the one path every worker callback takes (`_from_worker`, rule 22), the error budget and its retries, suspend and resume, glass's hard-exit sequence. `flourish()`: an anchor's screen and cells, the stage, the limit (`MAX_FLOURISHES`). The z constants (`Z0`, `LEVEL_STEP`, `Z_SCRIM`, `Z_FLOURISH`...). |
 | `hard_exit.py` | `on_hard_exit(key, data)`: escape sequences written to the terminal on SIGTERM, SIGHUP or an unclean interpreter exit (rule 24). No Textual imports; works with glass on or off. |
 | `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin` (whose `render_lines` reports the sprites a widget's lines show), `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
 | `render.py` | The drawing model, no Textual imports: `Grid` (cells to layer pixels), `Canvas`, the `Item` base class (`bbox`, `draw`, `window`, `diff_boxes`, `dynamic`, `edge`), `paint`, `to_u8`, colour and shape helpers. |
@@ -19,7 +19,8 @@ Modules in `src/textual_glass/`:
 | `backdrop.py` | The backdrop painters, no Textual imports: `gradient` and `nebula`; `draw` picks one by `palette.backdrop`. |
 | `palette.py` | `Palette.from_app`: the theme's colours and glass's theme variables as RGB; colour helpers (`mix`, `lighten`, `hue_shift`, `border_pair`, `hex_of`, `rgb`). |
 | `filter.py` | `GlassFilter` and `Rules`: the per-widget line filter that turns structural backgrounds into the terminal default, blanks pixel-drawn scrollbars and bars, and dims the screen under a modal (leaving placeholder colours alone). |
-| `effects.py` | Popup scrims (fades, recolouring) and the `full` motion ambient effects. |
+| `effects.py` | Popup scrims (fades, recolouring), the `full` motion ambient effects, and flourish playback: rendered in the worker, uploaded while stopped, stepped with `a=a,c=N`, deleted after the last frame, dropped on a resize, a theme change, `minimal` motion or their screen closing. |
+| `flourishes/` | The flourish kinds, no Textual imports. `__init__.py`: `Flourish`, `Stage`, `make_stage`, `stage_cells`, `FLOURISHES` and the limits (`MAX_PX`, `MAX_FRAMES`, `MAX_MS`). The makers, by family: `streaks.py` (kinds that travel), `bursts.py`, `shapes.py`. `_draw.py`: what the makers share (`Light`, glows, rings, easing, the border fade). |
 | `kitty.py` | The protocol as pure functions: commands, PNG, transmit, frames, `animation`, edits, placements, placeholders, deletes (one id, delete-all, an id range), OSC 11. |
 | `detection.py` | Whether to use glass. Runs before Textual's driver reads input. |
 | `images.py` | `load_image` and `LoadedImage` (Pillow, the `images` extra). |
@@ -39,7 +40,11 @@ Elsewhere in `textual-glass/`:
 | `tests/sample_app.py` | A small stock app with a `RingGauge`, a `SpriteView`, a `GlassImage`, a modal and two "pages". The pilot tests use it; run it with `uv run python tests/sample_app.py`. |
 | `tests/test_*.py`, `tests/conftest.py` | See [Tests](#tests). `conftest.py` has the `output` fixture. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` from the showcase. |
+| `tests/test_flourishes.py` | Every flourish kind by itself: the rule 17 border check, the limits, determinism, `about` and palette roles, no Textual imports, the stage's geometry. |
+| `tests/test_flourish_pilot.py` | `flourish()` in a running app, with test kinds, and the demo playing every real kind. |
+| `tests/flourish_sheet.py` | Contact sheets and GIFs of the kinds, with their frame counts, render times and upload sizes. |
 | `examples/showcase/` | `app.py` (the app, keys, `--plain`, `--image`), `views.py` (view 1 stock widgets, view 2 pixel widgets, with a `SelectList` subclass), `dialogs.py` (the modals), `art.py` (the rocket drawn in numpy), `world.py` (made-up data and colours), `showcase.tcss`. |
+| `examples/flourishes/` | `app.py`: every flourish kind over a small made-up dashboard, for trying them in Ghostty (keys, `--plain`); `flourishes.tcss`. |
 
 ## Adding support for a stock widget
 
@@ -83,6 +88,18 @@ An item defined in an app (outside `items.py`) is not checked by those tests; co
 ## Adding a sprite maker
 
 A maker lives in `sprites.py`, is named `*_frames`, and returns straight-alpha RGBA frames as bytes plus a gap in ms (`(frames, gap_ms)`). Multiply every frame by `radial_mask` (round sprites) or `edge_fade` (sprites that fill their box) so it is transparent at its border (rule 17). Add cases for it to `_sprite_cases()` in `tests/test_units.py`: `test_every_sprite_maker_is_checked_at_several_sizes` wants at least three, and `test_sprite_frames_are_transparent_at_their_border` checks every frame of each.
+
+## Adding a flourish
+
+A kind is a `Flourish` in one of the family modules, listed in that module's `KINDS` dict: `flourishes/streaks.py` (kinds that travel), `bursts.py` or `shapes.py`. `FLOURISHES` collects them. No Textual imports.
+
+1. Write the maker, `make(stage) -> (frames, gaps)`. It runs in glass's worker thread. The `Stage` gives the image size in pixels (square pixels; the terminal stretches the image over the stage's cells), `scale` (multiply stroke widths and radii by it), one cell in image pixels, the anchor `at` and the target `to` (or None) in image pixels, the two colours, `dark` (on a light theme, draw in colour, not white), the sides on the window's edge, and a `seed` for any randomness.
+2. Return straight-alpha RGBA frames as bytes (`width * height * 4` each) and one duration per frame in ms: 2 to `MAX_FRAMES` (48) frames, each at least 16 ms, and at most `MAX_MS` (2600 ms) in all. The last frame must be (nearly) empty, so the end never pops. The same seed gives the same frames. Draw with `_draw.Light`: `over` for paint, `add` for light that adds up, and `frame()` for the bytes.
+3. **Rule 17:** every frame is fully transparent at the stage's border, except on sides on the window's edge (`Stage.window_edges`). `Light.frame()` fades the border for you (`_draw.border`). If the light needs more room, raise `grow` instead of drawing up to the edge.
+4. Add it to `KINDS`: `Flourish(make, grow=(cols, rows), color="primary", accent="secondary", screen=False, about="...")`. `grow` is how many cells the stage reaches past the anchor (and the target) on each side. `screen=True` makes the stage the whole window. `color` and `accent` are `Palette` field names. `about` says in one line what it could mean on a dashboard.
+5. Test it: `tests/test_flourishes.py` checks every kind in `FLOURISHES`, so a new one is covered as soon as it is listed. `test_flourish_frames_are_transparent_at_the_border_and_within_the_limits` is the rule 17 test: every frame at five window and cell sizes, a light theme included. `test_the_demo_plays_every_kind` in `tests/test_flourish_pilot.py` plays it through the engine.
+6. Look at it: `uv run python textual-glass/tests/flourish_sheet.py NAME --out /tmp/fl` (from the repository root) writes a contact sheet (every few frames over a nebula backdrop, the anchor and target outlined) and a GIF at the real timing. It prints the frame count, the duration, the render time, the upload size and the border check. `--light`, `--screen 70x22` and `--crop` change the setting. Then ask the user to try it in the demo in Ghostty (`uv run python textual-glass/examples/flourishes/app.py`).
+7. Add it to the table of kinds in the README's [Flourishes](README.md#flourishes) section.
 
 ## Theme variables glass reads
 
@@ -134,6 +151,7 @@ uv run pytest textual-glass/tests/test_units.py textual-glass/tests/test_widgets
 uv run ruff check . && uv run mypy
 uv run python textual-glass/tests/test_pty.py --png /tmp/glass-steps   # a composite per pty step
 uv run python textual-glass/tests/screenshots.py                    # regenerate docs/screenshots
+uv run python textual-glass/tests/flourish_sheet.py --out /tmp/fl   # contact sheets and GIFs of every flourish
 GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # with real pictures, if the user has some
 ```
 
@@ -146,3 +164,4 @@ The README's [Tests](README.md#tests) section says what each file checks. Rules 
 - Colour-based ownership is a heuristic (see the README's Limitations).
 - Items defined outside `items.py` are not covered by the rule 16 test.
 - A sprite used by a widget that isn't a `PixelMixin` is freed only when that widget is removed (rule 21).
+- A flourish stays where it started: if its widget moves or is hidden while it plays (a scroll, a page switch), it finishes where the widget was. Only its screen going away stops it early.

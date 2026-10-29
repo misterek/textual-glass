@@ -11,7 +11,7 @@ class MyApp(Glass, App):
     ...
 ```
 
-It is also a small pixel engine. Your own widgets can add pixel items (rings, meters, charts, glowing dots) and terminal-played animations, and the package ships ready-made pixel widgets that fall back to plain text with the same layout.
+It is also a small pixel engine. Your own widgets can add pixel items (rings, meters, charts, glowing dots) and terminal-played animations, and the package ships ready-made pixel widgets that fall back to plain text with the same layout. Your app can also play [flourishes](#flourishes): short celestial animations, such as a comet or a sunburst, when something happens.
 
 ![The showcase's pixel widgets at 140x45 (approximate composite)](docs/screenshots/140x45_pixels.png)
 
@@ -41,6 +41,7 @@ uv sync --all-packages
 uv run python examples/showcase/app.py                      # with glass
 uv run python examples/showcase/app.py --plain              # stock Textual, for comparison
 uv run python examples/showcase/app.py --image ~/cat.gif    # your picture in the modal (PNG, JPEG, GIF...)
+uv run python examples/flourishes/app.py                    # every flourish, over a small dashboard
 ```
 
 | Key | Action |
@@ -93,11 +94,12 @@ At run time `app.glass` is the engine (`GlassEngine`):
 | `motion`, `set_motion(level)` | The motion level. |
 | `activate()`, `deactivate()` | Turn glass on and off live (what `shift+f9` does). Either one cancels a pending retry after errors. |
 | `errors`, `last_error`, `retry_in` | Errors since the app started, the last traceback, and, after glass turned itself off, the seconds until it tries again (`None` otherwise). See [Errors](#errors). |
-| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times, errors. |
+| `stats()` | Bytes and commands sent, live images, layers, cached pages, sprites, frames synced, render times, errors, flourishes playing or rendering. |
 | `palette` | The theme colours glass is using (`textual_glass.palette.Palette`). |
 | `background_job(work, done)` | Run `work()` in glass's worker thread, then `done(result)` on the app thread (rules 3 and 13). |
 | `sprite(key, cols, rows, make, waiter=None)` | A terminal-played animation behind placeholder cells (see [Write your own pixel widget](#write-your-own-pixel-widget)). |
 | `cell_pixels()` | Terminal pixels per cell, `(width, height)`. |
+| `flourish(name, at=None, to=None, color=None)` | Play a flourish once (see [Flourishes](#flourishes)). |
 
 Also exported: `terminal_write(app, data) -> bool` sends other escape sequences (a notification, a window title) through Textual's writer, with glass on or off. `on_hard_exit(key, data)` registers what to write to the terminal if the process is killed (see [Suspend, resume and hard exits](#suspend-resume-and-hard-exits)). `detect(env=None, *, query=True, timeout=0.3)` is the detection on its own.
 
@@ -134,13 +136,98 @@ Glass's own entry deletes every image it may have made: Ghostty's delete-all (`a
 
 | Level | What moves |
 | --- | --- |
-| `minimal` | Nothing. The glass is static, the pill jumps from row to row, and modals and view changes switch instantly. |
-| `subtle` (default) | The selection pill slides between rows in about 140 ms, and a modal's scrim fades in and out. The focused panel glows (at every level). Nothing moves while the app is idle. |
+| `minimal` | Nothing. The glass is static, the pill jumps from row to row, modals and view changes switch instantly, and no flourish plays. |
+| `subtle` (default) | The selection pill slides between rows in about 140 ms, a modal's scrim fades in and out, and the app's [flourishes](#flourishes) play. The focused panel glows (at every level). Nothing moves while the app is idle. |
 | `full` | Everything in `subtle`, plus ambient effects that the terminal plays by itself: a slow sheen sweeping across the glass, small glints on panel corners, and a pulsing halo around the focused panel. |
 
 Switch with `f9` (steps through the levels), the command palette ("Glass: motion minimal", "subtle" or "full"), `TEXTUAL_GLASS_MOTION` or `GLASS_MOTION`. "Glass: off" and "Glass: on" in the palette (or `shift+f9`) toggle the whole theme live.
 
 At every level an idle app sends no graphics at all. In `full`, the animations loop inside the terminal, so Python sends nothing for them either.
+
+## Flourishes
+
+A flourish is a short celestial animation that your app plays once, when something happens: a comet flies from a pull request's row to the "merged" panel, or a sunburst goes off when a build turns green. It is drawn over the glass and under the text, around a widget or across the window, and it is gone after a second or two. Glass never plays one by itself, so an app that doesn't call it sees no change at all.
+
+```python
+app.glass.flourish("comet", at=self.query_one("#open"), to=self.query_one("#merged"))
+```
+
+`app.glass.flourish(name, at=None, to=None, color=None) -> bool`:
+
+- `name` is a key of `textual_glass.FLOURISHES` (the kinds are in the table below). An unknown name raises `ValueError`.
+- `at` is where it plays: a widget, a `textual.geometry.Region` in screen cells, or `None` for the whole window. It plays on the widget's screen: over a popup when the widget is on the popup, and under the popup's scrim when the widget is below it. A region is on the top screen.
+- `to` is where a kind that travels goes: a comet flies from `at` to `to`. It is a widget or a region too. Leave it out for other kinds: they don't use it, but it still makes their stage bigger.
+- `color` replaces the kind's main colour: `"#rrggbb"`, an RGB tuple or a Textual `Color`. A colour that doesn't parse raises `ValueError`. By default both of a kind's colours come from the theme: each kind names two palette roles (`Flourish.color` and `Flourish.accent`, such as `primary` and `secondary`).
+- It returns `True` if the flourish will play.
+
+When it plays, and when it doesn't:
+
+- It plays at `subtle` and `full` motion. It returns `False` and does nothing at all while glass is off, at `minimal` motion, when the anchor isn't on a visible screen (a full screen covers it) or has no area (it is hidden), and while four (`textual_glass.engine.MAX_FLOURISHES`) are already playing or rendering.
+- The frames are drawn in glass's worker thread, so the app never waits, and the flourish's time starts when they are sent to the terminal. Glass steps through the frames itself and deletes the image after the last one; after that nothing more is sent.
+- A resize, a theme change, `minimal` motion and the anchor's popup closing stop every flourish at once. So do turning glass off, suspending and quitting.
+- The same flourish fired twice plays twice.
+- It plays where the anchor was when it started. If the widget moves or is hidden meanwhile (a scroll, a page switch), the flourish finishes where it was.
+- While it plays, one flourish holds at most 48 frames of 120,000 pixels in the terminal (about 23 MB).
+
+| Kind | What it could mean |
+| --- | --- |
+| `comet` | something moved: it flies from one widget to another |
+| `shooting-star` | small news |
+| `meteors` | a lot happened at once (across the whole window) |
+| `warp` | launch: a deploy or a release starts |
+| `sunburst` | a win, right here |
+| `supernova` | the big win |
+| `pulsar` | look here |
+| `black-hole` | gone: closed, archived or snoozed |
+| `eclipse` | something went dark: a failure, a source down |
+| `aurora` | all clear |
+| `orbit` | refreshed, synced, one more lap done |
+| `constellation` | a set is complete: every check green, a goal reached |
+
+For example, a sunburst over a panel whenever its number goes up:
+
+```python
+from textual.app import App, ComposeResult
+from textual.widgets import Static
+
+from textual_glass import Glass
+
+
+class Builds(Glass, App[None]):
+    CSS = "Static { border: round $primary; height: 5; content-align: center middle; }"
+
+    def compose(self) -> ComposeResult:
+        yield Static("0 green builds", id="green")
+
+    def on_mount(self) -> None:
+        self.builds = 0
+        self.set_interval(5, self.build_passed)
+
+    def build_passed(self) -> None:
+        self.builds += 1
+        panel = self.query_one("#green", Static)
+        panel.update(f"{self.builds} green builds")
+        self.glass.flourish("sunburst", at=panel)  # False without glass or at minimal motion: nothing else to do
+
+
+if __name__ == "__main__":
+    Builds().run()
+```
+
+To see every kind, run the demo in Ghostty, from the repository root: `uv run python textual-glass/examples/flourishes/app.py` (`--plain` for stock Textual, where nothing plays). It is a small made-up dashboard with a list of every kind.
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` | Pick a kind |
+| `enter`, `space` | Play it at the target panel (a comet flies on to the next panel) |
+| `t` | Move the target to the next panel |
+| `a` | Autoplay: every kind in turn, 2.5 s apart |
+| `l` | A light theme, and back |
+| `f9` | Next motion level, shown in the top bar (`minimal` plays nothing) |
+| `shift+f9` | Glass off and on |
+| `q` | Quit |
+
+To write a kind of your own, see "Adding a flourish" in [`AGENTS.md`](AGENTS.md#adding-a-flourish).
 
 ## Supported terminals and fallback
 
@@ -440,9 +527,12 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 | `tests/test_pilot.py` | `tests/sample_app.py` with glass forced on: the scene read from computed styles, the cursor pill through scrolling, which cells the filter makes transparent, modals, partial edits, idle silence, live toggling, motion levels, theme changes, `PixelMixin` items diffed by ident, sprites dimming under popups, page switches in the same frame, `SCOPED_CSS`, cached images across popups. A long day: the timer after glass turns off, the error budget and its retries (with a fake clock), errors in worker callbacks, no sync markers inside Textual's frame, sprite churn (key switches, resizes, removed widgets, several sprites per widget, partial repaints), a sprite maker that raises, every table bounded over hours of use, suspend and resume. |
 | `tests/test_widgets.py` | Every pixel widget in both modes with identical layout, `Telemetry`'s one scale with and without glass, the `SelectList` pill (slides, settles, goes quiet) and its section headers staying in view, `GlassPanel` titles and accents, clipping in scrolling containers, `strip` never cutting a placeholder run. |
 | `tests/test_images.py` | `load_image` and `GlassImage`: GIF compositing, timing and loop counts, PNG transparency, EXIF rotation, limits, bad input, resampling, half blocks, play counts in the terminal, the memory budget. Tests with real pictures run when `GLASS_TEST_ART` points at a folder. |
+| `tests/test_flourishes.py` | Every flourish kind by itself: every frame transparent at the stage's border (rule 17) at five window and cell sizes, the limits, determinism, an `about` line and palette roles, no Textual imports, the stage's geometry. |
+| `tests/test_flourish_pilot.py` | `flourish()` in a running app: frames uploaded while stopped, placed at the anchor's level, stepped in order and deleted after the last one, then silence; the no-op cases; `MAX_FLOURISHES`; dropped on a resize, a theme change, `minimal` motion, a popup closing, suspend and resume; a broken maker. The demo plays every kind at 70x22, 90x28 and 140x45. |
 | `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` (with `textual_glass.testing.screenshots.shoot`). |
+| `tests/flourish_sheet.py` | Contact sheets and GIFs of each flourish kind (see [`AGENTS.md`](AGENTS.md#adding-a-flourish)). |
 
 ## Limitations
 
