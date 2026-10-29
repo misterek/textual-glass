@@ -1,6 +1,6 @@
 # Working on textual-orbital
 
-Read [`README.md`](README.md) first: it says what orbital does and documents its public API. The rules that keep it working in Ghostty (rules 9, 13 and 20 matter most for dashboards), the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything. This file has a complete walkthrough for building a dashboard, the rules for wiring real sources, how to add a widget or a rule to the library, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
+Read [`README.md`](README.md) first: it says what orbital does and documents its public API. The rules that keep it working in Ghostty (rules 9, 13 and 20 matter most for dashboards), the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything. This file has a complete walkthrough for building a dashboard, the rules for wiring real sources, how to add a week-in-review page, how to add a widget or a rule to the library, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
 
 ## Where things live
 
@@ -19,6 +19,7 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 | `widgets/lists.py` | `PriorityList`, `TaskBoard`, `EventLog`, `DoneList` (all `SelectList` subclasses), `Section`, `signal_glyphs`, `task_color`. |
 | `widgets/track.py` | `Track`, `TrackTable`, `status_word`, `HEALTH_COLORS`, `HEALTH_WORDS`. |
 | `widgets/page.py` | `Page`. |
+| `widgets/replay.py` | `WeekReplay` (the week in review over glass's space scene, or a text rundown), `ReplayWeek`, `SHIPS`, `SHIP_CLASSES`, `week_hours`. |
 | `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `AlertToast`, `DetailScreen` (with lazy values), `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
 
 Elsewhere in `textual-orbital/`:
@@ -26,10 +27,10 @@ Elsewhere in `textual-orbital/`:
 | Path | What it is |
 | --- | --- |
 | `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`, `--alert-style`, `--toast-timeout`; `ConsoleToast` (its `HINTS`) and the keys it binds to `finish_alert`. |
-| `examples/console/pages.py`, `console.tcss` | Its four pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`. |
+| `examples/console/pages.py`, `console.tcss` | Its five pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`; the Replay page plays the week in review (`p` again, `l` the next look). |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`; `NeedsYouRule`, the library's `WaitingRule` with its alerts kept popups (`style="modal"`). |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, and `history(first, last)`, a slow call for older weeks. Only for the demo and the tests; don't import it from real code. |
-| `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
+| `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_replay.py` (`WeekReplay`), `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
 ## Build a dashboard
 
@@ -736,6 +737,177 @@ class WeekPage(Page):
         self.query_one("#week-panel", GlassPanel).set_title(f"WEEK OF {week.start:%b %d}",
                                                            (f"{len(week.events)} events", "dim"))
 ```
+
+## Add a week-in-review page
+
+`WeekReplay` shows the week as a space show each time its page opens: a ship flies in for each piece of work, in the order it happened, and leaves a light where it lands, while a caption says what landed ("Tue 14:02 · merged · Fix the flaky test (GH)"). Then the last frame holds as the week's summary, with the tally under it ("this week: 6 merged · 5 reviews · 3 deploys · 4 tickets · 1 release · 2 other"). Holding, it sends nothing. Without glass it is a table of the same counts by day. The console's `ReplayPage` (`examples/console/pages.py`) is a complete one.
+
+You need sources that emit `Event`s for this week, with aware `when`s ([Wiring real sources](#wiring-real-sources)). Then:
+
+**1. Map your kinds to ships.** The show has five ship classes (`textual_orbital.widgets.SHIP_CLASSES`): `merged`, `review`, `deploy`, `ticket`, `release`. Map each `Event.kind` word of yours that is a piece of work to one of them. Kinds you leave out ("ticket opened", "incident") fly no ship and count as "other" in the tally. Without `ships=`, the widget uses `textual_orbital.widgets.SHIPS`, which knows the common words ("merged", "reviewed", "deployed", "shipped", "ticket closed", "released"...). Keep `release` for the rare big event: it has the biggest effect and a longer pause, so a dozen a week make a long show.
+
+**2. The page.** Next to your other pages:
+
+```python
+from typing import ClassVar
+
+from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
+
+from textual_glass import GlassPanel
+from textual_orbital import Page, Snapshot, WeekReplay
+
+#: Your Event.kind words -> ship classes; other kinds count as "other".
+SHIPS = {"pr merged": "merged", "pr reviewed": "review", "deployed": "deploy", "issue closed": "ticket",
+         "tagged": "release"}
+
+
+class ReplayPage(Page):
+    KEYS = [("1-3", "pages"), ("p", "play again"), ("l", "look"), ("?", "help"), ("q", "quit")]
+    DEFAULT_FOCUS = "#week-replay"  # the page's keys reach it while the widget has focus
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("p", "replay", "play again", show=False),
+                                             Binding("l", "look", "next look", show=False)]
+
+    def compose(self) -> ComposeResult:
+        with GlassPanel(title="WEEK IN REVIEW", id="replay-panel"):
+            yield WeekReplay(ships=SHIPS, id="week-replay")  # not the page's id
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        self.query_one("#week-replay", WeekReplay).set_week(snapshot.week())  # equal data costs nothing
+        self.show_title()
+
+    def show_title(self) -> None:
+        replay = self.query_one("#week-replay", WeekReplay)
+        self.query_one("#replay-panel", GlassPanel).set_title("WEEK IN REVIEW", (f"{replay.landed} landed", "bold"),
+                                                             (replay.look, "dim"))
+
+    def action_replay(self) -> None:
+        self.query_one("#week-replay", WeekReplay).replay()
+
+    def action_look(self) -> None:
+        replay = self.query_one("#week-replay", WeekReplay)
+        replay.set_look(replay.next_look())  # halo, harbour, nightfall: it plays the new look
+        self.show_title()
+```
+
+The widget does the rest. It plays when it becomes visible (the page shows, or glass comes on) and on `replay()`. New data while the summary holds puts the new summary up at once, without a replay, and only if the set of items changed; during the show it waits for the end. A resize or a new theme puts the summary back; leaving the page ends the show, and it plays again next time. At `minimal` motion the summary shows as a still with its tally at once. Without glass, or if glass turns off or the scene fails, it shows the table.
+
+**3. The key, the help and the layout.** Add the page to your app the way the others are (in CI Board: `("replay", "Replay", ReplayPage)` in `PAGES` and `("3", "page(2)", "replay")` in `BINDINGS`), and `p` and `l` to your `HelpScreen` keys. Pick other letters if your app binds them already (the console's `r` is "fetch now"). In your CSS:
+
+```css
+#replay-panel { height: 1fr; }
+#week-replay { height: 1fr; }
+```
+
+**4. The tests.** `tests/test_replay.py`, with the `output` fixture from step 6 of the walkthrough. Glass plays the show on its own clock; the test moves it, landing by landing. `pilot.pause()` waits until the CPU is idle, which can take a second while glass draws the show in its worker, so wait for the state you want (`until`) instead of looking once after a pause. Replace `my_app.pages` with your module:
+
+```python
+"""The Replay page: it plays when it shows, a caption per landing, the tally at the end, then
+silence; a text table without glass."""
+
+import asyncio
+from collections.abc import Callable
+from datetime import datetime, time, timedelta
+
+import pytest
+from textual.app import App, ComposeResult
+from textual.widgets import ContentSwitcher, Static
+
+from my_app.pages import SHIPS, ReplayPage
+from textual_glass import Glass
+from textual_glass import engine as glass_engine
+from textual_glass.testing.pilot_helpers import Output, idle, settle, start
+from textual_orbital import Event, Snapshot, WeekReplay, now
+from textual_orbital.model import monday_of
+from textual_orbital.widgets import SHIP_CLASSES
+
+
+class Host(Glass, App[None]):
+    """The page under test, behind another page."""
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(initial="other"):
+            yield Static("another page", id="other")
+            yield ReplayPage(id="replay")
+
+
+class Clock:
+    now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def snapshot() -> Snapshot:
+    monday = monday_of(now().astimezone().date())
+    local = datetime.now().astimezone().tzinfo
+
+    def at(day: int, hour: int) -> datetime:
+        return datetime.combine(monday + timedelta(days=day), time(hour), tzinfo=local)
+
+    return Snapshot(taken_at=now(), events=(
+        Event(at(0, 10), "pr merged", "GH", "Add a retry budget"), Event(at(0, 15), "pr reviewed", "GH", "Cache"),
+        Event(at(1, 11), "pr merged", "GH", "Fix the flaky test"), Event(at(1, 12), "incident", "IM", "API down")))
+
+
+async def until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    for _ in range(int(timeout / 0.02)):
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("timed out")
+
+
+@pytest.fixture(autouse=True)
+def cells(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(glass_engine, "terminal_cell_pixels", lambda: (9.0, 19.0, True))  # whatever runs the tests
+
+
+def test_every_kind_flies_a_ship_class() -> None:
+    assert set(SHIPS.values()) <= set(SHIP_CLASSES)
+
+
+async def test_it_plays_when_its_page_shows_and_holds_its_summary(output: Output) -> None:
+    app = Host()
+    async with app.run_test(size=(90, 28)) as pilot:
+        await start(app, pilot)  # glass on, as in Ghostty
+        clock = app.glass.player.clock = Clock()
+        app.query_one(ReplayPage).update_snapshot(snapshot())
+        app.query_one(ContentSwitcher).current = "replay"
+        replay = app.query_one(WeekReplay)
+        await until(lambda: replay.showing is not None and replay.showing._t0 is not None)  # in the terminal
+        show = replay.showing
+        assert replay.status == "this week · 0 of 3 landed"
+        for cue in sorted(show.scene.cues, key=lambda c: c.t):
+            clock.now = show._t0 + cue.t + 0.001  # just past the landing
+            app.glass.tick()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            if not replay.done:
+                assert replay.caption.endswith("(GH)"), replay.caption  # "Mon 10:00 · pr merged · ..."
+        assert replay.done and replay.status == "this week: 2 merged · 1 review · 1 other"
+        clock.now = show._t0 + show.scene.duration + 1.0  # past the end: it holds
+        app.glass.tick()
+        await idle(app, pilot)  # the page's own glass, drawn in the worker after the show
+        quiet = output.mark()
+        app.query_one(ReplayPage).update_snapshot(snapshot())  # the same data
+        await settle(app, pilot)
+        assert show.holding and output.since(quiet) == "", "the summary holds in silence"
+    assert output.model().errors == []
+
+
+async def test_without_glass_it_is_a_table() -> None:
+    app = Host()  # run_test keeps glass off unless the test calls start()
+    async with app.run_test(size=(90, 28)) as pilot:
+        app.query_one(ReplayPage).update_snapshot(snapshot())
+        app.query_one(ContentSwitcher).current = "replay"
+        await pilot.pause()
+        replay = app.query_one(WeekReplay)
+        text = "\n".join(replay.render_line(y).text for y in range(replay.size.height))
+        assert "merged" in text and "reviews" in text and replay.tally() in text and replay.showing is None
+```
+
+Run `uv run pytest tests/test_replay.py`, then look at it in Ghostty: open the page, let the show run to its summary, press `p` and `l`.
 
 ## Adding a widget
 
