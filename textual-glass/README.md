@@ -331,6 +331,8 @@ Detection runs before Textual starts reading input, so a reply to the terminal q
 
 When glass is off, the app is exactly stock Textual: no CSS, filters, patches or escape codes. Layout is identical either way. The look is tuned against Ghostty 1.4. Kitty supports the same protocol features and should work, but it is untested.
 
+[herdr](https://herdr.dev) 0.9.5 redraws its panes' kitty graphics with `[terminal] kitty_graphics = true` in its config. Glass works in a herdr pane with `TEXTUAL_GLASS=on` and `GLASS_TERMINAL_BACKGROUND = False`: herdr paints the OSC 11 colour into every cell as an explicit background, which hides the glass. Nothing the terminal animates by itself moves there. textual-orbital's README has the steps, in [Running as a herdr plugin](../textual-orbital/README.md#running-as-a-herdr-plugin).
+
 ## Stock widgets with glass
 
 The theme reads each widget's computed styles on every frame, so your CSS decides the colours. That includes `:focus` rules, theme variables and live theme changes from the palette's "Change theme".

@@ -472,6 +472,74 @@ Measured on Mission Console with `--static --notify off`, in a real pty through 
 
 The backdrop is capped at 2.4 megapixels; on large Retina windows the terminal scales it up.
 
+## Running as a herdr plugin
+
+[herdr](https://herdr.dev) is a terminal multiplexer for coding agents. A herdr plugin can open a pane that runs your dashboard, and herdr redraws a pane's kitty graphics on the outer terminal, so glass works there once herdr's kitty graphics are on and glass leaves the terminal's background colour alone. Everything here was checked by eye in Ghostty through herdr 0.9.5 on macOS, unless it says otherwise.
+
+**1. Turn on kitty graphics in herdr**, then restart its server: `herdr server stop`, then `herdr` again. `herdr server reload-config` keeps the old value of this setting. In 0.9.5 the key is under `[terminal]`; `herdr config check` rejects it at the top level.
+
+```toml
+# ~/.config/herdr/config.toml
+[terminal]
+kitty_graphics = true
+```
+
+**2. Skip glass's terminal background inside herdr.** Glass sets the terminal's default background colour (OSC 11) at startup. herdr paints that colour into every cell of the pane as an explicit background, which covers everything glass draws. herdr sets `HERDR_ENV=1` in every pane it manages:
+
+```python
+import os
+
+from textual_orbital import OrbitalApp
+
+
+class Dashboard(OrbitalApp):
+    GLASS_TERMINAL_BACKGROUND = os.environ.get("HERDR_ENV") != "1"
+```
+
+**3. Write the plugin.** It is a directory with a `herdr-plugin.toml`; here it is also the uv project that holds the dashboard's `app.py`. A pane's `command` is an argv list, run with no shell from the plugin's directory, and a pane has no `env` field, so set the environment in a launcher script:
+
+```toml
+# herdr-plugin.toml
+id = "example.dashboard"
+name = "Dashboard"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["macos"]
+
+[[panes]]
+id = "dashboard"
+title = "Dashboard"
+placement = "tab"
+command = ["/bin/sh", "bin/dashboard"]
+```
+
+```sh
+#!/bin/sh
+# bin/dashboard
+export TEXTUAL_GLASS=on  # glass forced on: whether it turns itself on in a herdr pane is untested
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"  # herdr's server may not have your login PATH
+exec uv run --directory "${HERDR_PLUGIN_ROOT:-.}" --frozen --quiet python app.py
+```
+
+`placement` can also be `overlay` (the default), `popup`, `split` or `zoomed`; only `tab` was tried.
+
+**4. Link it and open it**, from a shell pane inside herdr. `plugin link` runs no build step, so run `uv sync` in the plugin's directory first:
+
+```sh
+herdr plugin link /absolute/path/to/the/plugin
+herdr plugin pane open --plugin example.dashboard --entrypoint dashboard --focus
+```
+
+Quitting the app closes its pane.
+
+**What you get in herdr 0.9.5:**
+
+| | |
+| --- | --- |
+| Works | The backdrop, panel borders, gauges and the header band, lined up with the text. Beacons, as stills. Values that change (glass edits its images in place). Alert popups. |
+| Doesn't work | Anything the terminal animates by itself stays on its first frame: herdr forwards images and placements, but no animation frames or frame control. Beacons don't pulse (seen). By the same reasoning, looping alert pictures, `full` motion's ambient effects, flourishes and the week in review's scenes won't play as in Ghostty (not tried). |
+| Untested | How much the page dims under a popup: glass picks the scrim's strength with the same frame control, so expect less dimming than in Ghostty. Toasts. Glass turning itself on without `TEXTUAL_GLASS=on`: a herdr pane sets `TERM=xterm-256color` and `TERM_PROGRAM=herdr`, so glass has to ask the terminal. Desktop notifications: `notify="auto"` picks none in a herdr pane, so set `TEXTUAL_ORBITAL_NOTIFY=osc777` to try them. |
+
 ## Tests
 
 From the repository root:
@@ -499,5 +567,5 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 - **Process-wide colour tables.** `PALETTE`, `SOURCE_COLORS`, `SOURCE_NAMES` and `WHY_COLORS` are module-level dicts; apps add to them at import time.
 - **Notifications** were checked only against Ghostty's source. The window title is cleared on exit, not restored: Ghostty 1.4 has no title pop.
 - A finite-play GIF below a popup plays its run again after the popup closes.
-- Kitty, tmux and screen are untested. Under tmux or screen, glass is off. Under tmux, notifications go through passthrough (checked only in a recorded byte stream); under screen they are off.
+- Kitty, tmux and screen are untested. Under tmux or screen, glass is off. In herdr, glass works with a few settings, but nothing the terminal animates moves (see [Running as a herdr plugin](#running-as-a-herdr-plugin)). Under tmux, notifications go through passthrough (checked only in a recorded byte stream); under screen they are off.
 - Glass uses private Textual API (see [textual-glass's Limitations](../textual-glass/README.md#limitations)); both packages pin `textual>=8.2,<9`.
