@@ -537,7 +537,7 @@ Quitting the app closes its pane.
 | | |
 | --- | --- |
 | Works | The backdrop, panel borders, gauges and the header band, lined up with the text. Beacons, as stills. Values that change (glass edits its images in place). Alert popups. |
-| Doesn't work | Anything the terminal animates by itself stays on its first frame: herdr forwards images and placements, but no animation frames or frame control. Beacons don't pulse (seen). By the same reasoning, looping alert pictures, `full` motion's ambient effects, flourishes and the week in review's scenes won't play as in Ghostty (not tried). |
+| Doesn't work | Anything the terminal animates by itself stays on its first frame: from what we saw, and the commands in herdr's binary, it forwards images and placements, but no animation frames or frame control. Beacons don't pulse (seen). By the same reasoning, looping alert pictures, `full` motion's ambient effects, flourishes and the week in review's scenes won't play as in Ghostty (not tried). |
 | Untested | How much the page dims under a popup: glass picks the scrim's strength with the same frame control, so expect less dimming than in Ghostty. Toasts. Glass turning itself on without `TEXTUAL_GLASS=on`: a herdr pane sets `TERM=xterm-256color` and `TERM_PROGRAM=herdr`, so glass has to ask the terminal. Desktop notifications: `notify="auto"` picks none in a herdr pane, so set `TEXTUAL_ORBITAL_NOTIFY=osc777` to try them. |
 
 ## Tests
