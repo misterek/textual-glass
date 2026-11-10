@@ -22,7 +22,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["textual-glass/tests", "textual-orbital/tests"]
+testpaths = ["textual-glass/tests", "textual-orbital/tests", "textual-orbital/examples/bridge/tests"]
 # Both packages have tests/test_units.py (and later test_pilot.py, test_pty.py): import by path, not by basename.
 addopts = "--import-mode=importlib"
 asyncio_default_fixture_loop_scope = "function"
@@ -36,11 +36,12 @@ select = ["E", "W", "F", "B", "I", "UP", "SIM"]
 ignore = ["SIM105", "SIM108"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["textual_glass", "textual_orbital"]
+known-first-party = ["bridge", "textual_glass", "textual_orbital"]
 known-local-folder = ["sample_app"]
 
 [tool.mypy]
-files = ["textual-glass/src", "textual-orbital/src"]
+files = ["textual-glass/src", "textual-orbital/src", "textual-orbital/examples/bridge"]
+mypy_path = ["textual-orbital/examples/bridge"]  # the bridge example's own modules: bridge, app, tests, tools
 python_version = "3.10"
 disallow_untyped_defs = true
 warn_unused_ignores = true

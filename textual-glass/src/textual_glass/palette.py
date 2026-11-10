@@ -13,6 +13,9 @@ from textual.color import Color, ColorParseError
 if TYPE_CHECKING:
     from textual.app import App
 
+#: The public names: the theme's colours (``ctx.palette``) and the helpers an app's items use (README, "Items").
+__all__ = ["RGB", "Palette", "border_pair", "hex_of", "luminance", "mix"]
+
 RGB = tuple[int, int, int]
 BackgroundOption = Union[str, Sequence[str], None]  # noqa: UP007 - a runtime alias on 3.10
 

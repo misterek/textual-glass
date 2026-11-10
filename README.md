@@ -69,7 +69,7 @@ This directory is a [uv](https://docs.astral.sh/uv/) workspace with both package
 
 ```sh
 uv sync --all-packages     # both packages (editable) and the dev tools
-uv run pytest              # both test suites: units, pilot and real-pty tests (a few minutes)
+uv run pytest              # both test suites and the bridge example's: units, pilot and real-pty tests (a few minutes)
 uv run ruff check .
 uv run mypy
 ```
@@ -80,7 +80,10 @@ Try the examples (in Ghostty):
 uv run python textual-glass/examples/showcase/app.py
 uv run python textual-glass/examples/flourishes/app.py
 uv run python textual-orbital/examples/console/app.py
+uv run python textual-orbital/examples/bridge/app.py     # Claude Code and Codex sessions as crew on a bridge
 ```
+
+The bridge ([`textual-orbital/examples/bridge`](textual-orbital/examples/bridge/README.md)) is also a starting point to copy: its README says how to hook it up to Claude Code and Codex, replace its crew, and move it into a project of your own.
 
 Read [`AGENTS.md`](AGENTS.md) before changing anything.
 

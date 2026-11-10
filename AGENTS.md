@@ -47,7 +47,7 @@ Each step on the app thread is guarded on its own: what raises goes to `OrbitalA
 | `uv.lock` | One lock file for the workspace. |
 | `LICENSE` | MIT-0 (MIT No Attribution). Each package carries a copy. |
 | `textual-glass/` | `src/textual_glass/` (the package), `tests/`, `examples/showcase/` (a two-view demo app), `examples/flourishes/` (every flourish over a small dashboard), `examples/scenes/` (a small scene over a panel), `examples/week/` (the week in review, the space scene, over a page), `docs/screenshots/`. |
-| `textual-orbital/` | `src/textual_orbital/` (the package), `tests/`, `examples/console/` (Mission Console, the demo dashboard), `docs/screenshots/`. |
+| `textual-orbital/` | `src/textual_orbital/` (the package), `tests/`, `examples/console/` (Mission Console, the demo dashboard), `examples/bridge/` (Claude Code and Codex sessions as crew on a bridge: a self-contained example with its own tests, wired into the workspace's pytest, ruff and mypy), `docs/screenshots/`. |
 
 In the workspace, orbital's dependency on textual-glass resolves to the sibling directory (`[tool.uv.sources] textual-glass = { workspace = true }` in `textual-orbital/pyproject.toml`).
 
@@ -57,9 +57,9 @@ From the repository root (this directory):
 
 ```sh
 uv sync --all-packages        # both packages, editable, plus the dev tools
-uv run pytest                 # both test suites: units, pilot and pty tests (about 4 minutes)
+uv run pytest                 # both test suites and the bridge example's: units, pilot and pty tests (about 6 minutes)
 uv run ruff check .
-uv run mypy                   # both src/ trees
+uv run mypy                   # both src/ trees and the bridge example
 ```
 
 Narrower runs:

@@ -96,6 +96,12 @@ The demo world replays a script, so every kind of alert shows up within the firs
 
 The rules behind the alerts: the library's `WaitingRule`, plus `ReleaseFailedRule` and `IncidentRule` in `examples/console/rules.py`.
 
+**The bridge** (`examples/bridge/`) is a second, smaller example: every Claude Code and Codex session on your machine is a crew member at a console on a starship bridge, raising a hand when it needs you. It uses orbital's theme and ages over glass's sprites, has its own hook and tests, and is made to be copied: its [README](examples/bridge/README.md) says how to run it, replace the crew, and hook it up to both agents.
+
+```sh
+uv run python textual-orbital/examples/bridge/app.py
+```
+
 ### The pages
 
 **1 · Console**, the default, built for a corner window. Claude Code beacons; the needs-attention queue; gauges (LOAD: the queue's load, PAGES: InfraMonitor items, RELEASES: the share of moving releases that are healthy); the release track. At 140x45 it adds a SELECTED card for the highlighted row; under 80 columns the side column folds into a one-line track summary.

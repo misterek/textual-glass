@@ -1,5 +1,5 @@
 """Write approximate screenshots of every page, the alert, a toast, the text fallback and the
-Replay page's summary.
+Replay page's summary, and of the bridge example at red alert and calm.
 
     uv run python textual-orbital/tests/screenshots.py              # into textual-orbital/docs/screenshots
     uv run python textual-orbital/tests/screenshots.py /tmp/shots
@@ -33,6 +33,9 @@ REPLAY_STEPS = [Step(4.0, "alert"), Step(0.0, "esc", "escape"), Step(1.0, "k5", 
 #: An alert as a toast: the startup wait stays a popup, then t raises a test alert.
 TOAST_STEPS = [Step(4.0, "popup"), Step(0.0, "esc", "escape"), Step(1.0, "t", "t"), Step(1.8, "toast"),
                Step(0.0, "q", "q")]
+#: The bridge example, paused so the picture holds: 12.5 minutes into its script (red alert) and 33.5 (calm).
+BRIDGE = [sys.executable, os.path.join(ROOT, "examples", "bridge", "app.py"), "--at"]
+BRIDGE_STEPS = [Step(3.0, "start"), Step(0.0, "pause", " "), Step(0.8, "bridge"), Step(0.0, "q", "q")]
 
 
 def main() -> None:
@@ -45,6 +48,8 @@ def main() -> None:
     paths += shoot([*APP, "--plain"], ROOT, SIZES[0], STEPS, ("console",), args.out, prefix="plain_")
     paths += shoot([*APP, "--alert-style", "toast"], ROOT, SIZES[0], TOAST_STEPS, ("toast",), args.out)
     paths += shoot(["env", "TEXTUAL_GLASS_MOTION=minimal", *APP], ROOT, SIZES[0], REPLAY_STEPS, ("replay",), args.out)
+    paths += shoot([*BRIDGE, "12.5"], ROOT, SIZES[0], BRIDGE_STEPS, ("bridge",), args.out)
+    paths += shoot([*BRIDGE, "33.5"], ROOT, SIZES[0], BRIDGE_STEPS, ("bridge",), args.out, prefix="calm_")
     print("\n".join(paths))
 
 

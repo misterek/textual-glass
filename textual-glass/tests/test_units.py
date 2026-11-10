@@ -225,6 +225,18 @@ def test_render_layer_has_no_textual_imports() -> None:
         assert not re.search(r"^\s*(from|import) textual\b", source, re.M), module.__name__
 
 
+def test_an_app_draws_its_own_items_with_public_names() -> None:
+    """What an app needs for an item or a big sprite of its own (README, "Items" and "Sprites") is public."""
+    import textual_glass
+    from textual_glass import engine, palette
+
+    assert set(render.__all__) == {"Box", "Canvas", "Colour", "FRect", "Grid", "Item", "col", "x_gradient"}
+    assert set(palette.__all__) == {"RGB", "Palette", "border_pair", "hex_of", "luminance", "mix"}
+    for module in (render, palette):
+        assert all(hasattr(module, name) for name in module.__all__), module.__name__
+    assert "SPRITE_MAX_PX" in textual_glass.__all__ and textual_glass.SPRITE_MAX_PX == engine.SPRITE_MAX_PX == 192
+
+
 # -- palette from the theme ----------------------------------------------------------
 
 

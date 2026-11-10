@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### textual-glass
+
+- Public names for an app that draws its own items or big sprites, so it needn't import internals. Nothing else changes.
+  - `textual_glass.SPRITE_MAX_PX` (192): the most terminal pixels a side glass draws a sprite's frames at; the terminal stretches bigger ones, so cut a big picture into sprites at most that wide.
+  - `__all__` in `textual_glass.render` (`Item`, `Grid`, `Canvas`, `Box`, `FRect`, `Colour`, `col`, `x_gradient`) and in `textual_glass.palette` (`Palette`, `RGB`, `mix`, `border_pair`, `hex_of`, `luminance`). The README's "Items" section lists them.
+
+### textual-orbital
+
+- A second example, `examples/bridge/`: every Claude Code and Codex session on the machine is a crew member at a console on a starship bridge, raising a hand when it needs you, from a hook of its own (`bridge/hook.py`, stdlib only, `--agent claude|codex`). `app.py --print-hooks claude|codex` prints the registration with the checkout's paths. Self-contained so it can be copied into a project of its own; its tests, ruff and mypy run with the workspace's. Codex support is untested against a real session.
+
 ## textual-glass 0.5.0 and textual-orbital 0.3.0 (2026-10-29)
 
 Scenes, and the week in review built on them: a show that plays the week's work as ships arriving at a planet, then holds its last frame as the week's summary. Nothing changes for an app that doesn't use them. Upgrade both together: orbital 0.3 needs glass 0.5.

@@ -1,0 +1,50 @@
+{
+  "name": "smooth",
+  "style": "smooth",
+  "about": "The default pack's six crew members, drawn smooth: shapes and light at whatever size the station is.",
+  "colors": {
+    "console": "#3c4766",
+    "chair": "#4b4569",
+    "captain": "#3d3a63",
+    "mug": "#f1ece2",
+    "mug_band": "#e86a6a",
+    "tea": "#8a5530",
+    "waiting": "#ffb238",
+    "waiting_dim": "#c27a1e",
+    "indicator_off": "#2a2738",
+    "space_top": "#0c1636",
+    "space_bottom": "#03050e",
+    "nebula": "#4a2a8a",
+    "star": "#eef3ff",
+    "planet": "#6fcab8",
+    "planet_dark": "#15304a",
+    "ring": "#c9b8f0",
+    "alert": "#ff3048",
+    "bezel": "#353d5a"
+  },
+  "ensigns": [
+    {"colors": {"skin": "#f0c8a4", "hair": "#4a3426"}, "hair_style": "crop"},
+    {"colors": {"skin": "#a06a46", "hair": "#1e1820"}, "hair_style": "bob"},
+    {"colors": {"skin": "#d8a27a", "hair": "#c88a3a"}, "hair_style": "spiky"}
+  ],
+  "members": [
+    {"id": "ash", "name": "Ash", "uniform": "#36c2a6",
+     "colors": {"skin": "#f6d2b6", "hair": "#c45e2a"},
+     "hair_style": "bob", "extras": ["freckles"]},
+    {"id": "bo", "name": "Bo", "uniform": "#f27a56",
+     "colors": {"skin": "#8e5a3a", "hair": "#241c22", "eyes": "#0c0709"},
+     "hair_style": "curly", "build": {"wide": 1}},
+    {"id": "cy", "name": "Cy", "uniform": "#9c7cec",
+     "colors": {"skin": "#e2ac82", "hair": "#4a2e1e"},
+     "hair_style": "spiky", "extras": ["glasses"], "build": {"tall": 1}},
+    {"id": "dee", "name": "Dee", "uniform": "#4aa8f2",
+     "colors": {"skin": "#6b4431", "hair": "#1b1519", "eyes": "#0c0709"},
+     "hair_style": "bun", "extras": ["headset"]},
+    {"id": "eli", "name": "Eli", "uniform": "#a2cf4a",
+     "colors": {"skin": "#f7dcc8", "hair": "#d4934a"},
+     "hair_style": "crop", "extras": ["beard"], "build": {"wide": 2}},
+    {"id": "fen", "name": "Fen", "uniform": "#e86aa6",
+     "colors": {"skin": "#c8946a", "hair": "#e2e5ee"},
+     "hair_style": "ponytail", "build": {"wide": -1, "tall": 1}}
+  ]
+}

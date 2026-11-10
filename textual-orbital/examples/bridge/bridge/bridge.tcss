@@ -1,0 +1,21 @@
+/* The bridge. Plain Textual CSS: nothing here knows about glass (the border is drawn as a glass panel). */
+
+#bridge {
+    height: 1fr;
+    border: round $primary;
+    border-title-color: $foreground;
+    border-title-style: bold;
+}
+
+#bridge.-red-alert {
+    border: round $error;
+    border-title-color: $error;
+}
+
+#keys {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

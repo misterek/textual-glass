@@ -23,7 +23,7 @@ pixels under the text. Everywhere else it is exactly stock Textual.
 """
 
 from .detection import Support, detect
-from .engine import MOTIONS, GlassEngine
+from .engine import MOTIONS, SPRITE_MAX_PX, GlassEngine
 from .flourishes import FLOURISHES
 from .glass import Glass, PixelContext, PixelMixin, terminal_write
 from .hard_exit import on_hard_exit
@@ -44,7 +44,8 @@ from .widgets import (
 
 __version__ = "0.5.0"
 __all__ = [
-    "FLOURISHES", "MOTIONS", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard", "LoadedImage",
-    "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile",
-    "StatValue", "Support", "Telemetry", "__version__", "detect", "load_image", "on_hard_exit", "terminal_write",
+    "FLOURISHES", "MOTIONS", "SPRITE_MAX_PX", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard",
+    "LoadedImage", "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView",
+    "StatTile", "StatValue", "Support", "Telemetry", "__version__", "detect", "load_image", "on_hard_exit",
+    "terminal_write",
 ]

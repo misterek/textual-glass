@@ -28,6 +28,9 @@ import numpy as np
 
 from .palette import RGB, rgb
 
+#: The public names: what an app needs to draw an item of its own (README, "Items").
+__all__ = ["Box", "Canvas", "Colour", "FRect", "Grid", "Item", "col", "x_gradient"]
+
 F32 = np.float32
 Array = np.ndarray
 Window = tuple[Array, Array, Array]  # a view of the canvas, its x and y pixel centres

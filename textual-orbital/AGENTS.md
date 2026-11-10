@@ -30,6 +30,7 @@ Elsewhere in `textual-orbital/`:
 | `examples/console/pages.py`, `console.tcss` | Its five pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`; the Replay page plays the week in review (`p` again, `l` the next look). |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`; `NeedsYouRule`, the library's `WaitingRule` with its alerts kept popups (`style="modal"`). |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, and `history(first, last)`, a slow call for older weeks. Only for the demo and the tests; don't import it from real code. |
+| `examples/bridge/` | The bridge: Claude Code and Codex sessions as crew on a starship bridge, from a hook of its own (`bridge/hook.py`). Self-contained so it can be copied out: its own `README.md`, `PACKS.md` (the crew) and `tests/` (in the workspace's `testpaths`). It imports the package as `bridge` (its `tests/conftest.py` puts it on the path). |
 | `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_replay.py` (`WeekReplay`), `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
 ## Build a dashboard
