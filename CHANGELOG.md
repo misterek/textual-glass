@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## textual-glass 0.6.0 (2026-11-09)
+
+Public names for an app that draws its own items, and the bridge, a second orbital example. Nothing changes for an existing app; textual-orbital stays 0.3.0 (only its examples and docs changed).
 
 ### textual-glass
 
@@ -8,7 +10,7 @@
   - `textual_glass.SPRITE_MAX_PX` (192): the most terminal pixels a side glass draws a sprite's frames at; the terminal stretches bigger ones, so cut a big picture into sprites at most that wide.
   - `__all__` in `textual_glass.render` (`Item`, `Grid`, `Canvas`, `Box`, `FRect`, `Colour`, `col`, `x_gradient`) and in `textual_glass.palette` (`Palette`, `RGB`, `mix`, `border_pair`, `hex_of`, `luminance`). The README's "Items" section lists them.
 
-### textual-orbital
+### textual-orbital (examples and docs only)
 
 - A second example, `examples/bridge/`: every Claude Code and Codex session on the machine is a crew member at a console on a starship bridge, raising a hand when it needs you, from a hook of its own (`bridge/hook.py`, stdlib only, `--agent claude|codex`). `app.py --print-hooks claude|codex` prints the registration with the checkout's paths. Self-contained so it can be copied into a project of its own; its tests, ruff and mypy run with the workspace's. Codex support is untested against a real session.
 
