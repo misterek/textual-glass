@@ -1,7 +1,7 @@
 """The showcase's two views.
 
-* ``StockView``: nothing but stock Textual widgets (DataTables, an OptionList,
-  ProgressBars, Markdown, a RichLog). With glass they get pixel chrome for
+* ``StockView``: nothing but stock Textual widgets (an Input, DataTables, an
+  OptionList, ProgressBars, Markdown, a RichLog). With glass they get pixel chrome for
   free; the code doesn't know glass exists.
 * ``PixelView``: the same world on textual-glass's own widgets (``GlassPanel``,
   ``SelectList``, ``RingGauge``, ``Telemetry``, ``StatTile``, ``ProgressArc``,
@@ -12,14 +12,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 from rich.text import Text
-from textual import events
+from textual import events, on
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.widgets import DataTable, Label, Markdown, OptionList, ProgressBar, RichLog
+from textual.widgets import DataTable, Input, Label, Markdown, OptionList, ProgressBar, RichLog
 from textual.widgets.option_list import Option
 from world import (
     ACTIVITY,
@@ -98,9 +99,15 @@ class View(Vertical):
 class StockView(View):
     """Stock Textual widgets only."""
 
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("slash", "filter", "Filter"),
+        Binding("escape", "leave_filter", "Back to the services", show=False),
+    ]
+
     def compose(self) -> ComposeResult:
         with Horizontal():
             with Vertical(id="stock-left"):
+                yield Input(placeholder="/ filter services by name, team or host", id="filter")
                 yield DataTable(id="services", cursor_type="row", zebra_stripes=True)
                 yield DataTable(id="incidents", cursor_type="row")
                 yield RichLog(id="activity", min_width=20, wrap=False)
@@ -121,6 +128,7 @@ class StockView(View):
         self.query_one("#rollout").border_title = "Rollouts"
         self.query_one("#runbook").border_title = "Runbook"
         self._wide: bool | None = None
+        self._filter = ""
         self._layout: tuple[int, int] = (0, 0)
         self._world: World | None = None
         self._tones: Tones | None = None
@@ -141,6 +149,23 @@ class StockView(View):
 
     def focus_default(self) -> None:
         self.query_one("#services", DataTable).focus()
+
+    def action_filter(self) -> None:
+        self.query_one("#filter", Input).focus()
+
+    def action_leave_filter(self) -> None:
+        if self.query_one("#filter", Input).has_focus:
+            self.focus_default()
+
+    @on(Input.Changed, "#filter")
+    def _filter_changed(self, event: Input.Changed) -> None:
+        self._filter = event.value.strip().lower()
+        if self._world is not None and self._tones is not None:
+            self._services(self._world, self._tones, rebuild=False)
+
+    @on(Input.Submitted, "#filter")
+    def _filter_done(self) -> None:
+        self.focus_default()
 
     def current(self) -> str | None:
         table = self.screen.focused
@@ -169,6 +194,7 @@ class StockView(View):
     def _services(self, world: World, tones: Tones, rebuild: bool) -> None:
         table = self.query_one("#services", DataTable)
         current = table.coordinate_to_cell_key(table.cursor_coordinate).row_key if table.row_count else None
+        shown = [s for s in world.services if self._filter in f"{s.key} {s.team} {s.host}".lower()]
         table.clear(columns=rebuild)
         wide = bool(self._wide)
         if rebuild:
@@ -182,7 +208,7 @@ class StockView(View):
                 table.add_column("Load", key="load")
                 table.add_column("Req/s", key="rps")
             table.add_column("Host", key="host")
-        for s in world.services:
+        for s in shown:
             colour = tones.state_text(s.state)
             cells: list[Any] = [Text(s.key, style="bold"), Text(f"● {s.label}", style=colour)]
             if wide:
@@ -194,10 +220,11 @@ class StockView(View):
                 cells.append(Text(fmt_rps(s.rps).rjust(5), style=tones.muted))
             cells.append(Text(s.host, style=tones.muted))
             table.add_row(*cells, key=s.key)
-        if current is not None:  # the cursor stays on its service when the order changes
+        if current is not None and current in table.rows:  # the cursor stays on its service when the order changes
             table.move_cursor(row=table.get_row_index(current), animate=False)
         worst = world.services[0]
-        table.border_subtitle = f"{len(world.services)} services · {worst.key} {worst.label}"
+        count = f"{len(shown)} of {len(world.services)}" if self._filter else str(len(world.services))
+        table.border_subtitle = f"{count} services · {worst.key} {worst.label}"
 
     def _incidents(self, tones: Tones, rebuild: bool) -> None:
         table = self.query_one("#incidents", DataTable)

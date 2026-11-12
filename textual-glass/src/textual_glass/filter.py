@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
 RGB = tuple[int, int, int]
 _DEFAULT_BG = Style(bgcolor=RichColor.default())
+#: The glyphs of Textual's ``tall`` border. A run of nothing else is border, not text.
+TALL_GLYPHS = "\u258a\u258e\u2594\u2581"
 _BLANK = Style(bgcolor=RichColor.default(), underline=False, strike=False, reverse=False, overline=False)
 
 
@@ -51,13 +53,24 @@ class Rules:
     Textual's ANSI-to-truecolor filter has turned its default backgrounds into
     the ANSI theme's background colour on the way, so that colour goes in
     ``owned`` to be turned back into the default."""
+    caret: RGB | None = None
+    """An ``Input``'s cursor background. Glass draws the caret in pixels, so the cell under it
+    takes the style of the text after it: Textual's blink then changes nothing on screen."""
+    frame: bool = False
+    """Blank the glyphs of a ``tall`` border (an ``Input``'s default): glass draws it as a panel."""
 
     def apply(self, segments: list[Segment]) -> list[Segment]:
-        owned, blank, dim = self.owned, self.blank, self.dim
+        owned, blank, dim, caret, frame = self.owned, self.blank, self.dim, self.caret, self.frame
         out: list[Segment] = []
         append = out.append
-        for segment in segments:
+        for index, segment in enumerate(segments):
             text, style, control = segment
+            if frame and text and not control and not text.strip(TALL_GLYPHS):
+                append(Segment(" " * len(text), _BLANK if style is None else _blanked(style)))
+                continue
+            if caret is not None and style is not None and not control and _triplet(style) == caret:
+                after = segments[index + 1].style if index + 1 < len(segments) else None
+                style = after if after is not None else style
             if control or style is None:
                 if blank and not control and text:
                     append(Segment(" " * cell_len(text), _DEFAULT_BG))
@@ -67,9 +80,7 @@ class Rules:
             if blank:
                 append(Segment(" " * cell_len(text), _blanked(style)))
                 continue
-            bg = style.bgcolor
-            triplet = bg.triplet if bg is not None else None
-            is_owned = triplet is not None and (triplet[0], triplet[1], triplet[2]) in owned
+            is_owned = _triplet(style) in owned
             if dim is not None:
                 if is_owned:
                     style = _defaulted(style)
@@ -85,6 +96,13 @@ class Rules:
 
 
 NO_RULES = Rules()
+
+
+def _triplet(style: Style) -> RGB | None:
+    """A style's background as RGB (None for no background, the default or an ANSI colour)."""
+    bg = style.bgcolor
+    triplet = bg.triplet if bg is not None else None
+    return None if triplet is None else (triplet[0], triplet[1], triplet[2])
 
 
 @lru_cache(maxsize=4096)

@@ -8,7 +8,8 @@ Run it from ``textual-glass/`` under the repository root (in Ghostty, for the gl
 
 Keys: ``1`` stock widgets, ``2`` textual-glass's pixel widgets, ``enter``
 opens the row under the cursor, ``m`` the "ready to ship" modal (``enter``
-there ships the release), ``r`` restarts a service, ``ctrl+p`` the command
+there ships the release), ``r`` restarts a service, ``n`` writes a note for
+it, ``/`` filters the services (view 1; ``esc`` goes back), ``ctrl+p`` the command
 palette, ``f9`` the motion level, ``shift+f9`` glass off and on, ``ctrl+z``
 suspends to the shell (``fg`` comes back), ``q`` quits.
 """
@@ -21,7 +22,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from dialogs import ServiceScreen, ShipScreen
+from dialogs import NoteScreen, ServiceScreen, ShipScreen
 from textual import on
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding, BindingType
@@ -87,6 +88,7 @@ class Showcase(App[None]):
         Binding("2", "view('pixels')", "Pixels"),
         Binding("m", "ship", "Ship"),
         Binding("r", "restart", "Restart"),
+        Binding("n", "note", "Note"),
         Binding("q", "quit", "Quit"),
         Binding("ctrl+z", "suspend_process", "Suspend", show=False),  # Textual's own action: SIGTSTP
     ]
@@ -183,6 +185,17 @@ class Showcase(App[None]):
         self.world.services.sort(key=lambda svc: -svc.attention)
         self.notify(f"{key} is healthy again (p95 {fmt_ms(s.p95)})", title="Restart")
         self.redraw()
+
+    def action_note(self) -> None:
+        key = self.view.current()
+        if key is not None:
+            self.push_screen(NoteScreen(self.world.service(key), self.tones), lambda note: self._noted(key, note))
+
+    def _noted(self, key: str, note: str | None) -> None:
+        if note:
+            self.world.update(key, note=note)
+            self.notify(note, title=f"Note for {key}")
+            self.redraw()
 
     def open_service(self, key: str | None) -> None:
         if key is None:

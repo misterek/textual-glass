@@ -29,6 +29,7 @@ from textual_glass.items import (
     Area,
     Badge,
     Bars,
+    Caret,
     Dot,
     HeaderBar,
     HeaderStrip,
@@ -40,6 +41,7 @@ from textual_glass.items import (
     Ring,
     Rows,
     Rule,
+    Selection,
     Signal,
     Spine,
     Surface,
@@ -380,6 +382,8 @@ EDGE_SAMPLES: list[Item] = [
     Rows(5, 40, ((8, 1), (10, 1), (12, 2)), (224, 224, 224), 0.6),
     Pill((5, 6, 20, 1), "#ff4d6d"), Pill((5, 6, 20, 2), CYAN, focused=False),
     Pill((5, 6.4, 20, 1), CYAN, solid=True),
+    Caret(12, 6, CYAN), Caret(12.4, 6, "#ff4d6d", dark=False),
+    Selection((5, 6, 7, 1), CYAN), Selection((5, 6, 1, 1), CYAN),
     Badge((5, 6, 6, 1), (254, 166, 43)), Badge((5, 6, 1, 1), (254, 166, 43)),
     Progress((6, 12, 20, 1), 1.0, (254, 166, 43), (255, 120, 60)),
     Progress((6, 12, 20, 1), 0.02, (254, 166, 43), (255, 120, 60), dark=False),
@@ -660,6 +664,7 @@ async def test_every_hook_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     hooks.wrap_end_update(bare, lambda: None)()  # type: ignore[arg-type]
     assert hooks.option_lines(bare) == []  # type: ignore[arg-type]
     assert hooks.row_label_width(bare) == 0  # type: ignore[arg-type]
+    assert hooks.input_cell(bare, 3) == 3  # type: ignore[arg-type]
     assert hooks.border_label_length(SimpleNamespace(border_title="[b]Hi[/b]", border_subtitle=None)) == 2  # type: ignore[arg-type]
     screen = SimpleNamespace(_compositor=SimpleNamespace(), walk_children=lambda kind: [])
     assert hooks.visible_widgets(screen) == []  # type: ignore[arg-type]

@@ -13,14 +13,18 @@ from typing import Any
 
 import numpy as np
 import pytest
+from textual.app import App, ComposeResult
+from textual.containers import Vertical
 from textual.geometry import Region
+from textual.screen import ModalScreen
 from textual.strip import Strip
+from textual.validation import Number
 from textual.widget import Widget
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, Input, Label, Static
 from textual.widgets._footer import FooterKey
 
+from textual_glass import Glass, kitty
 from textual_glass import items as R
-from textual_glass import kitty
 from textual_glass.detection import Support
 from textual_glass.engine import MAIN, Z0
 from textual_glass.filter import NO_RULES, GlassFilter
@@ -353,7 +357,7 @@ async def test_scrolling_moves_the_pill_with_the_rows(output: Output) -> None:
 
 
 async def test_animated_image_is_played_by_the_terminal(output: Output) -> None:
-    from textual.app import App, ComposeResult
+    from textual.app import App
 
     from textual_glass import Glass
 
@@ -675,7 +679,7 @@ async def test_background_job_done_can_push_a_screen(output: Output) -> None:
 async def test_app_class_css_needs_scoped_css_false(output: Output) -> None:
     """Rule 11: ``DEFAULT_CSS`` is scoped to its widget, so a rule that starts at
     the App (``App.-textual-glass Probe``) only matches with ``SCOPED_CSS = False``."""
-    from textual.app import App, ComposeResult
+    from textual.app import App
 
     from textual_glass import Glass
 
@@ -937,7 +941,7 @@ class Dots(PixelWidget):
 
 
 def _churn_app() -> Any:
-    from textual.app import App, ComposeResult
+    from textual.app import App
     from textual.containers import Horizontal
 
     from textual_glass import Glass
@@ -1030,7 +1034,7 @@ def _sprite_px(engine: Any, cols: int, rows: int) -> tuple[int, int]:
 async def test_a_sprite_whose_maker_raises_is_tried_again_later(output: Output) -> None:
     """G8: the error is counted, the widget keeps its fallback glyph, nothing is
     retried in a hot loop, and a later render after the delay tries again."""
-    from textual.app import App, ComposeResult
+    from textual.app import App
 
     from textual_glass import Glass
     from textual_glass.sprites import beacon_frames
@@ -1155,3 +1159,191 @@ async def test_suspend_hands_over_a_clean_terminal_and_resume_draws_everything_a
         app.app_resume_signal.publish(app)
         await settle(app, pilot)
         assert not engine.active
+
+
+# -- the stock Input ------------------------------------------------------------------------------
+
+
+class Search(Input):
+    """A subclass: glass matches widgets by class name, so it counts as an Input."""
+
+
+class Ask(ModalScreen[None]):
+    DEFAULT_CSS = """
+    Ask { align: center middle; }
+    #ask { width: 50; height: auto; border: round $accent; background: $panel; padding: 1 2; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ask"):
+            yield Label("Rename the release")
+            yield Input(placeholder="a new name", id="answer")
+
+
+class Fields(App[None]):
+    CSS = ".card { border: round $primary; height: 5; }"
+
+    def compose(self) -> ComposeResult:
+        yield Static("A card", classes="card")
+        yield Search(placeholder="search hosts", id="search")
+        yield Input("12x", validators=[Number()], id="count")
+
+    def on_mount(self) -> None:
+        self.query_one("#count", Input).validate("12x")
+        self.query_one("#search").focus()
+
+
+class GlassFields(Glass, Fields):
+    pass
+
+
+TALL = "▊▎▔▁"
+
+
+def _cells(widget: Widget) -> list[list[tuple[str, Any]]]:
+    """Every character of the widget's lines with its style, borders included."""
+    lines = widget.render_lines(Region(0, 0, widget.region.width, widget.region.height))
+    return [[(char, segment.style) for segment in line for char in segment.text] for line in lines]
+
+
+def _explicit_backgrounds(widget: Widget) -> set[str]:
+    """The cell backgrounds that are not the terminal default: the ones that would hide the glass."""
+    styles = [style for line in _cells(widget) for _, style in line if style is not None]
+    return {style.bgcolor.name for style in styles if style.bgcolor is not None and not style.bgcolor.is_default}
+
+
+def _panel(layer: Any, widget: Widget) -> R.Panel:
+    return next(i for i in layer.static if isinstance(i, R.Panel) and i.ident == f"panel:{id(widget)}")
+
+
+def _caret(layer: Any) -> R.Caret:
+    (caret,) = (i for i in layer.dynamic if isinstance(i, R.Caret))
+    return caret
+
+
+async def _glide(app: Any, pilot: Any) -> None:
+    """Let the caret finish its slide."""
+    for _ in range(20):
+        app.glass.tick()
+        await asyncio.sleep(0.016)
+    await settle(app, pilot)
+
+
+async def _blinks(widget: Input, seconds: float = 1.3) -> set[bool]:
+    """Wait while Textual blinks the cursor; the states it went through."""
+    seen = set()
+    for _ in range(int(seconds / 0.05)):
+        seen.add(bool(widget._cursor_visible))
+        await asyncio.sleep(0.05)
+    return seen
+
+
+async def test_input_is_a_glass_panel_with_a_still_caret(output: Output) -> None:
+    app = GlassFields()
+    async with app.run_test(size=SIZE) as pilot:
+        await start(app, pilot)
+        layer = app.glass.layers[MAIN]
+        search, count = app.query_one("#search", Input), app.query_one("#count", Input)
+        panel = _panel(layer, search)
+        assert panel.edges == (R.LINE,) * 4 and panel.focused, "the tall border is a glass panel, lit by focus"
+        assert panel.rect == tuple(search.region) and panel.fill is not None
+        assert not _panel(layer, count).focused
+        content = search.content_region
+        caret = _caret(layer)
+        assert (caret.x, caret.y) == (content.x, content.y) and caret.ident == f"caret:{id(search)}"
+        assert caret.color == to_rgb(app.theme_variables["block-cursor-background"], (0, 0, 0))
+
+        # every cell is transparent, the border's glyphs are gone, the placeholder is still text
+        assert not _explicit_backgrounds(search)
+        text = ["".join(t for t, _ in line) for line in _cells(search)]
+        assert not any(glyph in line for line in text for glyph in TALL) and "search hosts" in text[1]
+        # the cursor's cell looks like the placeholder after it, so the blink changes nothing on screen
+        shown = _cells(search)
+        search._cursor_visible = not search._cursor_visible
+        assert _cells(search) == shown
+        colours = {style.color.name for t, style in shown[1] if t.strip()}
+        assert len(colours) == 1, "the first letter of the placeholder is as dim as the rest"
+
+        # focused and idle: Textual blinks, glass sends nothing
+        await settle(app, pilot)
+        mark = output.mark()
+        assert await _blinks(search) == {True, False}
+        await settle(app, pilot)
+        assert output.since(mark) == "", "a focused input nobody types in is silent"
+
+        # typing moves the caret with in-place edits
+        await pilot.press("w", "e", "b")
+        await _glide(app, pilot)
+        sent = output.since(mark)
+        assert "a=t" not in sent and re.search(r"a=f,i=\d+,r=1", sent), "edits, no re-upload"
+        assert _caret(app.glass.layers[MAIN]).x == content.x + 3
+        assert "web" in search.render_line(0).text
+
+        # a selection is a band behind the text, and its cells are transparent too
+        await pilot.press("shift+left", "shift+left")
+        await _glide(app, pilot)
+        layer = app.glass.layers[MAIN]
+        (band,) = (i for i in layer.dynamic if isinstance(i, R.Selection))
+        assert band.rect == (content.x + 1, content.y, 2, 1) and _caret(layer).x == content.x + 1
+        assert not _explicit_backgrounds(search)
+
+        # failed validation: the panel takes the theme's error colour, brighter with focus
+        error = app.glass.palette.error
+        blurred = _panel(layer, count).c1
+        await pilot.press("tab")
+        await _glide(app, pilot)
+        layer = app.glass.layers[MAIN]
+        assert count.has_class("-invalid") and _panel(layer, count).focused and _panel(layer, count).c1 == error
+        assert blurred != error and np.argmax(blurred) == np.argmax(error), "dimmer without focus, still red"
+        assert not _panel(layer, search).focused and _caret(layer).ident == f"caret:{id(count)}"
+        assert not any(isinstance(i, R.Surface) for i in layer.static), "no sheet under a panel"
+        assert output.model().errors == []
+
+        # glass off: stock Textual again
+        app.glass.deactivate()
+        await settle(app, pilot)
+        assert any(glyph in "".join(t for t, _ in line) for line in _cells(search) for glyph in TALL)
+        assert app.glass.rules(search) is NO_RULES
+
+
+async def test_input_in_a_modal_gets_the_same_glass(output: Output) -> None:
+    app = GlassFields()
+    async with app.run_test(size=(70, 22)) as pilot:
+        await start(app, pilot)
+        app.push_screen(Ask())
+        await settle(app, pilot)
+        await idle(app, pilot)
+        answer = app.screen.query_one("#answer", Input)
+        assert answer.has_focus
+        layer = app.glass.layers[(1, "main")]
+        content = answer.content_region
+        assert _panel(layer, answer).focused and _panel(layer, answer).edges == (R.LINE,) * 4
+        assert (_caret(layer).x, _caret(layer).y) == (content.x, content.y)
+        assert not _explicit_backgrounds(answer)
+
+        await pilot.press(*"orbit")
+        await _glide(app, pilot)
+        await asyncio.sleep(0.3)  # the scrim's fade
+        await settle(app, pilot)
+        assert _caret(app.glass.layers[(1, "main")]).x == content.x + 5
+        uploads = output.model().counts.get("t", 0)
+        mark = output.mark()
+        assert await _blinks(answer) == {True, False}
+        await settle(app, pilot)
+        assert output.since(mark) == "", "silent while it waits for a key, in a popup too"
+
+        await pilot.press("backspace", "left")
+        await _glide(app, pilot)
+        assert re.search(r"a=f,i=\d+,r=1", output.since(mark)) and output.model().counts.get("t", 0) == uploads
+        assert _caret(app.glass.layers[(1, "main")]).x == content.x + 3
+        assert output.model().errors == []
+
+
+async def test_plain_input_is_untouched() -> None:
+    app = Fields()
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        search = app.query_one("#search", Input)
+        assert any(glyph in "".join(t for t, _ in line) for line in _cells(search) for glyph in TALL)
+        cursor = search.get_component_rich_style("input--cursor").bgcolor
+        assert any(style.bgcolor == cursor for _, style in _cells(search)[1]), "Textual's own block cursor"

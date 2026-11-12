@@ -57,6 +57,15 @@ TOUR = [
     Step(1.2, "pixels_modal", "m"),
     Step(1.6, "pixels_close", "escape"),  # the modal over the pixel widgets: the sprite is dimmed
     Step(1.2, "stock_again", "1"),  # back to the stock widgets' page, from the page cache
+    Step(1.2, "filter", "/"),  # the stock Input over the services
+    Step(0.8, "filter_type", "edge"),
+    Step(1.0, "filter_idle"),
+    Step(2.0, "filter_clear", b"\x15"),  # ctrl+u: empty again, so every service is back
+    Step(0.5, "filter_close", "escape"),
+    Step(0.6, "note", "n"),  # the same Input in a popup
+    Step(1.2, "note_type", "retry"),
+    Step(1.0, "note_idle"),
+    Step(2.0, "note_close", "escape"),
     Step(1.2, "palette", "ctrl+p"),
     Step(1.2, "palette_type", "glass"),
     Step(1.0, "palette_close", "escape"),
@@ -187,6 +196,26 @@ def test_modal_scrim_dialog_and_image(tour: tuple[Capture, dict[str, Replay]]) -
     assert badge not in ("default", snaps["down"].cell_bgs()[row][4]), "the badge under the modal is dimmed"
     after = snaps["pixels"]
     assert all(p["z"] < Z_SCRIM_0 for p in _glass_placements(after)), "modal layers are gone after Escape"
+
+
+def test_typing_in_an_input_edits_in_place_and_waits_in_silence(tour: tuple[Capture, dict[str, Replay]]) -> None:
+    capture, snaps = tour
+    for name, text in (("filter", "edge"), ("note", "retry")):
+        typed = capture.between(capture.mark_time(f"{name}_type"), capture.mark_time(f"{name}_idle"))
+        assert b"a=t" not in typed and re.search(rb"a=f,i=\d+,r=1", typed), f"{name}: the caret moves with edits"
+        end = "filter_clear" if name == "filter" else "note_close"
+        waiting = capture.between(capture.mark_time(f"{name}_idle") + 0.3, capture.mark_time(end))
+        assert graphics_in(waiting) == 0, f"{name}: a focused input nobody types in sends no graphics"
+        rp = snaps[end]
+        row, at = next((y, m) for y in range(rp.size[1]) if (m := re.search(rf"\b{text}\b", rp.text(y))))
+        around = rp.cell_bgs()[row][at.start() - 2:at.end() + 2]  # the text, the padding and the cursor's cell
+        assert set(around) == {"default"}, f"{name}: no cursor block, the caret is pixels"
+        assert not any(glyph in rp.all_text() for glyph in "▊▎▔▁"), f"{name}: the tall border is glass"
+        assert not rp.model.errors
+    assert "3 of 14 services" in snaps["filter_clear"].all_text()
+    note = snaps["note_close"]
+    assert "Note for" in note.all_text() and any(z > Z_SCRIM_0 for z in (p["z"] for p in _glass_placements(note)))
+    assert "of 14 services" not in snaps["palette"].all_text(), "the filter was emptied: every service is back"
 
 
 def test_command_palette_gets_glass(tour: tuple[Capture, dict[str, Replay]]) -> None:
