@@ -35,6 +35,10 @@ uv run python textual-orbital/examples/bridge/app.py --live       # your own ses
 | `--pack DIR` | Another crew (see [Replace the crew](#replace-the-crew)). |
 | `--speed N` | The fake's time compression (default 20). |
 | `--plain` | Stock Textual, no glass: the same layout in text. |
+| `--sounds DIR` | Play the sound pack in `DIR` (see [Sounds](#sounds)). A pack that can't be read stops the app at startup, naming the problem. |
+| `--room` | Loop the pack's `room` tone while the window has focus. |
+| `--volume N` | The sounds' volume, 0 to 1 (default 1). |
+| `--quiet-hours 22-7` | No sounds between these local hours. |
 | `--print-hooks claude\|codex` | Print the hook registration for that agent, with this checkout's paths, and exit. |
 
 Without `--live` the app plays a fake bridge: made-up hook events go through the real hook into a temporary folder, and the app reads that folder exactly as it reads the real one. The script is a 40-minute loop (two real minutes at the default speed) in which four sessions and two visitors between them go through every state: subagents coming and going, a permission wait that escalates from a hand up to waving to standing, a question at the same time (red alert), a tool failure's spark, compacting, an error, a long idle that dozes off, and the visitors arriving and leaving. The second visitor is a Codex session: a permission, a failed model request and its retry, a question, an interrupt. Ages on screen are in the fake's compressed time.
@@ -47,6 +51,7 @@ Without `--live` the app plays a fake bridge: made-up hook events go through the
 | `e` | A turn dies on an error (in the fake) |
 | `x` | The newest session ends and leaves its station (in the fake) |
 | `space` | Pause the fake's script and its clock, and resume |
+| `m` | Mute the sounds (the room tone too), and unmute |
 | `q` | Quit |
 | `f9`, `shift+f9` | Glass's motion level; glass off and on |
 
@@ -59,6 +64,25 @@ What you see:
 - A pulsar plays over a station when its crew member raises a hand.
 
 The panel's title counts the crew, the waiting and the errors. A seventh session and beyond wait "below deck" until a station frees up.
+
+## Sounds
+
+With `--sounds DIR` the bridge plays a short sound when the crew does something. It brings no sounds of its own: `DIR` is a pack in textual-orbital's format (a folder with a `pack.json` naming a file per cue; textual-orbital's README, "Sounds"), and a cue the pack doesn't name stays silent. The cues (`bridge.app.CUES`), most important first:
+
+| Cue | When |
+| --- | --- |
+| `red-alert` | Red alert came on: two crew waiting, or an error. |
+| `hand-up` | A crew member raised a hand: a session waits for you. |
+| `error` | A session's turn ended in an error. |
+| `escalate` | Still waiting: waving after 2 minutes, standing after 10. |
+| `done` | A session finished its turn. |
+| `crew-in`, `crew-out` | A session started or ended. |
+| `ensign-out`, `ensign-in` | A subagent started or finished. |
+| `room` | Not a cue: a room tone, looped with `--room` while the window has focus. |
+
+What changed between two reads is one moment: its most important cue plays and the rest don't. The first read after startup only listens, so whoever is aboard already makes no sound. Cues of one kind share a cooldown, and `hand-up` shares one with a dashboard's own "needs you" sounds, so in an app that shows both, one wait chimes once. `m` mutes everything.
+
+Another app plays them the same way: `Bridge(sounds=app.sounds)` (an orbital `Sounds`), and `bridge.update(deck, quiet=True)` for the first read after the bridge was hidden a while, so what happened meanwhile makes no sound. Tests never play a sound: `tests/conftest.py`'s `no_sound` fixture sets `TEXTUAL_ORBITAL_SOUND=off` and fails a test that starts a real player.
 
 ## Replace the crew
 
@@ -212,7 +236,7 @@ Then `uv run pytest`. `--print-hooks` prints the new folder's paths; print the r
 | Path | What |
 | --- | --- |
 | `app.py` | Runs the app (`bridge.app.main`). |
-| `bridge/app.py`, `bridge/bridge.tcss` | The app: polls the state folder once a second and touches only the widgets whose look changed; the options, `--print-hooks`. What it shows is `Bridge` (the folder read, the sessions seated, a `Deck` updated), apart from the app, so another app can put the bridge on a page of its own. |
+| `bridge/app.py`, `bridge/bridge.tcss` | The app: polls the state folder once a second and touches only the widgets whose look changed; the options, `--print-hooks`; the sound cues (`CUES`, `cues_between`). What it shows is `Bridge` (the folder read, the sessions seated, a `Deck` updated), apart from the app, so another app can put the bridge on a page of its own. |
 | `bridge/hook.py` | The hook: events in, state files out. Its `EVENTS` lists what each agent sends. |
 | `bridge/state.py` | `Session`, `SessionReader` (re-reads only changed files), `pose_for`, `red_alert`, the seating chart. |
 | `bridge/fake.py` | The scripted fake bridge and the keys that drive it. |
@@ -238,7 +262,8 @@ BRIDGE_PNG_DIR=/tmp/bridge uv run pytest textual-orbital/examples/bridge/tests/t
 | `tests/test_room.py` | The room's light by itself: where it goes, glass rule 16 for each item, partial redraws, a dark floor under the labels. |
 | `tests/test_pty.py` | The app in a real pty at 70x22, 90x28 and 140x45: a clean protocol, every image deleted on exit, every cell background default, silence while paused, the demo's keys and a resize. It writes approximate composite PNGs to `$BRIDGE_PNG_DIR`, or else to a temporary folder of pytest's. |
 | `tests/test_crew.py` | The art: every pose and size, transparent borders (glass rule 17), packs that load and packs that don't. |
-| `tests/conftest.py` | Puts the `bridge` package on the path; `output` captures what glass writes; no test opens a browser or leaves a hard-exit entry behind; glass draws for the harness's 9x19 px cells. |
+| `tests/test_sounds.py` | Which cues each change between two reads plays (red alert first), the app playing them with a recorder for a player (the first read only listening, cooldowns, `m`), the room tone following the window's focus and the mute key and stopping on quit, and `--sounds` with a pack that can't be read. |
+| `tests/conftest.py` | Puts the `bridge` package on the path; `output` captures what glass writes; no test opens a browser, plays a sound or leaves a hard-exit entry behind; glass draws for the harness's 9x19 px cells. |
 
 ## Limitations
 

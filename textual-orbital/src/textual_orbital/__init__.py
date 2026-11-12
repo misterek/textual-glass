@@ -7,8 +7,9 @@
   the week in review (``WeekReplay``).
 * The data layer: generic records (:mod:`textual_orbital.model`), the source
   seam (:mod:`textual_orbital.provider`), alert rules and the queue
-  (:mod:`textual_orbital.alerts`), notifications (:mod:`textual_orbital.notify`)
-  and the Orbital theme (:mod:`textual_orbital.theme`).
+  (:mod:`textual_orbital.alerts`), notifications (:mod:`textual_orbital.notify`),
+  sound cues from a pack of your own (:mod:`textual_orbital.sounds`) and the
+  Orbital theme (:mod:`textual_orbital.theme`).
 """
 
 from .alerts import AlertQueue, AlertRules, Condition, Rule, WaitingRule, alert_color
@@ -47,6 +48,7 @@ from .provider import (
     poll_delay,
     timed_fetch,
 )
+from .sounds import CUES, SoundPack, Sounds
 from .theme import (
     ORBITAL,
     ORBITAL_NAVY,
@@ -89,18 +91,18 @@ from .widgets import (
     WeekReplay,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AlertScreen", "AlertToast", "BeaconRow", "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip",
     "HelpScreen", "KeyBar", "Lazy", "OrbitalApp", "OrbitalModal", "Page", "PriorityList", "PromptModal",
     "SourceHealth", "SourcesScreen", "TaskBoard", "Track", "TrackTable", "WeekReplay",
-    "ALERT_STYLES", "ENTITY_URGENCY", "ORBITAL", "ORBITAL_NAVY", "PALETTE", "SOURCE_COLORS", "SOURCE_NAMES",
+    "ALERT_STYLES", "CUES", "ENTITY_URGENCY", "ORBITAL", "ORBITAL_NAVY", "PALETTE", "SOURCE_COLORS", "SOURCE_NAMES",
     "WHY_COLORS",
     "Alert", "AlertQueue", "AlertRules", "AttentionItem", "Condition", "DayCount", "DoneTask", "Entity",
     "EntityState", "ErrorReport", "Event", "Goal", "Health", "Metrics", "Notifier", "Provider", "Rule", "Snapshot",
-    "Source", "SourceData", "SourceStatus", "StaticProvider", "Store", "Task", "TrackHealth", "TrackItem",
-    "WaitingRule", "WeekStats",
+    "SoundPack", "Sounds", "Source", "SourceData", "SourceStatus", "StaticProvider", "Store", "Task", "TrackHealth",
+    "TrackItem", "WaitingRule", "WeekStats",
     "alert_color", "ellipsize", "fetch_timeout", "fmt_age", "fmt_interval", "health_gradient", "load_color", "now",
     "poll_delay", "queue_load", "source_color", "timed_fetch", "urgency_color", "week_stats", "why_color",
 ]

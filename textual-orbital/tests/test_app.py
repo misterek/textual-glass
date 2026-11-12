@@ -19,6 +19,7 @@ from textual.app import ComposeResult
 
 import textual_orbital.app as orbital_app
 from textual_orbital import (
+    CUES,
     Alert,
     AlertScreen,
     AlertToast,
@@ -28,12 +29,14 @@ from textual_orbital import (
     Entity,
     EntityState,
     ErrorReport,
+    Event,
     HeaderStrip,
     Health,
     Lazy,
     OrbitalApp,
     Page,
     Snapshot,
+    Sounds,
     SourceData,
     SourcesScreen,
     SourceStatus,
@@ -927,3 +930,141 @@ async def test_the_sources_screen_shows_the_next_try_and_the_errors() -> None:
         assert "HTTP 503  · 3 failures, next try in 4m" in text
         assert "APP ERRORS (2)" in text and "rules  TypeError: rule bug  ×3" in text
         assert text.index("Page.update_snapshot") < text.index("rules"), "newest first"
+
+
+# -- sounds --------------------------------------------------------------------------------------
+
+
+class Played:
+    """A player that ends at once (no real player in tests: the ``no_sound`` fixture)."""
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+class Ticks:
+    """A clock for the sounds' cooldowns that a test moves on."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def loud(tmp_path: Path, cues: tuple[str, ...] = (*CUES, "comet"), clock: Ticks | None = None) -> Sounds:
+    """Sounds over a pack of every cue, recording instead of playing."""
+    sounds: dict[str, str] = {}
+    for cue in cues:
+        (tmp_path / f"{cue}.wav").write_bytes(b"RIFF")
+        sounds[cue] = f"{cue}.wav"
+    (tmp_path / "pack.json").write_text(json.dumps({"sounds": sounds}))
+    return Sounds(tmp_path, player=["afplay"], spawn=lambda argv: Played(), clock=clock or Ticks())
+
+
+def item(key: str) -> AttentionItem:
+    return AttentionItem(key, "GH", 5, "review", key, since=T0)
+
+
+async def test_sounds_tell_news_never_the_baseline(tmp_path: Path) -> None:
+    gh = Quick("GH", SourceData(attention=[item("GH:1")]), interval=60)
+    app = Board(gh, sounds=loud(tmp_path))
+    async with app.run_test() as pilot:
+        await until(lambda: app.snapshot is not None and app.snapshot.needs_attention, what="the first fetch")
+        await pilot.pause(0.3)
+        assert not app.sounds.played, "what is there at startup is a baseline, not news"
+        gh.data = SourceData(attention=[item("GH:1"), item("GH:2"), item("GH:3")])
+        app.poll_all()
+        await until(lambda: list(app.sounds.played) == ["attention"], what="one chime for two new items")
+        app.snooze_item("GH:2")
+        gh.data = SourceData(attention=[item("GH:1"), item("GH:2")], events=[Event(T0, "reviewed", "GH", "a review")])
+        app.poll_all()
+        await until(lambda: app.snapshot is not None and app.snapshot.events, what="the review")
+        await pilot.pause(0.3)
+        assert list(app.sounds.played) == ["attention"], "a snoozed item, a review: nothing to hear"
+        gh.data = SourceData(attention=[item("GH:1"), item("GH:2")],
+                             events=[Event(T0, "reviewed", "GH", "a review"), Event(T0, "Merged", "GH", "a fix")])
+        app.poll_all()
+        await until(lambda: "shipped" in app.sounds.played, what="the merge")
+        gh.data = SourceData(attention=[])  # (None keeps the last data: [] empties it)
+        app.poll_all()
+        await until(lambda: "clear" in app.sounds.played, what="the queue emptying")
+        assert list(app.sounds.played) == ["attention", "shipped", "clear"] and not app.errors
+
+
+async def test_alerts_sound_by_how_they_show_and_when_they_resolve(tmp_path: Path) -> None:
+    cc = Quick("CC", sessions(), interval=60)
+    ticks = Ticks()
+    app = Board(cc, rules=(WaitingRule(),), sounds=loud(tmp_path, clock=ticks))
+    async with app.run_test() as pilot:
+        await until(lambda: app.snapshot is not None, what="the first fetch")
+        cc.data = sessions("a")
+        app.poll_all()
+        await until(lambda: isinstance(app.screen, AlertScreen), what="the popup")
+        await until(lambda: list(app.sounds.played) == ["transmission"], what="its sound")
+        cc.data = sessions()  # answered elsewhere
+        app.poll_all()
+        await until(lambda: len(app.screen_stack) == 1, what="the popup closing itself")
+        await until(lambda: list(app.sounds.played) == ["transmission", "resolved"], what="its sound")
+        app.alert_style = "toast"
+        ticks.t += 15  # past the needs-you cooldown
+        app.raise_alert(Alert(key="note", kind="note", title="a note"))
+        await until(lambda: isinstance(app.alert_view, AlertToast), what="the toast")
+        await until(lambda: list(app.sounds.played)[-1:] == ["toast"], what="its sound")
+        app.finish_alert("dismiss")
+        await pilot.pause()
+        app.raise_alert(Alert(key="hush", kind="note", title="quiet", notify=False))
+        await until(lambda: isinstance(app.alert_view, AlertToast), what="the quiet toast")
+        await pilot.pause(0.3)
+        assert list(app.sounds.played) == ["transmission", "resolved", "toast"], "notify=False is quiet"
+        assert not app.errors
+
+
+async def test_a_source_that_starts_failing_sounds_once(tmp_path: Path) -> None:
+    gh = Quick("GH", interval=0.25)
+    app = Board(gh, sounds=loud(tmp_path))
+    async with app.run_test():
+        await until(lambda: app.snapshot is not None, what="the first fetch")
+        gh.error = RuntimeError("HTTP 503")
+        await until(lambda: "trouble" in app.sounds.played, what="the failure")
+        gh.error = RuntimeError("HTTP 401")  # still failing, another error: no new sound
+        await until(lambda: app.store.status("GH").error == "HTTP 401", what="the new error")
+        assert list(app.sounds.played) == ["trouble"]
+
+
+async def test_a_flourish_sounds_only_when_it_plays_and_the_window_has_focus(tmp_path: Path,
+                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    app = Board(sounds=loud(tmp_path))
+    async with app.run_test() as pilot:
+        assert not app.flourish("comet") and not app.sounds.played, "glass is off: no flourish, no sound"
+        monkeypatch.setattr(app.glass, "flourish", lambda name, at=None, **kwargs: True)
+        app.app_focus = False
+        assert app.flourish("comet") and not app.sounds.played, "in the background: no sound"
+        app.app_focus = True
+        assert app.flourish("comet")
+        await until(lambda: list(app.sounds.played) == ["comet"], what="the comet's sound")
+        await pilot.pause()
+
+
+async def test_a_pack_that_cant_be_read_is_reported_and_the_app_runs_silent(tmp_path: Path) -> None:
+    app = Board(Quick("GH", interval=60), sounds=tmp_path / "missing")
+    async with app.run_test():
+        await until(lambda: app.snapshot is not None, what="the first fetch")
+        assert [e.where for e in app.errors] == ["sound pack"] and app.sounds.pack is None
+        assert not app.sounds.play("attention")
+
+
+async def test_quitting_stops_the_sounds(tmp_path: Path) -> None:
+    app = Board(sounds=loud(tmp_path, ("room",)))
+    async with app.run_test():
+        app.sounds.silenced = False  # (made with a spawn: plays in tests)
+        assert app.sounds.loop("room")
+        app.exit()
+    assert app.sounds.looping is None and app.sounds.wait_idle()
+

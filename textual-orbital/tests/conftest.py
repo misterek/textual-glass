@@ -17,6 +17,7 @@ sys.path.insert(0, CONSOLE)
 import pytest  # noqa: E402
 
 import textual_glass._textual_hooks as hooks  # noqa: E402
+import textual_orbital.sounds as sounds  # noqa: E402
 from textual_glass import hard_exit  # noqa: E402
 from textual_glass.testing.pilot_helpers import Output  # noqa: E402
 
@@ -34,6 +35,23 @@ def no_browser(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
         monkeypatch.setattr(webbrowser, name, record)
     monkeypatch.setenv("BROWSER", "true")
     yield opened
+
+
+@pytest.fixture(autouse=True)
+def no_sound(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """No test may play a sound on the user's speakers (rule 20). ``TEXTUAL_ORBITAL_SOUND=off``
+    silences every ``Sounds`` made here and every app a pty test starts; a real player started
+    anyway fails the test. Tests of playing pass a ``spawn`` recorder of their own."""
+    started: list[list[str]] = []
+
+    def refuse(argv: list[str]) -> sounds.Process:
+        started.append(argv)
+        raise RuntimeError("tests never start a real sound player")
+
+    monkeypatch.setattr(sounds, "_popen", refuse)
+    monkeypatch.setenv("TEXTUAL_ORBITAL_SOUND", "off")
+    yield
+    assert not started, f"a test tried to play a sound: {started}"
 
 
 @pytest.fixture(autouse=True)

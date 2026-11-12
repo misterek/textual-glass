@@ -14,6 +14,10 @@ need:
 * :meth:`OrbitalApp.show_detail` (what ``jump_to`` shows for a record),
 * :meth:`OrbitalApp.badge_changed` (the "◉ 2 waiting" badge, for a header).
 
+With ``sounds=`` (a pack folder, see :mod:`textual_orbital.sounds`) it also
+plays a short sound when something happens: an alert, a new item, a source
+failing, a flourish (:meth:`OrbitalApp.flourish`).
+
 :meth:`OrbitalApp.fetch` runs a one-off call with parameters (a past week, a
 record's comments) the same way as a source's fetch: a daemon thread, a
 deadline, the result back on the app thread. :meth:`OrbitalApp.poll` fetches
@@ -68,7 +72,9 @@ from .model import (
 )
 from .notify import Notifier
 from .provider import Provider, Source, SourceData, Store, fetch_timeout, poll_delay, timed_fetch
+from .sounds import SoundPack, Sounds
 from .theme import ORBITAL, ORBITAL_NAVY, now
+from .widgets.replay import SHIPS
 from .widgets.screens import AlertScreen, AlertToast
 
 log = logging.getLogger("textual_orbital")
@@ -79,6 +85,9 @@ T = TypeVar("T")
 #: top) to its secondary colour (right, bottom), which glass draws as a gradient.
 #: ``Screen GlassPanel`` outranks the panel's own default rule; the app's CSS
 #: and ``GlassPanel.set_accent`` outrank it.
+#: The ship classes (``widgets.replay.SHIPS``) whose events play "shipped".
+WIN_CLASSES = frozenset({"merged", "deploy", "release"})
+
 ORBITAL_CSS = """
 Screen GlassPanel {
     border: round $primary;
@@ -151,6 +160,9 @@ class OrbitalApp(Glass, App[None]):
             means any http or https link.
         snooze_file: A JSON file that keeps item and alert snoozes across restarts (read at
             startup, written after every change); None keeps them in memory only.
+        sounds: A sound pack (its folder, or a ``SoundPack``) or a ready ``Sounds``; None is
+            silent. A folder is read when the app mounts; one that can't be read is reported and
+            the app runs silent.
 
     Other keyword arguments go to ``Glass`` and ``App`` (``glass=False`` for text only).
     """
@@ -180,7 +192,7 @@ class OrbitalApp(Glass, App[None]):
                  toast_timeout: float = 8.0, notify: str = "auto",
                  bell: bool = True, title_badge: bool = True, open_urls: bool = False,
                  open_hosts: Collection[str] | None = None, snooze_file: str | Path | None = None,
-                 **kwargs: Any) -> None:
+                 sounds: Sounds | SoundPack | str | Path | None = None, **kwargs: Any) -> None:
         if alert_style not in ALERT_STYLES:
             raise ValueError(f"alert_style must be one of {ALERT_STYLES}, not {alert_style!r}")
         super().__init__(**kwargs)
@@ -221,6 +233,18 @@ class OrbitalApp(Glass, App[None]):
         self._orbital_calls = 0  # tokens for fetch()
         self._orbital_waiting: dict[int, tuple[Callable[[Any, BaseException | None], object], Timer]] = {}
         self._alert_view: AlertScreen | AlertToast | None = None  # the alert on screen
+        #: Plays the cues (``sounds.muted``, ``sounds.play(cue)``); silent without a pack.
+        self.sounds = sounds if isinstance(sounds, Sounds) else \
+            Sounds(sounds if isinstance(sounds, SoundPack) else None)
+        self._orbital_sound_pack = sounds if isinstance(sounds, (str, Path)) else None  # read at mount
+        if self.sounds.schedule is None:
+            self.sounds.schedule = self._sound_timer
+        if self.sounds.on_error is None:
+            self.sounds.on_error = lambda where, error: self.call_from_worker(self.report_error, where, error)
+        self._orbital_ready: set[str] = set()  # sources with a good fetch before this publish: news, not baseline
+        self._orbital_items: set[str] = set()  # needs-attention keys at the last publish, snoozed ones too
+        self._orbital_visible = 0  # needs-attention items showing at the last delivery
+        self._orbital_events: set[tuple[Any, ...]] = set()  # the events at the last publish
         self.register_theme(ORBITAL)
         self.register_theme(ORBITAL_NAVY)
         self.theme = ORBITAL.name
@@ -235,6 +259,8 @@ class OrbitalApp(Glass, App[None]):
         self._orbital_context = contextvars.copy_context()
         self.notifier.badge("")  # the window title says what this window is
         self._attempt("snooze file", self._load_snoozes)  # before the first fetch can raise an alert
+        if self._orbital_sound_pack is not None:
+            self._attempt("sound pack", self._load_sounds, self._orbital_sound_pack)
         self._load_images(sorted(set(self.alert_rules.images.values())))
         # immediate: a toast moves before a popped screen is removed with it on
         self.screen_change_signal.subscribe(self, self._screen_changed, immediate=True)
@@ -246,12 +272,14 @@ class OrbitalApp(Glass, App[None]):
         # Fetch threads are daemons: quitting never waits for one (rule 25).
         self._orbital_closed = True
         self.notifier.restore()
+        self.sounds.stop()
         super().exit(*args, **kwargs)
 
     @on(events.Unmount)
     def _orbital_unmount(self) -> None:
         self._orbital_closed = True
         self.notifier.restore()  # after an exception, exit() may not have run
+        self.sounds.stop()
 
     @on(events.Resize)
     def _orbital_resize(self, event: events.Resize) -> None:
@@ -524,6 +552,7 @@ class OrbitalApp(Glass, App[None]):
             if changed:
                 self._deliver(snapshot)
             self._attempt("health", self._check_health, snapshot.sources, at)
+            self._attempt("sounds", self._hear, snapshot, changed)
             if self.alerts_enabled:
                 self._attempt("rules", self._evaluate_alerts, snapshot)
         else:
@@ -539,12 +568,16 @@ class OrbitalApp(Glass, App[None]):
         if self.snapshot is not None:
             self.snapshot = replace(self.snapshot, taken_at=at, sources=self.store.statuses())
             self._deliver(self.snapshot)
+            self._orbital_visible = len(self.visible_items(self.snapshot.needs_attention))  # quietly
 
     def _check_health(self, statuses: tuple[SourceStatus, ...], at: datetime) -> None:
         """``health_changed`` when a source's health or error changed, and only then (rule 9)."""
         health = tuple((s.health(at), s.error) for s in statuses)
         if health != self._orbital_health:
-            self._orbital_health = health
+            old, self._orbital_health = self._orbital_health, health
+            if any(h is Health.FAILING and (i >= len(old) or old[i][0] is not Health.FAILING)
+                   for i, (h, _) in enumerate(health)):
+                self.sounds.play("trouble")
             self.health_changed(statuses, at)
 
     def _each_widget(self, method: str, *args: Any) -> None:
@@ -770,6 +803,8 @@ class OrbitalApp(Glass, App[None]):
         (rule 28); a toast closes now."""
         view, self._alert_view = self._alert_view, None
         self.alert_queue.dismiss()
+        if view is not None and view.alert.notify:
+            self.sounds.play("resolved")
         if isinstance(view, AlertToast) or (view is not None and view in self.screen_stack):
             view.close_resolved()
 
@@ -810,7 +845,10 @@ class OrbitalApp(Glass, App[None]):
             return
         image = self.alert_images.get(alert.image) if alert.image else None
         queued, beacon = len(self.alert_queue), self.alert_beacon(alert)
-        if (alert.style or self.alert_style) == "toast":
+        toasting = (alert.style or self.alert_style) == "toast"
+        if alert.notify:
+            self.sounds.play("toast" if toasting else "transmission")
+        if toasting:
             toast = self._make_toast(alert, image, queued, beacon, self.toast_timeout)
             self._alert_view = toast
             self._mount_toast(toast)
@@ -864,6 +902,43 @@ class OrbitalApp(Glass, App[None]):
             self.jump_to(alert.target)
         self._update_badge()
         self.call_later(self._show_next_alert)
+
+    # -- sounds ----------------------------------------------------------------------------------
+
+    def _sound_timer(self, delay: float, callback: Callable[[], None]) -> None:
+        """``Sounds.schedule``: run ``callback`` on the app thread after ``delay``, guarded (rule 26)."""
+        self.set_timer(delay, lambda: self._attempt("sounds", callback), name="sound window")
+
+    def _load_sounds(self, path: str | Path) -> None:
+        self.sounds.pack = SoundPack.load(path)
+
+    def _hear(self, snapshot: Snapshot, changed: bool) -> None:
+        """After a publish: "attention" for a needs-attention item that wasn't there before,
+        "clear" when the queue emptied, "shipped" for a new event of a winning kind. Only from
+        sources that had a good fetch before this one, so startup and a source's first fetch
+        are a baseline, not news."""
+        ready = self._orbital_ready
+        if changed:
+            keys = {i.key for i in snapshot.needs_attention}
+            visible = self.visible_items(snapshot.needs_attention)
+            if any(i.key not in self._orbital_items and i.source in ready for i in visible):
+                self.sounds.play("attention")
+            elif self._orbital_visible and not visible and ready:
+                self.sounds.play("clear")
+            events = {(e.when, e.kind, e.source, e.title) for e in snapshot.events}
+            if any(e.source in ready and (e.when, e.kind, e.source, e.title) not in self._orbital_events
+                   and SHIPS.get(e.kind.strip().lower()) in WIN_CLASSES for e in snapshot.events):
+                self.sounds.play("shipped")
+            self._orbital_items, self._orbital_events, self._orbital_visible = keys, events, len(visible)
+        self._orbital_ready = ready | {s.key for s in snapshot.sources if s.last_ok is not None}
+
+    def flourish(self, name: str, at: Any = None, **kwargs: Any) -> bool:
+        """Play glass's flourish ``name`` (``app.glass.flourish(name, at=..., to=..., color=...)``)
+        and, while the window has focus, the sound of the same name. True if the flourish played."""
+        played = self.glass.flourish(name, at=at, **kwargs)
+        if played and self.app_focus:
+            self.sounds.play(name)
+        return played
 
     # -- attention -------------------------------------------------------------------------------
 

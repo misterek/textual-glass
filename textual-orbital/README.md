@@ -323,7 +323,7 @@ The rules for writing real sources (stable keys, "since" timestamps, `stage_sinc
 ```text
 OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, alert_style="modal",
            toast_timeout=8.0, notify="auto", bell=True, title_badge=True, open_urls=False, open_hosts=None,
-           snooze_file=None, **kwargs)   # other keywords go to Glass and App
+           snooze_file=None, sounds=None, **kwargs)   # other keywords go to Glass and App
 ```
 
 | Argument | Meaning |
@@ -339,6 +339,7 @@ OrbitalApp(provider, *, rules=(WaitingRule(),), alert_images=None, alerts=True, 
 | `title_badge` | Put "◉ 2 waiting · Title" in the window title. |
 | `open_urls` | `open_link` opens the browser, in a thread (it shells out on macOS). The default `False` only shows the link: pass `True` in your real dashboard's `main()`, never in tests (rule 20 in [`../AGENTS.md`](../AGENTS.md)). |
 | `open_hosts` | With `open_urls`, the hosts `open_link` may open, e.g. `{"github.com"}` (exact names, any case); a link to another host is only shown. None (the default) means any http or https link. |
+| `sounds` | A sound pack: its folder (read when the app mounts; one that can't be read is reported and the app runs silent), a `SoundPack`, or a `Sounds` you made. None (the default) is silent. See [Sounds](#sounds). |
 | `snooze_file` | A JSON file (a path; `~` works) that keeps item and alert snoozes across restarts, each with when it ends. It is read when the app mounts, before the first fetch, and snoozes that ended while the app was closed are dropped; a file that can't be read or parsed is reported (`report_error`) and treated as empty, never stopping startup. It is written after every change, to a temporary file then `os.replace`, so it is never half written; its directory is made if needed. None (the default) keeps snoozes in memory. |
 
 It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It defines **no key bindings**: your app binds its own keys to its actions and to the methods below.
@@ -366,6 +367,8 @@ It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It d
 | `open_link(url)` | Open in the browser (with `open_urls`), or show the link. |
 | `call_from_worker(callback, *args)` | Run a callback on the app thread, in the app's context, from any thread (rule 13). What it raises goes to `report_error`. |
 | `alert_queue`, `alert_rules`, `notifier` | The `AlertQueue`, the `AlertRules`, the `Notifier`. |
+| `sounds` | The `Sounds` that plays the cues: `sounds.muted = True` for a mute key, `sounds.play("cue")` for one of your own, `sounds.volume`, `sounds.quiet_hours`. Silent without a pack. |
+| `flourish(name, at=None, **kwargs)` | Glass's flourish (`app.glass.flourish(name, at=..., to=..., color=...)`), and the pack's sound of the same name while the window has focus. True if the flourish played. |
 | `HORIZONTAL_BREAKPOINTS`, `VERTICAL_BREAKPOINTS` | Classes set on every screen: `-narrow` (under 80 columns), `-compact` (80-111), `-regular` (112-139), `-wide` (140+); `-short` (under 25 rows), `-mid` (25-37), `-tall` (38+). Write `Screen.-narrow #side { display: none; }` in your CSS. |
 | `ALERT_SNOOZE`, `ITEM_SNOOZE`, `ALERT_SCREEN`, `ALERT_TOAST` | 10 minutes, an hour, the popup class and the toast class. |
 | `HUNG_LIMIT`, `ERRORS_KEPT`, `ERROR_TOAST_SPACING` | Fetches of one source that may hang past their deadline before it pauses (2); error reports kept (20); seconds between error toasts (30). |
@@ -455,6 +458,62 @@ What Ghostty 1.4 does with those, checked in its source at tag `v1.4.0`:
 | Kitty's OSC 99 | Parsed but not acted on, so it is not used. |
 | BEL | With the default `bell-features`, an unfocused window bounces its dock icon once and gets a 🔔 in its title. |
 | Title push and pop | Not implemented, so on exit orbital clears the title. Ghostty treats an empty title as "never set" and shows your working directory or its default title again. |
+
+## Sounds
+
+With `sounds=` an app plays a short sound when something happens, from a **pack** of your own files. The library ships no sounds: a pack is a folder with the files and a `pack.json`:
+
+```json
+{
+  "name": "Starship computer",
+  "volume": 1.0,
+  "sounds": {
+    "attention": "attention.wav",
+    "transmission": "transmission.wav",
+    "comet": {"file": "comet.wav", "volume": 0.6},
+    "room": {"file": "room.wav", "volume": 0.35}
+  }
+}
+```
+
+A sound is a file name, relative to the folder, or an object with `file` and an optional `volume` (0 to 1, times the pack's `volume`). Other keys are yours (notes, where a sound came from) and are ignored. A cue the pack doesn't name stays silent, so a pack can be as small as one sound. A broken pack (bad JSON, a missing file, a volume out of range) raises a `ValueError` that names the problem. WAV plays everywhere; macOS also plays MP3, AAC and AIFF.
+
+The cues `OrbitalApp` plays (`textual_orbital.CUES`):
+
+| Cue | When |
+| --- | --- |
+| `attention` | A new needs-attention item arrived: one sound per fetch, however many. Not for what is there at startup or on a source's first good fetch, and not for an item that comes back from a snooze. |
+| `transmission` | An alert opened as a popup. |
+| `toast` | An alert showed as a toast. |
+| `resolved` | An alert closed itself: its condition went away. |
+| `clear` | A fetch emptied the needs-attention queue. |
+| `shipped` | An event of a winning kind arrived: merged, deployed or released (the `SHIPS` words). |
+| `trouble` | A source started failing. |
+| a flourish's name | `app.flourish(name, ...)` played it while the window has focus: `comet`, `supernova`, `black-hole`... |
+
+Alerts with `notify=False` are quiet. Play your own with `app.sounds.play("cue")`, or `app.sounds.loop("room")` for a room tone (one loop at a time; `stop_loop()`).
+
+`Sounds(pack=None, *, volume=1.0, cooldown=3.0, window=0.15, quiet_hours=None, player=None, schedule=None, on_error=None, spawn=None)` plays them. It decodes nothing: each sound goes to the system's player (`afplay` on macOS; `pw-play`, `paplay` or `aplay` on Linux), started from a daemon thread that waits for it, so the UI thread never blocks and no process is left behind. Without a player it stays silent; a player that can't start is reported once (`on_error`, which `OrbitalApp` sends to `report_error`) and sound turns off. It keeps sound bearable in a window that is open all day:
+
+- **One sound per moment.** The cues asked for within `window` seconds (one fetch's worth) collapse into the most important one (`Sounds.PRIORITY`: `transmission` over `trouble` over `attention`...). `OrbitalApp` gives it the timer this needs (`schedule`).
+- **Cooldowns.** The same cue doesn't sound again within `cooldown` seconds, nor a cue of the same group (`Sounds.GROUPS`: `attention`, `toast` and `transmission` all mean "needs you", and share 10 s), unless the new one is more important.
+- At most two sounds at once (`MAX_AT_ONCE`); `muted` (which also stops the loop); `quiet_hours=(time(22), time(7))`, which may run over midnight (`parse_quiet_hours("22-7")` reads it from an option).
+- `TEXTUAL_ORBITAL_SOUND=off` in the environment silences every app started there. The test suites set it (rule 20 in [`../AGENTS.md`](../AGENTS.md)).
+
+`afplay` ignores macOS's Do Not Disturb, so give your app a mute key and, if you like, quiet hours:
+
+```python
+class Board(OrbitalApp):
+    BINDINGS = [("m", "mute", "mute")]
+
+    def action_mute(self) -> None:
+        self.sounds.muted = not self.sounds.muted
+        self.notify("muted" if self.sounds.muted else "sound on", timeout=2)
+
+
+app = Board(provider, sounds="~/sounds/starship")
+app.sounds.quiet_hours = parse_quiet_hours("22-7")   # from textual_orbital.sounds
+```
 
 ## Themes
 
@@ -606,12 +665,13 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 | File | Checks |
 | --- | --- |
 | `tests/test_units.py` | Source health, week stats (this week and a past week whole), stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), payloads (kept per source, a new object a change and the same one not, never compared, hashed, printed or counted, not checked inside, kept on a failure), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve, snoozes restored from a file), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
-| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, `fetch` (a thread, its deadline, a late result dropped, errors handed back, `then` in the app's context), backoff and `poll_all`, `poll(key)` (one source now; a fetch in flight that read before a write is followed by a fresh one when it ends, times out, or a hung fetch returns at the hung limit), pages hearing a failing source's new error and nothing for the same one, payloads reaching the pages by identity (kept on a failure and on a republish), error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, lazy detail values (placeholders, errors and deadlines in place, a `Lazy` value's own deadline, dropped after the popup closed), toasts moving off a closing popup and telling the app however they go, `finish_alert` leaving a covered popup alone, alert styles checked, snapshots re-stamped by snoozing and on a new day, snoozes kept in a file across a restart (no popup at launch for a snoozed wait, ended ones dropped, broken files reported and never fatal, atomic writes), the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
+| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, `fetch` (a thread, its deadline, a late result dropped, errors handed back, `then` in the app's context), backoff and `poll_all`, `poll(key)` (one source now; a fetch in flight that read before a write is followed by a fresh one when it ends, times out, or a hung fetch returns at the hung limit), pages hearing a failing source's new error and nothing for the same one, payloads reaching the pages by identity (kept on a failure and on a republish), error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, lazy detail values (placeholders, errors and deadlines in place, a `Lazy` value's own deadline, dropped after the popup closed), toasts moving off a closing popup and telling the app however they go, `finish_alert` leaving a covered popup alone, alert styles checked, snapshots re-stamped by snoozing and on a new day, snoozes kept in a file across a restart (no popup at launch for a snoozed wait, ended ones dropped, broken files reported and never fatal, atomic writes), sounds (news and never the baseline, a snoozed item or a review quiet, popups, toasts, resolved and quiet alerts, a source starting to fail once, flourishes only when they play and the window has focus, a pack that can't be read reported, quitting stopping them), the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
 | `tests/test_replay.py` | `WeekReplay` with glass forced on and the scenes on a fake clock: it plays when its page shows, its caption follows the cues, the tally ends the show, it holds in silence (equal data and the minute tick included), new data while it holds or plays, replay and a new look, a resize or a new theme putting the summary back, hidden then shown, glass going off and on, minimal motion, an empty week; the text rundown with stock Textual and with glass off; kinds mapped to ships and the others counted; hours since the local Monday (a Sunday night, both DST changes, other zones); the console's Replay page with and without glass. |
 | `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row and listing what is snoozed, stepping through past weeks (held and fetched), a release's run log loaded lazily in its detail, a new task from the prompt (`n`) on the board at once, toast alerts (popups kept for Claude, one toast at a time with "+N more", the float layer, no focus or keys, snooze and dismiss, timeouts, resolving, a click to jump, moving over a popup and back, without glass), detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the queue's `RowsLeft`, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), a long detail body scrolling by keys with glass's thumb in the dialog (and a short one as before), `DetailScreen.set_head`, `PromptModal` with and without glass, task rows with a source badge and an app's own column (`task_parts`), a styled callsign and a `HeaderStrip` with its own `Brand`, and no error reports. |
 | `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, a toast's float image placed and deleted, every alert kind with OSC 777 notifications, notifications through tmux passthrough, quitting with a hung fetch (`tests/hung_app.py`), and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
+| `tests/test_sounds.py` | `textual_orbital.sounds` without an app: packs (names and objects, volumes, notes ignored, every kind of broken one named), each player's volume flag, the environment's off switch, volumes multiplied, cooldowns per group unless the new cue matters more, one sound per window, mute and quiet hours over midnight, two at once, loops (stopped, muted, a failing file), stopping everything, and a player that can't start or a file it can't play, reported once. Never a real player. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
-| `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |
+| `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; `no_sound`, an autouse fixture that sets `TEXTUAL_ORBITAL_SOUND=off` and fails a test that starts a real sound player; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |
 
 ## Limitations
 
@@ -620,5 +680,6 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 - **Process-wide colour tables.** `PALETTE`, `SOURCE_COLORS`, `SOURCE_NAMES` and `WHY_COLORS` are module-level dicts; apps add to them at import time.
 - **Notifications** were checked only against Ghostty's source. The window title is cleared on exit, not restored: Ghostty 1.4 has no title pop.
 - A finite-play GIF below a popup plays its run again after the popup closes.
+- **Sounds** were heard through `afplay` on macOS. The Linux players (`pw-play`, `paplay`, `aplay`) are untested, and Windows has none: there an app stays silent.
 - Kitty, tmux and screen are untested. Under tmux or screen, glass is off. In herdr, glass works with a few settings, but nothing the terminal animates moves (see [Running as a herdr plugin](#running-as-a-herdr-plugin)). Under tmux, notifications go through passthrough (checked only in a recorded byte stream); under screen they are off.
 - Glass uses private Textual API (see [textual-glass's Limitations](../textual-glass/README.md#limitations)); both packages pin `textual>=8.2,<9`.

@@ -1,5 +1,14 @@
 # Changelog
 
+## textual-orbital 0.5.0 (2026-11-12)
+
+Sound cues from a pack of your own: a dashboard that plays a short sound when something happens, and the bridge example's crew with sounds of their own. The library ships no sounds, and an app without a pack is unchanged. textual-glass stays 0.7.0.
+
+### textual-orbital
+
+- **Sound cues** (`textual_orbital.sounds`). With `OrbitalApp(sounds="~/my-pack")` a dashboard plays a short sound when something happens: a new needs-attention item, an alert as a popup or a toast, an alert that resolved itself, the queue emptied, something merged or deployed, a source starting to fail, and a flourish (the new `OrbitalApp.flourish(name, ...)` plays glass's and the sound of the same name while the window has focus). Startup and a source's first fetch are a baseline, not news. The library ships no sounds: a pack is a folder with a `pack.json` naming a file per cue (README, "Sounds"). `Sounds` hands each one to the system's player (`afplay`; `pw-play`, `paplay` or `aplay`) from a daemon thread, collapses one moment's cues into the most important, keeps cooldowns per cue or group, and has `muted`, `quiet_hours`, `volume` and `loop()` for a room tone. `TEXTUAL_ORBITAL_SOUND=off` silences every app in an environment; the test suites set it and fail a test that starts a real player (rule 20).
+- The bridge example plays sounds too: `--sounds DIR` (a crew raising a hand, still waiting, red alert, an error, done, ensigns and crew coming and going), `--room` for the pack's room tone while the window has focus, `--volume`, `--quiet-hours` and `m` to mute. `Bridge(sounds=...)` and `update(deck, quiet=True)` let another app do the same on a page of its own.
+
 ## textual-glass 0.7.0 and textual-orbital 0.4.0 (2026-11-11)
 
 A styled text input and a one-line prompt on it, a way back to the theme's colours, and smaller additions asked for while building a dashboard on the libraries: fetch one source now, a payload per source, detail popups that scroll and change once open, and hooks for a task column and the callsign. Upgrade both together: orbital 0.4 needs glass 0.7, which styles the prompt's input.

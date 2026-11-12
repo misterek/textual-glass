@@ -1011,7 +1011,7 @@ provides-extras = ["images", "testing"]
 
 [[package]]
 name = "textual-orbital"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "textual-orbital" }
 dependencies = [
     { name = "textual-glass" },

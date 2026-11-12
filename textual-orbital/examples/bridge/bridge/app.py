@@ -2,6 +2,7 @@
 
 ``app.py`` next to this package runs ``main()``; README.md has the options and the keys. :class:`Bridge` is what
 the app shows, apart from the app: another app can show the bridge on a page of its own with it and a ``Deck``.
+With a ``textual_orbital.Sounds`` it also plays a short sound when the crew does something (:data:`CUES`).
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import shlex
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
@@ -27,7 +30,8 @@ from bridge.fake import DEFAULT_SPEED, FakeBridge
 from bridge.state import SeatingChart, Session, SessionReader, pose_for, red_alert, sparking, waiting_count
 from bridge.widgets import STATIONS, Deck, Station, StationView, hexed, lamp_color
 from textual_glass import Glass
-from textual_orbital import ORBITAL, fmt_age
+from textual_orbital import ORBITAL, Sounds, fmt_age
+from textual_orbital.sounds import parse_quiet_hours
 
 POLL = 1.0  # seconds between reads of the state folder
 LAMPS = {"working": "working", "compacting": "working", "waiting": "waiting", "error": "error", "done": "done"}
@@ -43,6 +47,67 @@ WHERE = {
              "project once you trust it (merge it with any hooks already there). Then review and trust the\n"
              "hooks with /hooks in Codex: it runs new or changed hooks only after that.",
 }
+
+
+#: The sounds the bridge plays (with a ``Sounds``): cue -> (when, how important, the group whose cooldown it
+#: shares). ``hand-up`` shares "needs-you" with a dashboard's own "Claude needs you" sounds, so one wait doesn't
+#: chime twice. The pack's ``room``, if it has one, is a room tone the app may loop (:data:`ROOM`).
+CUES: dict[str, tuple[str, int, str]] = {
+    "red-alert": ("red alert came on: two crew waiting, or an error", 95, "red-alert"),
+    "hand-up": ("a crew member raised a hand: a session waits for you", 90, "needs-you"),
+    "error": ("a session's turn ended in an error", 80, "error"),
+    "escalate": ("still waiting: waving after 2 minutes, standing after 10", 75, "escalate"),
+    "done": ("a session finished its turn", 40, "done"),
+    "crew-in": ("a session started: a crew member takes a station", 30, "crew"),
+    "crew-out": ("a session ended: its crew member leaves", 30, "crew"),
+    "ensign-out": ("a subagent started: an ensign runs out", 20, "ensigns"),
+    "ensign-in": ("a subagent finished: an ensign comes back", 20, "ensigns"),
+}
+#: The pack's room tone, looped by the app while the bridge shows (``--room``).
+ROOM = "room"
+
+
+@dataclass(frozen=True)
+class Heard:
+    """What one read saw of a session, for the sounds: its state, pose, ensigns and whether it is aboard."""
+
+    state: str
+    pose: str
+    ensigns: int
+    present: bool
+
+
+def heard(sessions: list[Session], now: datetime) -> dict[str, Heard]:
+    return {s.id: Heard(s.state, pose_for(s, now), len(s.subagents), s.present) for s in sessions}
+
+
+def cues_between(before: Mapping[str, Heard], after: Mapping[str, Heard], alert_before: bool,
+                 alert_after: bool) -> list[str]:
+    """The cues for what changed between two reads (:data:`CUES`), most important first."""
+    cues: list[str] = ["red-alert"] if alert_after and not alert_before else []
+    for sid, now in after.items():
+        old = before.get(sid)
+        if old is None:
+            if now.present:
+                cues.append("crew-in")
+                if now.state == "waiting":
+                    cues.append("hand-up")
+            continue
+        if old.present and not now.present:
+            cues.append("crew-out")
+            continue
+        if now.state != old.state:
+            cue = {"waiting": "hand-up", "error": "error", "done": "done"}.get(now.state)
+            if cue is not None:
+                cues.append(cue)
+        elif now.state == "waiting" and now.pose != old.pose and now.pose in ("waving", "standing"):
+            cues.append("escalate")
+        if now.ensigns > old.ensigns:
+            cues.append("ensign-out")
+        elif now.ensigns < old.ensigns:
+            cues.append("ensign-in")
+    cues += ["crew-out" for sid, old in before.items() if sid not in after and old.present]
+    return sorted(cues, key=lambda cue: -CUES[cue][1])
 
 
 def status_word(session: Session, pose: str) -> str:
@@ -86,10 +151,13 @@ class Bridge:
     ``BridgeApp`` calls it once a second. It is not a widget, so another app can show the bridge on a page of
     its own (a ``Deck`` in a panel), call it on its own terms (only while that page shows, say) and title the
     panel from ``present``, ``alert``, ``waiting``, ``errors`` and ``unseated``.
+
+    With ``sounds``, each update plays the cues for what changed since the last one (:func:`cues_between`); the
+    first update, and one with ``quiet=True`` (the first after the page was hidden a while), only listen.
     """
 
     def __init__(self, pack: crew.Pack | None = None, *, state_dir: Path | str | None = None,
-                 fake: FakeBridge | None = None) -> None:
+                 fake: FakeBridge | None = None, sounds: Sounds | None = None) -> None:
         self.pack = pack if pack is not None else crew.load()
         self.fake = fake
         self.state_dir = fake.state_dir if fake is not None else Path(state_dir or hook.state_dir())
@@ -100,7 +168,9 @@ class Bridge:
         self.present: list[Session] = []    # the ones still at their stations
         self.alert = False
         self.polls = 0                      # updates so far
+        self.sounds = sounds
         self._states: dict[str, str] = {}
+        self._heard: dict[str, Heard] = {}
 
     def now(self) -> datetime:
         return self.fake.now() if self.fake is not None else datetime.now(timezone.utc)
@@ -118,9 +188,9 @@ class Bridge:
         """Sessions with no station (more sessions than stations): "below deck"."""
         return self.chart.unseated(self.sessions)
 
-    def update(self, deck: Deck) -> None:
-        """Play the fake, read the folder and show it on ``deck``. Raises what reading raises (the caller
-        reports it and tries again later)."""
+    def update(self, deck: Deck, *, quiet: bool = False) -> None:
+        """Play the fake, read the folder and show it on ``deck``, and play the sounds for what changed
+        (unless ``quiet``). Raises what reading raises (the caller reports it and tries again later)."""
         if self.fake is not None:
             self.fake.step()
         now = self.now()
@@ -135,7 +205,13 @@ class Bridge:
         self._states = {s.id: s.state for s in sessions}
         self.sessions = sessions
         self.present = [s for s in sessions if s.present]
-        self.alert = red_alert(self.present)
+        alert_before, self.alert = self.alert, red_alert(self.present)
+        now_heard = heard(sessions, now)
+        if self.sounds is not None and self.polls and not quiet:
+            for cue in cues_between(self._heard, now_heard, alert_before, self.alert):
+                _, priority, group = CUES[cue]
+                self.sounds.play(cue, priority=priority, group=group)
+        self._heard = now_heard
         deck.set_alert(self.alert)
         deck.chair.set_waiting(self.waiting)
         self.polls += 1
@@ -172,13 +248,22 @@ class BridgeApp(Glass, App[None]):
         Binding("e", "error", "Error", show=False),
         Binding("x", "end", "End", show=False),
         Binding("space", "pause", "Pause", show=False),
+        Binding("m", "mute", "Mute", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, *, state_dir: Path | str | None = None, fake: FakeBridge | None = None,
-                 pack: crew.Pack | None = None, poll: float = POLL, **kwargs: Any) -> None:
+                 pack: crew.Pack | None = None, poll: float = POLL, sounds: Sounds | None = None,
+                 room: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.bridge = Bridge(pack, state_dir=state_dir, fake=fake)
+        self.sounds = sounds if sounds is not None else Sounds()
+        if self.sounds.schedule is None:  # one sound per moment
+            self.sounds.schedule = lambda delay, callback: self.set_timer(delay, callback)
+        if self.sounds.on_error is None:
+            self.sounds.on_error = lambda where, error: self.call_from_thread(
+                self.notify, f"{where}: {error}", title="Bridge: sound", severity="warning")
+        self.room = room
+        self.bridge = Bridge(pack, state_dir=state_dir, fake=fake, sounds=self.sounds)
         self.poll_interval = poll
         self.poll_errors: list[str] = []
         self._title = ""
@@ -194,6 +279,27 @@ class BridgeApp(Glass, App[None]):
         self.theme = ORBITAL.name
         self.poll()
         self.set_interval(self.poll_interval, self.poll)
+        self.play_room()
+
+    def on_unmount(self) -> None:
+        self.sounds.stop()
+
+    # -- sound ---------------------------------------------------------------------------------------
+
+    def play_room(self) -> None:
+        """The room tone (``--room``), while the window has focus and sound isn't muted."""
+        if self.room and self.app_focus and not self.sounds.muted:
+            self.sounds.loop(ROOM)
+        else:
+            self.sounds.stop_loop()
+
+    def watch_app_focus(self, focus: bool) -> None:
+        self.play_room()
+
+    def action_mute(self) -> None:
+        self.sounds.muted = not self.sounds.muted
+        self.play_room()
+        self.notify("muted" if self.sounds.muted else "sound on", timeout=2)
 
     # -- reading ------------------------------------------------------------------------------------
 
@@ -291,6 +397,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--pack", metavar="DIR", help="the crew pack in DIR (default: the built-in crew)")
     parser.add_argument("--speed", type=float, default=DEFAULT_SPEED, help="the fake's time compression (default 20)")
     parser.add_argument("--plain", action="store_true", help="stock Textual, no glass")
+    parser.add_argument("--sounds", metavar="DIR", help="play the sound pack in DIR (textual-orbital's format)")
+    parser.add_argument("--room", action="store_true", help="loop the pack's room tone while the window has focus")
+    parser.add_argument("--volume", type=float, default=1.0, help="sound volume, 0 to 1 (default 1)")
+    parser.add_argument("--quiet-hours", metavar="22-7", help="no sounds between these local hours")
     parser.add_argument("--print-hooks", choices=hook.AGENTS, metavar="AGENT",
                         help="print the hook registration for claude or codex, with this checkout's paths, and exit")
     parser.add_argument("--at", type=float, default=0.0, help=argparse.SUPPRESS)  # start the script N minutes in
@@ -303,12 +413,20 @@ def main(argv: list[str] | None = None) -> None:
         pack = crew.load(args.pack)
     except (OSError, ValueError) as error:  # a broken pack raises a ValueError naming the file and line
         parser.exit(2, f"bridge: can't load the crew pack: {error}\n")
+    try:
+        sounds = Sounds(args.sounds, volume=args.volume,
+                        quiet_hours=parse_quiet_hours(args.quiet_hours) if args.quiet_hours else None) \
+            if args.sounds else None
+    except (OSError, ValueError) as error:
+        parser.exit(2, f"bridge: can't load the sound pack: {error}\n")
     glass = False if args.plain else None
     if args.live or args.state:
-        BridgeApp(state_dir=args.state or hook.state_dir(), pack=pack, glass=glass).run()
+        BridgeApp(state_dir=args.state or hook.state_dir(), pack=pack, sounds=sounds, room=args.room,
+                  glass=glass).run()
         return
     folder = tempfile.mkdtemp(prefix="bridge-fake-")
     try:
-        BridgeApp(fake=FakeBridge(folder, args.speed, at=args.at), pack=pack, glass=glass).run()
+        BridgeApp(fake=FakeBridge(folder, args.speed, at=args.at), pack=pack, sounds=sounds, room=args.room,
+                  glass=glass).run()
     finally:
         shutil.rmtree(folder, ignore_errors=True)
