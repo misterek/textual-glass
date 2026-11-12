@@ -1,6 +1,6 @@
 # textual-glass
 
-A pixel "glass" look for ordinary [Textual](https://textual.textualize.io) apps, drawn through the kitty graphics protocol and tuned for Ghostty 1.4. Add one mixin and your app gets glass panels with gradient borders, a focus glow, a selection pill that slides between rows, glowing progress bars, slim scrollbars, key badges in the footer, and a dimming scrim under modal screens. Your widgets, CSS and layout stay stock Textual, and Textual still draws all the text. The glass is drawn in pixels underneath it. In any other terminal nothing changes at all.
+A pixel "glass" look for ordinary [Textual](https://textual.textualize.io) apps, drawn through the kitty graphics protocol and tuned for Ghostty 1.4. Add one mixin and your app gets glass panels with gradient borders, a focus glow, a selection pill that slides between rows, text inputs with a glowing caret, glowing progress bars, slim scrollbars, key badges in the footer, and a dimming scrim under modal screens. Your widgets, CSS and layout stay stock Textual, and Textual still draws all the text. The glass is drawn in pixels underneath it. In any other terminal nothing changes at all.
 
 ```python
 from textual.app import App
@@ -55,6 +55,8 @@ uv run python examples/week/app.py                          # the week in review
 | `enter` | Open the service under the cursor (a modal with a table and Markdown) |
 | `m` | The "ready to ship" modal with an animated picture; `enter` there ships the release, `esc` doesn't |
 | `r` | Restart the service under the cursor |
+| `/` | View 1: filter the services in a stock `Input` (`enter` or `esc` goes back to the table) |
+| `n` | A note for the service under the cursor: an `Input` in a popup (three letters or more, or it turns red) |
 | `ctrl+p` | The command palette ("Glass: ..." commands, "Show: ...", themes) |
 | `f9` | Next motion level |
 | `shift+f9` | Glass off and on, live |
@@ -64,7 +66,7 @@ uv run python examples/week/app.py                          # the week in review
 | | |
 | --- | --- |
 | ![View 1 at 90x28](docs/screenshots/90x28_stock.png) | ![View 2 at 90x28](docs/screenshots/90x28_pixels.png) |
-| View 1, stock widgets: DataTables with zebra rows and a cursor pill, colourful severity badges left opaque, an OptionList, ProgressBars, Markdown, the Footer's key badges | View 2, pixel widgets: `RingGauge`s, `ProgressArc`s, a `SelectList` with signal and load meters per row, a `SpriteView` beacon, an `InfoCard`, `StatTile`s |
+| View 1, stock widgets: an Input, DataTables with zebra rows and a cursor pill, colourful severity badges left opaque, an OptionList, ProgressBars, Markdown, the Footer's key badges | View 2, pixel widgets: `RingGauge`s, `ProgressArc`s, a `SelectList` with signal and load meters per row, a `SpriteView` beacon, an `InfoCard`, `StatTile`s |
 | ![The modal at 140x45](docs/screenshots/140x45_modal.png) | ![View 1 without glass](docs/screenshots/plain_90x28_stock.png) |
 | A `ModalScreen` over view 1: a scrim over the glass, the dialog's own glass, and a `GlassImage` drawn in code | `--plain`: the same app as stock Textual |
 
@@ -339,11 +341,12 @@ The theme reads each widget's computed styles on every frame, so your CSS decide
 
 | Widget | With glass |
 | --- | --- |
-| Anything with a `round`, `solid`, `heavy`, `double`, `dashed`, `ascii`, `thick`, `outer`, `inner`, `hkey` or `vkey` border | A glass panel with a gradient border in its own border colour. Textual still draws the `border_title` and `border_subtitle`, and the border has a notch around each. If only some edges have a border (a toast's accent bar, a rule), only those edges are drawn. Different left and right border colours make a two-colour gradient. `tall`, `wide`, `panel`, `tab` and `block` borders are left to Textual. |
+| Anything with a `round`, `solid`, `heavy`, `double`, `dashed`, `ascii`, `thick`, `outer`, `inner`, `hkey` or `vkey` border | A glass panel with a gradient border in its own border colour. Textual still draws the `border_title` and `border_subtitle`, and the border has a notch around each. If only some edges have a border (a toast's accent bar, a rule), only those edges are drawn. Different left and right border colours make a two-colour gradient. `tall`, `wide`, `panel`, `tab` and `block` borders are left to Textual (but see `Input`). |
 | Unbordered widgets with a neutral background of their own (headers, tags, code blocks, the footer) | A soft glass sheet in that colour. |
 | The focused widget's panel | A brighter border with a glow. In `full` motion it also gets a pulsing halo. |
 | `DataTable` | A header strip, very faint zebra bands (only if `zebra_stripes` is on), and a cursor pill for row and cell cursors. The pill tracks the cursor through scrolling, fixed rows and the header height. If the theme's cursor text would be hard to read on glass (Nord, light themes), the pill is drawn solid. |
 | `OptionList` (and the command palette's results), `ListView` | A pill on the highlighted option or item. |
+| `Input` (and its subclasses, the command palette's among them) | Its border is a glass panel too, the default `tall` one included, in the colours your CSS gives it: quiet without focus, lit with a glow with it, the theme's error colour after a failed validation (`-invalid`). The caret is a glowing bar at the cursor, in `block-cursor-background`, and it slides as you type. It doesn't blink: Textual's blink changes no pixel, so a focused input that nobody types in sends no graphics. A selection is a band behind the text. The placeholder stays dim. |
 | `Footer` | A small pill under each key. |
 | `ProgressBar` | A smooth, glowing bar with a faint track (determinate bars only). |
 | Scrollbars | A slim, rounded thumb on a faint track. |
@@ -548,12 +551,14 @@ The rules for a pixel widget:
 | `Area` | `rect, values, c1, c2, grid_lines=3` | A smooth area chart (values 0..1) | yes |
 | `Dot` | `x, y, color, trail=0.0, radius=0.32, ring=False, hollow=False, body=True` | A glowing dot at a cell-unit centre, with an optional comet trail to its left and a selection ring | yes |
 | `Pill` | `rect, color, focused=True, solid=False` | A selection pill | yes |
+| `Caret` | `x, y, color, dark=True` | A text cursor: a bright bar with a glow at the left of cell `x, y` | yes |
+| `Selection` | `rect, color` | The band behind selected text | yes |
 | `Lane` | `rect, color, chevron=True` | A horizontal track line through the middle of `rect` | no |
 | `Spine` | `x, y0, y1, c1, c2` | A vertical timeline line | no |
 | `Rule` | `rect, color, alpha=0.35` | A faint horizontal rule that fades along its length | no |
 | `HeaderBar` | `rect, c1, c2` | A darker band with a glowing hairline (a header) | no |
 
-The CSS scene builds `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Badge`, `Progress` and `Thumb` for stock widgets; you can yield them too.
+The CSS scene builds `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Caret`, `Selection`, `Badge`, `Progress` and `Thumb` for stock widgets; you can yield them too.
 
 An app can draw an item of its own: a frozen dataclass that subclasses `textual_glass.render.Item`, with `bbox(g)` and `draw(c, g)`. These names are public for it (each module's `__all__`): from `textual_glass.render`, `Item`, `Grid` (cells to pixels), `Canvas`, `Box` (a pixel box), `FRect` (a rect in cells), `Colour` (`"#rrggbb"` or an RGB tuple), `col` (a colour as floats) and `x_gradient`; from `textual_glass.palette`, `Palette` (the theme's colours, `ctx.palette`), `RGB`, `mix`, `border_pair`, `hex_of` and `luminance`. [`AGENTS.md`](AGENTS.md#adding-an-item) says how an item draws and keeps its light inside its box (rule 16); test an app's own items the same way. The bridge example draws its room with four (`textual-orbital/examples/bridge/bridge/widgets.py`) and tiles its viewscreen into sprites of at most `SPRITE_MAX_PX`.
 
@@ -617,7 +622,7 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 | File | Checks |
 | --- | --- |
 | `tests/test_units.py` | Protocol encoding (`q=2`, whole chunks, frames before playing), PNG, grids, palettes and theme variables, backdrops, every item at its box edge (rule 16), every sprite maker at its border (rule 17), panel diffs, dim frames, background jobs on the app thread, every hook failing soft (a border table of another shape included), no shadowed Textual attributes, `on_hard_exit` and glass's hard-exit sequence, and detection (including a real pty that answers the query, refuses it, never answers, or answers late). |
-| `tests/test_pilot.py` | `tests/sample_app.py` with glass forced on: the scene read from computed styles, the cursor pill through scrolling, which cells the filter makes transparent, modals, partial edits, idle silence, live toggling, motion levels, theme changes, `PixelMixin` items diffed by ident, sprites dimming under popups, page switches in the same frame, `SCOPED_CSS`, cached images across popups. A long day: the timer after glass turns off, the error budget and its retries (with a fake clock), errors in worker callbacks, no sync markers inside Textual's frame, sprite churn (key switches, resizes, removed widgets, several sprites per widget, partial repaints), a sprite maker that raises, every table bounded over hours of use, suspend and resume. |
+| `tests/test_pilot.py` | `tests/sample_app.py` with glass forced on: the scene read from computed styles, the cursor pill through scrolling, which cells the filter makes transparent, the stock `Input` (its panel, caret and selection, silence while it blinks, in a popup too), modals, partial edits, idle silence, live toggling, motion levels, theme changes, `PixelMixin` items diffed by ident, sprites dimming under popups, page switches in the same frame, `SCOPED_CSS`, cached images across popups. A long day: the timer after glass turns off, the error budget and its retries (with a fake clock), errors in worker callbacks, no sync markers inside Textual's frame, sprite churn (key switches, resizes, removed widgets, several sprites per widget, partial repaints), a sprite maker that raises, every table bounded over hours of use, suspend and resume. |
 | `tests/test_widgets.py` | Every pixel widget in both modes with identical layout, `Telemetry`'s one scale with and without glass, the `SelectList` pill (slides, settles, goes quiet) and its section headers staying in view, `GlassPanel` titles and accents, clipping in scrolling containers, `strip` never cutting a placeholder run. |
 | `tests/test_images.py` | `load_image` and `GlassImage`: GIF compositing, timing and loop counts, PNG transparency, EXIF rotation, limits, bad input, resampling, half blocks, play counts in the terminal, the memory budget. Tests with real pictures run when `GLASS_TEST_ART` points at a folder. |
 | `tests/test_flourishes.py` | Every flourish kind by itself: every frame transparent at the stage's border (rule 17) at five window and cell sizes, the limits, determinism, an `about` line and palette roles, no Textual imports, the stage's geometry. |
@@ -625,7 +630,7 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
 | `tests/test_scene_art.py` | The week in review (`scenes.space`) by itself: every look within the limits and every frame transparent at its border (rule 17), on both themes and in a busy week; determinism; `minimal` motion; seamless loops; the night a light theme brings (the viewport over the whole stage, its stars, the lifted hues); 150 items at 140x45 Retina cells well within the limits, a cue and a light each, the lights and ships sharing images; the show's length from 3 to 150 items, and the waves; a week too big for the terminal; a light coming on handing over to the one that stays; no Textual imports. |
 | `tests/test_scene_pilot.py` | `play_scene()` in a running app, with test actors and a fake clock: every actor uploaded, loops started after their frames, one-shots stepped and holding their last frame; native actors placed at offsets below the cell size (four cell sizes, fractional ones too), cropped at the stage's edge and unplaced outside it; stretched actors on whole cells; entrances, exits and cues; `start`; the hold in silence; every end reason, playing and holding, with images deleted and ids freed; a page switch while holding; the anchor's level; `minimal` motion; broken makers; the limit of two scenes; a long show and thirty replays staying bounded; actors sharing an image (one upload, a placement each, each placement deleted as its actor leaves and the image with the last, one-shots apart, every id freed); the kitty model's offsets and source rectangles. The demo plays to its hold at 70x22, 90x28 and 140x45; the week in review plays to its hold in each look at those sizes in silence, takes a 150-item week, and puts its summary back after a new theme and a resize. |
 | `tests/test_flourish_pilot.py` | `flourish()` in a running app: frames uploaded while stopped, placed at the anchor's level, stepped in order and deleted after the last one, then silence; the no-op cases; `MAX_FLOURISHES`; dropped on a resize, a theme change, `minimal` motion, a popup closing, suspend and resume; a broken maker. The demo plays every kind at 70x22, 90x28 and 140x45. |
-| `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
+| `tests/test_pty.py` | The showcase in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers below the threshold, every cell background default, partial edits, idle silence at `subtle` and `full`, modals with their scrim and picture, typing into an `Input` on the page and in a popup, the command palette, a resize, page switches and the page cache, the pixel widgets and their sprite, `ctrl+z` and `fg` (SIGTSTP, SIGCONT), SIGTERM and SIGHUP with glass on and off, `on_hard_exit` with real signals, the screenshot helper, a stress run, and the fallback paths (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers) sending no graphics. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` (with `textual_glass.testing.screenshots.shoot`). |
 | `tests/flourish_sheet.py` | Contact sheets and GIFs of each flourish kind (see [`AGENTS.md`](AGENTS.md#adding-a-flourish)). |
@@ -641,7 +646,8 @@ GLASS_TEST_ART=~/Pictures uv run pytest textual-glass/tests/test_images.py   # w
   - `Screen._compositor.visible_widgets`;
   - `Widget._border_title` and `_border_subtitle`;
   - `OptionList._lines`;
-  - `DataTable._row_label_column_width`.
+  - `DataTable._row_label_column_width`;
+  - `Input._position_to_cell`.
 
   Each hook degrades to "do nothing" if it breaks. After repeated errors, glass turns itself off and the app carries on, plain, and glass tries again later (see [Errors](#errors)).
 - The border glyph patch and the filter patch are process-wide while glass is on. That is fine for one app per process.

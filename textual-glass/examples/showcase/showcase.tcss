@@ -176,8 +176,22 @@ Screen.-tall #px-bottom {
 
 /* -- popups ----------------------------------------------------------------------------- */
 
-ShipScreen, ServiceScreen {
+ShipScreen, ServiceScreen, NoteScreen {
     align: center middle;
+}
+
+#note-dialog {
+    width: 64;
+    height: auto;
+    padding: 1 2;
+    border: round $accent;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    background: $panel;
+}
+
+#note {
+    margin: 1 0;
 }
 
 #ship-dialog {

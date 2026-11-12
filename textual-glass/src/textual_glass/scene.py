@@ -3,9 +3,9 @@
 Nothing here is specific to one app: bordered widgets become glass panels in
 their own border colour, unbordered widgets with a neutral background become
 soft glass sheets, and a few stock widgets get extra chrome (DataTable header,
-zebra rows and cursor pill; OptionList and ListView highlights; Footer key
-badges; ProgressBar bars; scrollbars). The app's CSS, including ``:focus``
-rules and theme variables, decides every colour.
+zebra rows and cursor pill; OptionList and ListView highlights; Input's panel,
+caret and selection; Footer key badges; ProgressBar bars; scrollbars). The
+app's CSS, including ``:focus`` rules and theme variables, decides every colour.
 
 Widgets that mix in :class:`PixelMixin` add their own items in the same walk
 (``pixel_items(ctx)``), so CSS chrome and custom pixels share one paint order.
@@ -23,7 +23,22 @@ from textual.widget import Widget
 
 from . import _textual_hooks as hooks
 from .filter import NO_RULES, Rules
-from .items import BAR, HEAVY, LINE, NONE, Badge, HeaderStrip, Panel, Pill, Progress, Rows, Surface, Thumb
+from .items import (
+    BAR,
+    HEAVY,
+    LINE,
+    NONE,
+    Badge,
+    Caret,
+    HeaderStrip,
+    Panel,
+    Pill,
+    Progress,
+    Rows,
+    Selection,
+    Surface,
+    Thumb,
+)
 from .palette import RGB, Palette, border_pair, hue_shift, lighten, luminance, mix, to_rgb
 from .render import Item
 
@@ -33,7 +48,7 @@ if TYPE_CHECKING:
     from textual.geometry import Region
     from textual.scrollbar import ScrollBar
     from textual.strip import Strip
-    from textual.widgets import DataTable, OptionList
+    from textual.widgets import DataTable, Input, OptionList
     from textual.widgets._footer import FooterKey
 
     from .engine import GlassEngine
@@ -48,11 +63,16 @@ GLASS_EDGES: dict[str, str] = {
     "thick": BAR, "outer": BAR, "inner": BAR,
 }
 
-#: Component classes whose backgrounds glass replaces with a pill, so it owns
-#: them even though they are colourful.
+#: An ``Input``'s default border is ``tall``: under glass it is a panel like any other. Its
+#: glyphs are blanked by the input's own filter rules, so other ``tall`` widgets keep theirs.
+INPUT_EDGES: dict[str, str] = {**GLASS_EDGES, "tall": LINE}
+
+#: Component classes whose backgrounds glass replaces with a pill (or a caret),
+#: so it owns them even though they are colourful.
 CURSOR_COMPONENTS = {
     "DataTable": ("datatable--cursor", "datatable--fixed-cursor"),
     "OptionList": ("option-list--option-highlighted",),
+    "Input": ("input--cursor", "input--selection"),
 }
 MODAL_DIM = 0.45
 
@@ -222,7 +242,25 @@ def rules_for(widget: Widget, palette: Palette, skip: Sequence[str]) -> Rules:
                 # cell/column cursors extend rows with a faded copy of the row colour
                 faded = Color(*rgb).blend(bg, 0.25)
                 owned.add(_rgb(faded))
+    if is_a(widget, "Input"):
+        return _input_rules(widget, owned)
     return Rules(owned=frozenset(owned)) if owned else NO_RULES
+
+
+def _input_rules(widget: Widget, owned: set[RGB]) -> Rules:
+    """An ``Input`` also hands glass its cursor cell and the glyphs of a ``tall`` border."""
+    caret = None
+    try:
+        bg = widget.get_component_rich_style("input--cursor").bgcolor
+        if bg is not None and bg.triplet is not None:
+            caret = (bg.triplet.red, bg.triplet.green, bg.triplet.blue)
+    except Exception:  # noqa: BLE001
+        pass
+    if caret == _rgb(widget.background_colors[1]):
+        caret = None  # a cursor the theme doesn't colour: nothing tells its cell from the others
+    styles = widget.styles
+    sides = (styles.border_top, styles.border_right, styles.border_bottom, styles.border_left)
+    return Rules(owned=frozenset(owned), caret=caret, frame=any(kind == "tall" for kind, _ in sides))
 
 
 # =============================================================== edges ==
@@ -231,13 +269,16 @@ def rules_for(widget: Widget, palette: Palette, skip: Sequence[str]) -> Rules:
 Edges = tuple[tuple[str, str, str, str], tuple[RGB, RGB, RGB, RGB]]
 
 
-def _edges(widget: Widget, dark: bool = True) -> Edges | None:
+def _edges(widget: Widget, dark: bool = True, quiet: RGB | None = None) -> Edges | None:
     """Glass edge styles (top, right, bottom, left) and the colours of those sides, if any.
 
     Near-black separator lines (the command palette's) vanish on dark themes:
-    on glass they would read as cracks.
+    on glass they would read as cracks. An ``Input`` (the caller passes ``quiet``)
+    keeps them, in that colour: its border while it has no focus is that dark, and
+    it is still a field. Its ``tall`` border counts as a line too.
     """
     styles = widget.styles
+    known = GLASS_EDGES if quiet is None else INPUT_EDGES
     base = widget.background_colors[0]
     for sides in (
         (styles.border_top, styles.border_right, styles.border_bottom, styles.border_left),
@@ -246,10 +287,13 @@ def _edges(widget: Widget, dark: bool = True) -> Edges | None:
         kinds: list[str] = []
         colours: list[RGB] = []
         for kind, colour in sides:
-            style = GLASS_EDGES.get(kind, NONE)
+            style = known.get(kind, NONE)
             rgb = _rgb(base + colour)
             if style and dark and luminance(rgb) < 0.06:
-                style = NONE
+                if quiet is None:
+                    style = NONE
+                else:
+                    rgb = quiet
             kinds.append(style)
             colours.append(rgb)
         if any(kinds):
@@ -436,7 +480,8 @@ def _base_chrome(widget: Widget, region: Region, clip: Rect | None, level: int, 
     bg_rgb = _rgb(bg)
     structural = pal.is_structural(bg_rgb) and not skipped(widget, ctx.skip)
     dialog = (level > 0 and depth == 0) or is_a(widget, "Toast")
-    edges = _edges(widget, pal.dark)
+    field = is_a(widget, "Input") and not skipped(widget, ctx.skip)
+    edges = _edges(widget, pal.dark, mix(pal.surface, pal.foreground, 0.38) if field else None)
     if edges is not None and not is_a(widget, "ScrollBar"):
         kinds = edges[0]
         c1, c2 = _gradient_ends(edges)
@@ -470,6 +515,8 @@ def _widget_chrome(widget: Widget, region: Region, clip: Rect | None, depth: int
         rect = (x, y - scroll_y, w, h)
         focused = bool(getattr(widget.parent, "has_focus", False))
         dynamic.append(Pill(rect, cursor_rgb, focused, depth=depth + 1, clip=clip))
+    elif is_a(widget, "Input") and not skipped(widget, ctx.skip):
+        _input(cast("Input", widget), clip, depth, ctx, cursor_rgb, dynamic)
     elif is_a(widget, "FooterKey"):
         _footer_key(cast("FooterKey", widget), depth, static)
     elif is_a(widget, "Bar"):
@@ -601,6 +648,27 @@ def _option_list(widget: OptionList, depth: int, ctx: PixelContext, cursor_rgb: 
     except Exception:  # noqa: BLE001
         solid = False
     dynamic.append(Pill(rect, cursor_rgb, widget.has_focus or in_modal, solid, depth=depth + 1, clip=clip))
+
+
+def _input(widget: Input, clip: Rect | None, depth: int, ctx: PixelContext, cursor_rgb: RGB,
+           dynamic: list[Item]) -> None:
+    """The caret of a focused input, and a band behind its selection. The caret slides to a new
+    cell and never blinks: Textual's cursor blink changes no pixel."""
+    content = widget.content_region
+    if not widget.has_focus or not content.width or not content.height:
+        return
+    scroll_x = int(widget.scroll_offset.x)
+    start, end = sorted(widget.selection)
+    if start != end:
+        x0, x1 = (content.x + hooks.input_cell(widget, i) - scroll_x for i in (start, end))
+        left, right = max(x0, content.x), min(x1, content.right)
+        if right > left:
+            dynamic.append(Selection((left, content.y, right - left, 1), cursor_rgb,
+                                     ident=f"selection:{id(widget)}", depth=depth + 1, clip=clip))
+    cell = content.x + hooks.input_cell(widget, widget.cursor_position) - scroll_x
+    target = (float(cell), float(content.y), 1.0, 1.0)
+    x, y, _, _ = ctx.tweens.value(("caret", id(widget)), target, ctx.now, ctx.animate)
+    dynamic.append(Caret(x, y, cursor_rgb, ctx.palette.dark, ident=f"caret:{id(widget)}", depth=depth + 2, clip=clip))
 
 
 def _footer_key(widget: FooterKey, depth: int, static: list[Item]) -> None:

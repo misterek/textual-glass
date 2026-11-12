@@ -1,6 +1,7 @@
-"""Popups: the "ready to ship" modal with its pixel art, and a service's details.
+"""Popups: the "ready to ship" modal with its pixel art, a service's details, and a
+one-line note for a service.
 
-Both are stock ``ModalScreen``s. With glass, the screen below gets a pixel
+All are stock ``ModalScreen``s. With glass, the screen below gets a pixel
 scrim and the dialog its own glass; the art is a ``GlassImage`` (real pixels
 the terminal holds, half blocks without glass).
 """
@@ -11,13 +12,15 @@ from typing import ClassVar
 
 from art import rocket_frames
 from rich.text import Text
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.events import Click
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Label, Markdown, Static
+from textual.validation import Length
+from textual.widgets import DataTable, Input, Label, Markdown, Static
 from world import RELEASE, Service, Tones
 
 from textual_glass import GlassImage, LoadedImage
@@ -130,3 +133,34 @@ class ServiceScreen(ModalScreen[None]):
     def on_click(self, event: Click) -> None:
         if event.widget is self:
             self.dismiss()
+
+
+class NoteScreen(ModalScreen[str | None]):
+    """A one-line note for a service, in a stock ``Input``: enter saves it, escape doesn't."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "dismiss(None)", "Cancel")]
+
+    def __init__(self, service: Service, tones: Tones) -> None:
+        super().__init__()
+        self.service = service
+        self.tones = tones
+
+    def compose(self) -> ComposeResult:
+        t = self.tones
+        with Vertical(id="note-dialog"):
+            yield Label(Content.assemble("What should the next person know about ", (self.service.key, "bold"), "?"))
+            yield Input(placeholder="at least three letters", validators=[Length(minimum=3)], id="note")
+            yield Label(Content.assemble(("enter", f"bold {t.text_primary}"), " save   ",
+                                         ("esc", f"bold {t.text_primary}"), " cancel"), id="note-keys")
+
+    def on_mount(self) -> None:
+        self.query_one("#note-dialog").border_title = f"Note for {self.service.key}"
+
+    @on(Input.Submitted, "#note")
+    def _save(self, event: Input.Submitted) -> None:
+        if event.validation_result is not None and event.validation_result.is_valid:
+            self.dismiss(event.value.strip())
+
+    def on_click(self, event: Click) -> None:
+        if event.widget is self:
+            self.dismiss(None)

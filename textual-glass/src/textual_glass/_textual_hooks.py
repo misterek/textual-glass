@@ -24,6 +24,7 @@ Hooks:
 * ``Widget._border_title`` / ``_border_subtitle``: rendered label lengths.
 * ``OptionList._lines``: which screen line shows the highlighted option.
 * ``DataTable._row_label_column_width``: x offset of the first column.
+* ``Input._position_to_cell``: the cell of a character of the value (tabs expanded).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from textual.app import App
     from textual.filter import LineFilter
     from textual.screen import Screen
-    from textual.widgets import DataTable, OptionList
+    from textual.widgets import DataTable, Input, OptionList
 
 TESTED_TEXTUAL = ">=8.2,<9"
 
@@ -272,3 +273,13 @@ def row_label_width(table: DataTable) -> int:
         return int(table._row_label_column_width)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def input_cell(widget: Input, index: int) -> int:
+    """The cell, from the start of an Input's text, of the character at ``index`` of its value."""
+    try:
+        if widget.password:
+            return index  # one bullet per character
+        return int(widget._position_to_cell(index))
+    except Exception:  # noqa: BLE001
+        return index

@@ -2,7 +2,8 @@
 
 Every item is a frozen dataclass in screen cells (see ``render``). Stock-widget
 chrome first (the CSS scene builds these): ``Panel``, ``Surface``,
-``HeaderStrip``, ``Rows``, ``Pill``, ``Badge``, ``Progress``, ``Thumb``. Then
+``HeaderStrip``, ``Rows``, ``Pill``, ``Caret``, ``Selection``,
+``Badge``, ``Progress``, ``Thumb``. Then
 instruments for custom widgets: ``HeaderBar``, ``Rule``, ``Ring``, ``Signal``,
 ``Meter``, ``Area``, ``Bars``, ``Lane``, ``Dot``, ``Spine``.
 
@@ -435,6 +436,84 @@ class Pill(Item):
         if self.focused:
             reach = smoothstep(0.6 * g.sy, 0.45 * g.sy, d)  # rounded, and gone before the box ends
             c.glow(view, a, np.exp(-np.maximum(d, 0) / (0.14 * g.sy)) * (d > 0) * 0.3 * (1 - 0.7 * u) * reach)
+
+
+@dataclass(frozen=True)
+class Caret(Item):
+    """The text cursor of an ``Input``: a bright bar at the left of the cursor's cell, with a
+    soft glow. It never blinks: a focused input nobody types in sends nothing."""
+
+    dynamic: ClassVar[bool] = True
+
+    x: float  # the cursor's cell; fractional while the caret slides
+    y: float
+    color: Colour
+    dark: bool = True
+    ident: str = ""
+    depth: int = 0
+    clip: FRect | None = None
+
+    def geometry(self, g: Grid) -> tuple[float, float, float, float]:
+        cx = (self.x + 0.06) * g.sx
+        half = max(0.75, 0.085 * g.sx)
+        return cx - half, (self.y + 0.1) * g.sy, cx + half, (self.y + 0.9) * g.sy
+
+    def reach(self, g: Grid) -> float:
+        return 0.8 * g.sx  # where the glow ends, in pixels from the bar
+
+    def bbox(self, g: Grid) -> Box:
+        return _grow(self.geometry(g), self.reach(g) + self.margin(g))
+
+    def draw(self, c: Canvas, g: Grid) -> None:
+        left, top, right, bottom = self.geometry(g)
+        win = self.window(c, g)
+        if win is None:
+            return
+        view, xs, ys = win
+        half = (right - left) / 2
+        d = sd_rrect(xs, ys, (left + right) / 2, (top + bottom) / 2, half, (bottom - top) / 2, half)
+        a = col(self.color)
+        reach = self.reach(g)
+        fade = smoothstep(reach, 0.55 * reach, d)  # rounded, and gone before the box ends
+        light = np.exp(-np.maximum(d, 0) / (0.3 * g.sx)) * (d > 0) * 0.5 * fade
+        if self.dark:
+            c.glow(view, a, light)
+            c.over(view, a * 0.35 + 0.65, np.clip(0.5 - d, 0, 1))
+        else:  # on a light theme light doesn't show: a tint, and the bar in the colour itself
+            c.over(view, a, light * 0.6)
+            c.over(view, a * 0.85, np.clip(0.5 - d, 0, 1))
+
+
+@dataclass(frozen=True)
+class Selection(Item):
+    """The band behind the selected text of an ``Input``."""
+
+    dynamic: ClassVar[bool] = True
+
+    rect: FRect
+    color: Colour
+    ident: str = ""
+    depth: int = 0
+    clip: FRect | None = None
+
+    def geometry(self, g: Grid) -> tuple[float, float, float, float]:
+        x, y, w, h = self.rect
+        return x * g.sx, (y + 0.08) * g.sy, (x + w) * g.sx, (y + h - 0.08) * g.sy
+
+    def bbox(self, g: Grid) -> Box:
+        return _grow(self.geometry(g), 0.5 + self.margin(g))
+
+    def draw(self, c: Canvas, g: Grid) -> None:
+        left, top, right, bottom = self.geometry(g)
+        win = self.window(c, g)
+        if win is None:
+            return
+        view, xs, ys = win
+        d = sd_rrect(xs, ys, (left + right) / 2, (top + bottom) / 2, (right - left) / 2, (bottom - top) / 2,
+                     min(0.22 * g.sy, (right - left) / 2))
+        a = col(self.color)
+        c.over(view, a, np.clip(0.5 - d, 0, 1) * 0.5)
+        c.over(view, a * 0.6 + 0.4, np.clip(1.0 - np.abs(d + 0.5), 0, 1) * 0.55)
 
 
 @dataclass(frozen=True)
