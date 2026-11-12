@@ -15,7 +15,7 @@ import weakref
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Generic, TypeVar, cast, final
 
 from rich.segment import Segment
 from rich.style import Style
@@ -40,6 +40,32 @@ Part = tuple[str, str]  # (text, Rich style), e.g. ("12", "bold #38e1ff")
 #: How far text fades towards the background (:func:`tone`): soft, dim and
 #: faint text; ``BRIGHT`` goes the other way, past the text colour.
 SOFT, DIM, FAINT, BRIGHT = 0.18, 0.42, 0.6, -0.45
+
+
+@final
+class ThemeColours:
+    """The type of :data:`THEME`."""
+
+    _only: ClassVar[ThemeColours | None] = None
+
+    def __new__(cls) -> ThemeColours:
+        if cls._only is None:
+            cls._only = super().__new__(cls)
+        return cls._only
+
+    def __repr__(self) -> str:
+        return "THEME"
+
+
+#: Passed to a setter's colour argument: back to the theme's colour, as if the
+#: widget had been made with ``None`` (which in a setter keeps the current one).
+THEME: Final = ThemeColours()
+
+def resolve(new: Any, current: Any) -> Any:
+    """A setter's colour argument: None keeps ``current``, ``THEME`` clears it, else ``new``."""
+    if new is None:
+        return current
+    return None if isinstance(new, ThemeColours) else new
 
 
 @lru_cache(maxsize=1024)

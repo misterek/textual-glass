@@ -27,9 +27,11 @@ from .base import (
     SOFT,
     Part,
     PixelWidget,
+    ThemeColours,
     ellipsize,
     hex_colour,
     placeholder_parts,
+    resolve,
     strip,
     text_meter,
     tone,
@@ -39,6 +41,8 @@ from .panel import GlassPanel
 #: Eighth blocks, empty to full: the text form of bars and areas.
 BLOCKS = " ▁▂▃▄▅▆▇█"
 Pair = tuple[Colour, Colour]
+PairArg = Pair | ThemeColours | None
+ColourArg = Colour | ThemeColours | None
 
 
 def _blend(c1: Colour, c2: Colour, t: float) -> str:
@@ -79,9 +83,10 @@ class RingGauge(PixelWidget):
         self.sublabel = sublabel
         self.tones = colors
 
-    def set(self, fraction: float, text: str, colors: Pair | None = None, sublabel: str | None = None) -> None:
-        """Show ``fraction`` (0..1) with ``text`` inside; ``colors`` and ``sublabel`` stay as they were if None."""
-        new = (fraction, text, colors or self.tones, self.sublabel if sublabel is None else sublabel)
+    def set(self, fraction: float, text: str, colors: PairArg = None, sublabel: str | None = None) -> None:
+        """Show ``fraction`` (0..1) with ``text`` inside; ``colors`` and ``sublabel`` stay as they were if None
+        (``THEME``: ``colors`` back to the theme's)."""
+        new = (fraction, text, resolve(colors, self.tones), self.sublabel if sublabel is None else sublabel)
         if new != (self.fraction, self.text, self.tones, self.sublabel):
             self.fraction, self.text, self.tones, self.sublabel = new
             self.refresh()
@@ -155,11 +160,11 @@ class Telemetry(PixelWidget):
         self.scale_max: float | None = None
 
     def set_series(self, values: Sequence[float], ghost: Sequence[float] = (), labels: Sequence[str] = (),
-                   today: int = -1, colors: Pair | None = None, scale_max: float | None = None) -> None:
+                   today: int = -1, colors: PairArg = None, scale_max: float | None = None) -> None:
         """Show ``values``; ``scale_max`` (above 0) is the value that fills the height (None: see :attr:`scale`)."""
         if scale_max is not None and scale_max <= 0:
             raise ValueError(f"scale_max must be above 0, not {scale_max!r}")
-        new = (tuple(values), tuple(ghost), tuple(labels), today, colors or self.tones, scale_max)
+        new = (tuple(values), tuple(ghost), tuple(labels), today, resolve(colors, self.tones), scale_max)
         if new != (self.values, self.ghost, self.labels, self.today, self.tones, self.scale_max):
             self.values, self.ghost, self.labels, self.today, self.tones, self.scale_max = new
             self.refresh()
@@ -267,8 +272,8 @@ class StatValue(PixelWidget):
         self.color = color
 
     def set(self, value: str, delta: float | None = None, better: Literal["up", "down"] = "up",
-            color: Colour | None = None) -> None:
-        new = (value, delta, better, color if color is not None else self.color)
+            color: ColourArg = None) -> None:
+        new = (value, delta, better, resolve(color, self.color))
         if new != (self.value, self.delta, self.better, self.color):
             self.value, self.delta, self.better, self.color = new
             self.refresh()
@@ -320,10 +325,12 @@ class StatTile(GlassPanel):
 
     def set(self, value: str | float, delta: float | None, series: Sequence[float], ghost: Sequence[float] = (),
             labels: Sequence[str] = (), today: int = -1, better: Literal["up", "down"] = "up",
-            scale_max: float | None = None, colors: Pair | None = None, color: Colour | None = None) -> None:
+            scale_max: float | None = None, colors: PairArg = None, color: ColourArg = None) -> None:
         self.stat.set(str(value), delta, better, color)
         self.chart.set_series(series, ghost, labels, today, colors, scale_max=scale_max)
-        if colors is not None:
+        if isinstance(colors, ThemeColours):
+            self.set_accent(None)
+        elif colors is not None:
             self.set_accent(colors[0], colors[1])
 
 
@@ -358,8 +365,8 @@ class ProgressArc(PixelWidget):
         self.detail: tuple[Part, ...] = ()
 
     def set(self, fraction: float | None, label: str = "", sublabel: str = "", detail: Sequence[Part] = (),
-            colors: Pair | None = None) -> None:
-        new = (fraction, label, sublabel, tuple(detail), colors or self.tones)
+            colors: PairArg = None) -> None:
+        new = (fraction, label, sublabel, tuple(detail), resolve(colors, self.tones))
         if new != (self.fraction, self.label, self.sublabel, self.detail, self.tones):
             self.fraction, self.label, self.sublabel, self.detail, self.tones = new
             self.refresh()
@@ -446,11 +453,11 @@ class SpriteView(PixelWidget):
         self.fallback_color = fallback_color
 
     def set_sprite(self, key: tuple[Any, ...], maker: SpriteMaker, fallback: str | None = None,
-                   fallback_color: Colour | None = None) -> None:
+                   fallback_color: ColourArg = None) -> None:
         """Show another sprite (``key`` names it; the same key is the same picture).
-        ``fallback`` and ``fallback_color`` stay as they were when None."""
+        ``fallback`` and ``fallback_color`` stay as they were when None (``THEME`` on the colour: the theme's)."""
         fallback = self.fallback if fallback is None else fallback
-        colour = self.fallback_color if fallback_color is None else fallback_color
+        colour = resolve(fallback_color, self.fallback_color)
         if (key, fallback, colour) != (self.key, self.fallback, self.fallback_color):
             self.key, self.maker, self.fallback, self.fallback_color = key, maker, fallback, colour
             self.refresh()

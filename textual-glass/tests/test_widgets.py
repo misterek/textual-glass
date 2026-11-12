@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,7 +25,7 @@ from textual.geometry import Region
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
 
-from textual_glass import Glass, kitty
+from textual_glass import THEME, Glass, kitty
 from textual_glass import _textual_hooks as hooks
 from textual_glass import items as R
 from textual_glass import widgets as W
@@ -718,3 +718,64 @@ async def test_instrument_colours_change_with_each_update(output: Output) -> Non
         glyph = next(seg for y in range(beacon.size.height) for seg in beacon.render_line(y) if "!" in seg.text)
         assert glyph.style is not None and glyph.style.color is not None
         assert tuple(glyph.style.color.triplet) == (0x12, 0x34, 0x56)
+
+
+async def test_theme_takes_every_colour_setter_back_to_the_theme(output: Output) -> None:
+    """After a colour and then ``THEME``, a widget is the same as a fresh one, and follows theme changes."""
+
+    def snapshot(app: GlassBoard) -> tuple[list[str], dict[str, list[tuple[str, Any]]]]:
+        layer = app.glass.layers.get(MAIN)
+        items = sorted(repr(replace(i, ident="")) for i in (*layer.static, *layer.dynamic)) if layer else []
+        tile = app.query_one("#landed", StatTile)
+        widgets = {"cpu": app.query_one("#cpu"), "arc": app.query_one("#arc"), "stat": app.query_one("#stat"),
+                   "chart": tile.chart, "value": tile.stat}
+        return items, {name: [(seg.text, seg.style) for y in range(w.size.height) for seg in w.render_line(y)]
+                       for name, w in widgets.items()}
+
+    series = [2, 4, 1, 0, 3, 1, 1]
+    fresh, touched = GlassBoard(), GlassBoard()
+    results = []
+    for app in (fresh, touched):
+        async with app.run_test(size=SIZE) as pilot:
+            await start(app, pilot)
+            if app is touched:
+                red, blue = ("#ff0000", "#aa0000"), "#0000ff"
+                app.query_one("#cpu", RingGauge).set(0.4, "40%", colors=red)
+                app.query_one(ProgressArc).set(0.62, "Migrate DB", "G-12 · ops", colors=red)
+                app.query_one(StatValue).set("12", 3, color=blue)
+                tile = app.query_one("#landed", StatTile)
+                tile.set(12, 3, series, [3, 2, 2, 1, 2, 0, 0], DAYS, today=4, colors=red, color=blue)
+                beacon = app.query_one(SpriteView)
+                beacon.set_sprite(beacon.key, beacon.maker, fallback_color=blue)
+                await settle(app, pilot)
+                assert snapshot(app) != results[0][0], "the colours show"
+                app.query_one("#cpu", RingGauge).set(0.4, "40%", colors=THEME)
+                app.query_one(ProgressArc).set(0.62, "Migrate DB", "G-12 · ops", colors=THEME)
+                app.query_one(StatValue).set("12", 3, color=THEME)
+                tile.set(12, 3, series, [3, 2, 2, 1, 2, 0, 0], DAYS, today=4, colors=THEME, color=THEME)
+                beacon.set_sprite(beacon.key, beacon.maker, fallback_color=THEME)
+            await settle(app, pilot)
+            glass_on = snapshot(app)
+            app.theme = "textual-light"
+            await settle(app, pilot)
+            themed = snapshot(app)
+            app.glass.deactivate()
+            await pilot.pause()
+            results.append((glass_on, themed, snapshot(app)))
+    assert results[0] == results[1]
+    assert results[0][0] != results[0][1], "the theme change shows"
+    # The board's beacon is built with a colour of its own, so THEME is checked on a bare one: it uses the primary.
+    app = GlassBoard()
+    async with app.run_test(size=SIZE) as pilot:
+        bare = SpriteView(("bare",), lambda w, h: beacon_frames(w, h, "waiting", BEACON), fallback="!", id="bare")
+        await app.mount(bare)
+        bare.set_sprite(bare.key, bare.maker, fallback_color="#123456")
+        bare.set_sprite(bare.key, bare.maker, fallback_color=THEME)
+        await pilot.pause()
+        glyph = next(seg for y in range(bare.size.height) for seg in bare.render_line(y) if "!" in seg.text)
+        assert glyph.style is not None and glyph.style.color is not None
+        assert tuple(glyph.style.color.triplet) == Color.parse(app.theme_variables["primary"]).rgb
+
+
+def test_theme_is_a_singleton_and_reads_as_theme() -> None:
+    assert repr(THEME) == "THEME" and W.ThemeColours() is THEME
