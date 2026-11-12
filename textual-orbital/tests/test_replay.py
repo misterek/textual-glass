@@ -605,7 +605,7 @@ async def test_the_console_replay_page(output: Output) -> None:
         assert plays.starts == [0.0, 0.0, 0.0] and replay.look == "harbour"
         assert plays.calls[2]["make"].keywords["look"] == "harbour"
         assert "harbour" in str(app.query_one("#replay-panel", GlassPanel).border_title)
-        assert ("1-5", "switch page") in console.HELP_KEYS and len(console.HELP_KEYS) <= 14
+        assert ("1-5 tab", "page / next panel") in console.HELP_KEYS and len(console.HELP_KEYS) <= 14
         await pilot.press("1")
         await settle(app, pilot)
         assert plays.calls[2]["ends"] == ["hidden"] and page.display is False

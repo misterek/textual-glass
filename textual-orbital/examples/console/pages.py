@@ -311,8 +311,8 @@ class WeekPage(Page):
 class BoardPage(Page):
     """Page 4: goals as progress arcs, the work in flight, and what landed."""
 
-    KEYS = [("1-5", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "tasks/done"), ("o", "browser"),
-            ("?", "help"), ("q", "quit")]
+    KEYS = [("1-5", "pages"), ("j/k", "move"), ("⏎", "open"), ("tab", "tasks/done"), ("n", "new task"),
+            ("o", "browser"), ("?", "help"), ("q", "quit")]
     DEFAULT_FOCUS = "#tasks"
     MAX_ARCS = 6
 

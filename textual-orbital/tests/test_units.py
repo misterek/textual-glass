@@ -723,7 +723,7 @@ def test_app_and_widgets_add_no_attribute_textual_has() -> None:
                W.EventLog(), W.DoneList(), W.HeaderStrip(), W.Brand(), W.Clock(), W.KeyBar(), W.SourceHealth(),
                W.Page(), W.AlertToast(Alert("k", "waiting", "t")), W.WeekReplay()]
     screens = [W.AlertScreen(Alert("k", "waiting", "t")), W.DetailScreen("t"), W.HelpScreen([]),
-               W.SourcesScreen([])]
+               W.SourcesScreen([]), W.PromptModal("t", "p", "v")]
     plain_widget, plain_screen = set(vars(Widget())), set(vars(ModalScreen()))
     for obj, base, plain in [*((w, Widget, plain_widget) for w in widgets),
                              *((s, ModalScreen, plain_screen) for s in screens)]:

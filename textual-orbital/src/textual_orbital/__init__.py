@@ -76,9 +76,11 @@ from .widgets import (
     HeaderStrip,
     HelpScreen,
     KeyBar,
+    Lazy,
     OrbitalModal,
     Page,
     PriorityList,
+    PromptModal,
     SourceHealth,
     SourcesScreen,
     TaskBoard,
@@ -91,8 +93,8 @@ __version__ = "0.3.0"
 
 __all__ = [
     "AlertScreen", "AlertToast", "BeaconRow", "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip",
-    "HelpScreen", "KeyBar", "OrbitalApp", "OrbitalModal", "Page", "PriorityList", "SourceHealth", "SourcesScreen",
-    "TaskBoard", "Track", "TrackTable", "WeekReplay",
+    "HelpScreen", "KeyBar", "Lazy", "OrbitalApp", "OrbitalModal", "Page", "PriorityList", "PromptModal",
+    "SourceHealth", "SourcesScreen", "TaskBoard", "Track", "TrackTable", "WeekReplay",
     "ALERT_STYLES", "ENTITY_URGENCY", "ORBITAL", "ORBITAL_NAVY", "PALETTE", "SOURCE_COLORS", "SOURCE_NAMES",
     "WHY_COLORS",
     "Alert", "AlertQueue", "AlertRules", "AttentionItem", "Condition", "DayCount", "DoneTask", "Entity",

@@ -20,16 +20,16 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 | `widgets/track.py` | `Track`, `TrackTable`, `status_word`, `HEALTH_COLORS`, `HEALTH_WORDS`. |
 | `widgets/page.py` | `Page`. |
 | `widgets/replay.py` | `WeekReplay` (the week in review over glass's space scene, or a text rundown), `ReplayWeek`, `SHIPS`, `SHIP_CLASSES`, `week_hours`. |
-| `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `AlertToast`, `DetailScreen` (with lazy values), `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
+| `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `AlertToast`, `DetailScreen` (lazy values and `Lazy`, a body that scrolls, `set_head`), `PromptModal`, `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
 
 Elsewhere in `textual-orbital/`:
 
 | Path | What it is |
 | --- | --- |
-| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`, `--alert-style`, `--toast-timeout`; `ConsoleToast` (its `HINTS`) and the keys it binds to `finish_alert`. |
+| `examples/console/app.py` | Mission Console: keys, detail views for every record type, `n` for a new task (a `PromptModal`, added through `OrbitalApp.fetch`, then fetched at once), `--provider`, `--fake-speed`, `--static`, `--plain`, `--snooze-file`, `--alert-style`, `--toast-timeout`; `ConsoleToast` (its `HINTS`) and the keys it binds to `finish_alert`. |
 | `examples/console/pages.py`, `console.tcss` | Its five pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`; the Replay page plays the week in review (`p` again, `l` the next look). |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`; `NeedsYouRule`, the library's `WaitingRule` with its alerts kept popups (`style="modal"`). |
-| `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, and `history(first, last)`, a slow call for older weeks. Only for the demo and the tests; don't import it from real code. |
+| `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, `history(first, last)`, a slow call for older weeks, and `add_task(title)` for the console's `n`. Only for the demo and the tests; don't import it from real code. |
 | `examples/bridge/` | The bridge: Claude Code and Codex sessions as crew on a starship bridge, from a hook of its own (`bridge/hook.py`). Self-contained so it can be copied out: its own `README.md`, `PACKS.md` (the crew) and `tests/` (in the workspace's `testpaths`). It imports the package as `bridge` (its `tests/conftest.py` puts it on the path). |
 | `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_pilot.py`, `test_replay.py` (`WeekReplay`), `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser` and `outside_tmux` fixtures), `screenshots.py`. |
 
@@ -445,7 +445,7 @@ What each piece does:
 - `HeaderStrip` shows the tabs, a health dot per source and the clock. The app feeds the dots (`health_changed`); the clock lives outside the pages, so `minute_tick` ticks it.
 - `ContentSwitcher` holds the pages. A page switch lands its glass in the same frame as its text (rule 19).
 - Every `SelectList` (the queue, the table) posts `SelectList.Selected` on `enter`; `Track` posts `Track.Selected`.
-- `DetailScreen` dismisses with `"open"` when the user presses `o` in it; the callback opens the link. A value that takes a slow call (the run's log, its comments) can be a zero-argument callable, `("log", lambda: fetch_log(record.key))`: it loads in a thread while "loading…" shows.
+- `DetailScreen` dismisses with `"open"` when the user presses `o` in it; the callback opens the link. A value that takes a slow call (the run's log, its comments) can be a zero-argument callable, `("log", lambda: fetch_log(record.key))`: it loads in a thread while "loading…" shows, for up to `DetailScreen.LOAD_TIMEOUT` (10 s); `("log", Lazy(lambda: fetch_log(record.key), timeout=60.0))` gives it a deadline of its own. A record that loads lazily can change the popup's title and link with `screen.set_head(...)`; then open `screen.url` in the callback. A long body scrolls.
 - `snooze_file` keeps what you snoozed (`s`) across restarts, so a restart doesn't bring every snoozed row and popup back.
 
 ### 6. Run it, test it, look at it

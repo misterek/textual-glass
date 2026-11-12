@@ -6,7 +6,8 @@
 * ``TaskBoard``, ``EventLog``, ``DoneList``: tasks, a timeline, finished work.
 * ``HeaderStrip`` (``Brand``, ``SourceHealth``, ``Clock``), ``KeyBar``.
 * ``Page``: one page of a dashboard.
-* ``OrbitalModal``, ``AlertScreen``, ``DetailScreen``, ``HelpScreen``, ``SourcesScreen``: popups.
+* ``OrbitalModal``, ``AlertScreen``, ``DetailScreen`` (and ``Lazy`` values), ``PromptModal``,
+  ``HelpScreen``, ``SourcesScreen``: popups.
 * ``AlertToast``: an alert as a corner toast.
 * ``WeekReplay``: the week in review as a space show, held as its summary.
 
@@ -28,7 +29,9 @@ from .screens import (
     AlertToast,
     DetailScreen,
     HelpScreen,
+    Lazy,
     OrbitalModal,
+    PromptModal,
     SourcesScreen,
     beacon_view,
     hint,
@@ -38,8 +41,8 @@ from .track import HEALTH_COLORS, HEALTH_WORDS, Track, TrackTable, status_word
 __all__ = [
     "HEALTH_COLORS", "HEALTH_WORDS", "LEGEND", "REPLAY_LEGEND", "SHIPS", "SHIP_CLASSES", "SOURCE_HEALTH_COLORS",
     "SOURCE_HEALTH_GLYPHS", "STATE_COLORS", "STATE_GLYPHS", "TASK_COLORS", "AlertScreen", "AlertToast", "BeaconRow",
-    "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip", "HelpScreen", "KeyBar", "OrbitalModal",
-    "Page", "PriorityList", "ReplayWeek", "Section", "SourceHealth", "SourcesScreen", "TaskBoard", "Track",
-    "TrackTable", "WeekReplay", "beacon_view", "hint", "order_entities", "signal_glyphs", "state_text",
-    "status_word", "task_color", "week_hours",
+    "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip", "HelpScreen", "KeyBar", "Lazy",
+    "OrbitalModal", "Page", "PriorityList", "PromptModal", "ReplayWeek", "Section", "SourceHealth", "SourcesScreen",
+    "TaskBoard", "Track", "TrackTable", "WeekReplay", "beacon_view", "hint", "order_entities", "signal_glyphs",
+    "state_text", "status_word", "task_color", "week_hours",
 ]

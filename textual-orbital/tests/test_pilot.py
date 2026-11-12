@@ -21,10 +21,11 @@ from demo import DemoProvider
 from rules import INCIDENT, RELEASE_FAILED
 from textual.app import App, ComposeResult
 from textual.strip import Strip
+from textual.widgets import Input
 
 from textual_glass import Glass, GlassImage, GlassPanel, SpriteView, StatTile, kitty
 from textual_glass.engine import MAIN, Z0, Z_FLOAT
-from textual_glass.items import Lane, Panel, Pill, Ring
+from textual_glass.items import Lane, Panel, Pill, Ring, Thumb
 from textual_glass.palette import rgb
 from textual_glass.testing.pilot_helpers import Output, idle, settle, start
 from textual_orbital import (
@@ -38,8 +39,12 @@ from textual_orbital import (
     EntityState,
     Event,
     EventLog,
+    OrbitalApp,
     PriorityList,
+    PromptModal,
     SourceData,
+    StaticProvider,
+    TaskBoard,
     Track,
     TrackHealth,
     TrackItem,
@@ -521,6 +526,42 @@ async def test_detail_help_sources_and_jump(output: Output) -> None:
         assert output.model().errors == [] and app.glass.last_error is None
 
 
+async def test_n_adds_a_task_from_a_prompt(output: Output) -> None:
+    """n opens a one-line prompt over the dashboard; what is typed (a q too: it doesn't quit)
+    becomes a task in the demo world, fetched at once onto the Board page. Escape adds nothing."""
+    app = make()
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(app, pilot)
+        await pilot.press("4")  # the Board page
+        await idle(app, pilot)
+        tasks = len(world(app).tasks)
+        await pilot.press("n")
+        await idle(app, pilot)
+        assert isinstance(app.screen, PromptModal) and isinstance(app.focused, Input), "the input has focus"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, PromptModal) and len(world(app).tasks) == tasks, "escape adds nothing"
+
+        await pilot.press("n")
+        await idle(app, pilot)
+        await pilot.press(*"quick fix for the queue")
+        assert isinstance(app.screen, PromptModal), "q typed into the prompt: the app didn't quit"
+        assert app.screen.query_one(Input).value == "quick fix for the queue"
+        await pilot.press("enter")
+        await until(lambda: app.snapshot is not None and any(t.title == "quick fix for the queue"
+                                                             for t in app.snapshot.tasks))
+        await idle(app, pilot)
+        assert not isinstance(app.screen, PromptModal)
+        new = [t for t in world(app).tasks if t.title == "quick fix for the queue"]
+        assert len(new) == 1 and new[0].status == "ready" and new[0].group == "Small tasks"
+        board = app.query_one("#tasks", TaskBoard)
+        assert new[0] in board.rows
+        text = "\n".join(board.render_line(y).text for y in range(board.size.height))
+        assert "quick fix for the queue" in text, "on the board at once"
+        assert not app.errors, list(app.errors)
+    assert output.model().errors == []
+
+
 @pytest.mark.parametrize("size, classes, visible, hidden", [
     ((70, 22), {"-narrow", "-short"}, ["#strip-panel"], ["#console-side"]),
     ((90, 28), {"-compact", "-mid"}, ["#console-side", "#gauges-panel", "#track-panel"],
@@ -869,3 +910,135 @@ async def test_alert_hint_offers_open_only_with_a_link(url: str | None) -> None:
             await pilot.press("o")
             await pilot.pause()
             assert isinstance(app.screen, AlertScreen), "o does nothing without a link"
+
+
+# -- popups on their own ---------------------------------------------------------------------
+
+LONG_BODY = "\n".join(f"{i:02} step of the run log, one line each" for i in range(40))
+
+
+@pytest.mark.parametrize("size, glass", [((70, 22), True), ((90, 28), True), ((90, 28), False)])
+async def test_a_long_detail_body_scrolls_inside_the_popup(output: Output, size: tuple[int, int],
+                                                           glass: bool) -> None:
+    """A long body takes the room the fields leave and scrolls by keys, with glass's thumb
+    along it inside the dialog; every field keeps its row and nothing takes focus. A short
+    body is as tall as its text, at the bottom, with no scrollbar."""
+    app = OrbitalApp(StaticProvider([]), alerts=False, notify="off")
+    async with app.run_test(size=size) as pilot:
+        if glass:
+            await start(app, pilot)
+        fields = [("state", "open"), ("owner", "dana"), ("link", "https://example.com/pr/412")]
+        app.push_screen(DetailScreen("PR 412", "storefront", fields, body=LONG_BODY))
+        await idle(app, pilot)
+        screen = app.screen
+        scroll = screen.query_one("#detail-scroll")
+        hint_y = screen.query_one(".dialog-hint").region.y
+        assert screen.query_one("#detail-fields").region.height == 3, "every field keeps its row"
+        assert scroll.region.bottom == hint_y and scroll.region.height >= 6, "the body fills the room left"
+        assert scroll.max_scroll_y > 0 and app.focused is None, "it scrolls, and takes no focus"
+
+        def thumbs() -> list[Thumb]:
+            return [i for i in app.glass.layers[(1, "main")].dynamic if isinstance(i, Thumb)] if glass else []
+
+        if glass:
+            dialog = screen.query_one("#detail").region
+            (thumb,) = thumbs()
+            x, y, _, h = thumb.rect
+            assert dialog.x < x < dialog.right - 1, "inside the dialog"
+            assert (y, h) == (scroll.region.y, scroll.region.height) and thumb.start == 0, "along the body"
+        await pilot.press("pagedown")
+        await idle(app, pilot)
+        paged = scroll.scroll_y
+        assert paged == scroll.scrollable_content_region.height, "a page down"
+        if glass:
+            assert thumbs()[0].start > 0, "the thumb moved"
+        await pilot.press("j", "down")
+        await pilot.pause()
+        assert scroll.scroll_y == paged + 2
+        await pilot.press("k", "up", "pageup")
+        await pilot.pause()
+        assert scroll.scroll_y == 0
+        await pilot.press("escape")
+        await pilot.pause()
+
+        app.push_screen(DetailScreen("PR 412", "storefront", fields, body="two lines\nof body"))
+        await idle(app, pilot)
+        short = app.screen.query_one("#detail-scroll")
+        assert (short.region.height, short.region.bottom, short.max_scroll_y) == (2, hint_y, 0)
+        assert app.screen.query_one("#detail-main").region.height > 3, "the fields and visual get the rest"
+        assert not thumbs(), "no scrollbar"
+    assert output.model().errors == []
+
+
+async def test_set_head_changes_the_head_and_the_hint_after_it_opens() -> None:
+    """``set_head``: None keeps, "" drops; the hint offers o only with a link, and o dismisses
+    with "open" for the link the head has now (``screen.url``)."""
+    results: list[str | None] = []
+    app = App[None]()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = DetailScreen("PR 412", fields=[("state", "loading…")])
+        app.push_screen(screen, results.append)
+        await pilot.pause()
+        head, hint = screen.query_one("#detail-head"), screen.query_one(".dialog-hint")
+        assert "o open" not in hint.render_line(0).text
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.screen is screen, "no link: o does nothing"
+        screen.set_head(subtitle="storefront · by dana", url="https://example.com/pr/412")
+        await pilot.pause()
+        assert head.render_line(0).text.startswith("PR 412") and "by dana" in head.render_line(1).text
+        assert "o open in browser" in hint.render_line(0).text
+        screen.set_head(title="Cache product images")
+        await pilot.pause()
+        assert "Cache product images" in head.render_line(0).text and "by dana" in head.render_line(1).text
+        screen.set_head(url="")
+        await pilot.pause()
+        assert "o open" not in hint.render_line(0).text and screen.url is None
+        screen.set_head(subtitle="", url="https://example.com/pr/413")
+        await pilot.pause()
+        assert head.region.height == 1 and "o open in browser" in hint.render_line(0).text
+        await pilot.press("o")
+        await pilot.pause()
+        assert results == ["open"] and screen.url == "https://example.com/pr/413"
+
+
+class Prompted(Glass, App[None]):
+    """A bare glass app for the prompt."""
+
+
+@pytest.mark.parametrize("glass", [True, False])
+async def test_the_prompt_dismisses_with_the_text_or_none(output: Output, glass: bool) -> None:
+    """``PromptModal``: Textual's Input in a glass dialog, focused when it opens; enter gives
+    the text without the spaces around it, nothing typed gives None, escape None. Without glass
+    (stock Textual) it works the same."""
+    results: list[str | None] = []
+    app = Prompted() if glass else App[None]()
+    async with app.run_test(size=SIZE) as pilot:
+        if glass:
+            await start(app, pilot)
+
+        async def ask(prompt: PromptModal, *keys: str) -> None:
+            app.push_screen(prompt, results.append)
+            await (idle(app, pilot) if glass else pilot.pause())
+            assert app.screen is prompt and isinstance(app.focused, Input), "the input has focus"
+            if glass:
+                dialog = prompt.query_one("#prompt").region
+                assert any(isinstance(i, Panel) and i.dialog and i.rect[:2] == (dialog.x, dialog.y)
+                           for i in app.glass.layers[(1, "main")].static), "a glass dialog"
+            await pilot.press(*keys)
+            await pilot.pause()
+            assert app.screen is not prompt
+
+        prompt = PromptModal("NEW TASK", "what needs doing?")
+        app.push_screen(prompt)
+        await pilot.pause()
+        hint = prompt.query_one(".dialog-hint").render_line(0).text
+        assert "⏎ save" in hint and "esc cancel" in hint and prompt.query_one(Input).placeholder == "what needs doing?"
+        prompt.dismiss(None)
+        await pilot.pause()
+        await ask(PromptModal("NEW TASK"), "space", *"buy milk", "space", "enter")
+        await ask(PromptModal("NEW TASK"), *"never mind", "escape")
+        await ask(PromptModal("NEW TASK"), "space", "enter")
+        await ask(PromptModal("RENAME", value="  draft one "), "enter")
+    assert results == ["buy milk", None, None, "draft one"]
+    assert output.model().errors == []
