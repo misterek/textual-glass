@@ -1,5 +1,27 @@
 # Changelog
 
+## textual-glass 0.7.0 and textual-orbital 0.4.0 (2026-11-11)
+
+A styled text input and a one-line prompt on it, a way back to the theme's colours, and smaller additions asked for while building a dashboard on the libraries: fetch one source now, a payload per source, detail popups that scroll and change once open, and hooks for a task column and the callsign. Upgrade both together: orbital 0.4 needs glass 0.7, which styles the prompt's input.
+
+### textual-glass
+
+- **Textual's stock `Input` under glass.** Its border (Textual's `tall` one included) is a glass panel: a quiet outline, a bright gradient and glow when focused, the error colour when `-invalid`. The caret is a still, glowing bar in `block-cursor-background` that slides from cell to cell and never blinks; a selection is a rounded band behind the text; the placeholder stays dim. Typing is in-place edits, and a focused input nobody types in sends no graphics. Subclasses count, so the command palette's input gets the caret too. New items: `Caret` and `Selection`. An `Input` in `GLASS_SKIP` is left alone; plain mode is unchanged.
+- **`THEME`**: pass it to a setter's colour argument to go back to the theme's colours, as if the widget had been made with `None` (`RingGauge.set`, `Telemetry.set_series`, `StatValue.set`, `StatTile.set`, `ProgressArc.set`, `SpriteView.set_sprite`). `None` still keeps the current colour.
+- The showcase has a filter input on view 1 (`/`) and a note popup (`n`) whose input shows the invalid state until the note is long enough.
+- `textual_glass.testing.pilot_helpers.start` has a docstring: it turns glass on as in Ghostty, so a plain test doesn't call it.
+
+### textual-orbital
+
+- **`PromptModal(title, placeholder="", value="")`**: a one-line prompt in a glass dialog, its input focused. Enter dismisses with the text (stripped, or None when empty), escape with None. Printable keys go to the input before the app's bindings. The console's Board page adds a task with `n`.
+- **`OrbitalApp.poll(key)`** fetches one source now, skipping its backoff: call it after the app wrote something the source reads. If a fetch of it is running (it may have read before the write), a fresh one starts as soon as that one ends or times out. `poll_all()` calls it for every source, so it now also fetches again after a fetch in flight.
+- **A failing source's new error reaches the pages**: `health_changed` (and so `set_statuses`) runs when any source's health or error changes, and still never for the same health and the same error.
+- **`SourceData.payload`**: one document of the source's own (thousands of rows read by filters on a page), read with `snapshot.payload(key)` (`Snapshot.payloads`). It changes by identity: a new object is a content change, the same one is not, and the library never compares, hashes or looks inside it. `None` keeps the last one, and a failing fetch keeps it too.
+- **`DetailScreen`**: a long body scrolls inside the popup (arrows, `j` `k`, page up and down, the wheel) with glass's thumb; a short one looks as before. `set_head(title=None, subtitle=None, url=None)` changes the head once it is open, and the hint offers `o` only with a link. `Lazy(load, timeout=...)` gives a lazy value a deadline of its own.
+- `Goal`, `Task` and `DoneTask` have `source` and `data`, like the other records; `TaskBoard` and `DoneList` show the source badge when `source` is set.
+- `TaskBoard.task_parts(task, width)`: a column of the app's own after the title, cut so the title keeps `TITLE_MIN` cells.
+- `Brand.callsign_parts()` styles the callsign (a gradient, say), and `HeaderStrip.BRAND` makes the header use a `Brand` subclass.
+
 ## textual-glass 0.6.0 (2026-11-09)
 
 Public names for an app that draws its own items, and the bridge, a second orbital example. Nothing changes for an existing app; textual-orbital stays 0.3.0 (only its examples and docs changed).

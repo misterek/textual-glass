@@ -44,7 +44,7 @@ from .widgets import (
     ThemeColours,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __all__ = [
     "FLOURISHES", "MOTIONS", "SPRITE_MAX_PX", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard",
     "LoadedImage", "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView",

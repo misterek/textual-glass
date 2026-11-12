@@ -61,6 +61,7 @@ class ThemeColours:
 #: widget had been made with ``None`` (which in a setter keeps the current one).
 THEME: Final = ThemeColours()
 
+
 def resolve(new: Any, current: Any) -> Any:
     """A setter's colour argument: None keeps ``current``, ``THEME`` clears it, else ``new``."""
     if new is None:
