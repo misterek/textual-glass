@@ -73,7 +73,7 @@ Elsewhere in `textual-glass/`:
 
 For a widget in an app, follow "Write your own pixel widget" in the README. To add one to the library:
 
-1. Subclass `PixelWidget` (or `SelectList`) in `widgets/instruments.py` or a new module under `widgets/`. Colours are constructor arguments that default to the theme (`ctx.palette` in `pixel_items`, `self.theme_palette` in `render_line`); never a module-level palette. The setters take them too, so an update can change a colour (a grade turning amber); `None` keeps the current one.
+1. Subclass `PixelWidget` (or `SelectList`) in `widgets/instruments.py` or a new module under `widgets/`. Colours are constructor arguments that default to the theme (`ctx.palette` in `pixel_items`, `self.theme_palette` in `render_line`); never a module-level palette. The setters take them too, so an update can change a colour (a grade turning amber); `None` keeps the current one and `THEME` goes back to the theme's (use `resolve` from `widgets/base.py`).
 2. Draw a text fallback with the same layout (`self.glass_on` says which mode is current). Give every item a stable `ident` and `clip=self.visible_clip()`.
 3. Don't add attributes Textual already has (rule 14): `test_widgets_add_no_attribute_textual_has` lists the widget classes; add yours.
 4. Export it from `widgets/__init__.py` and `textual_glass/__init__.py` (both `__all__` lists).

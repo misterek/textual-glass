@@ -29,6 +29,7 @@ from .glass import Glass, PixelContext, PixelMixin, terminal_write
 from .hard_exit import on_hard_exit
 from .images import LoadedImage, load_image
 from .widgets import (
+    THEME,
     GlassImage,
     GlassPanel,
     InfoCard,
@@ -40,12 +41,13 @@ from .widgets import (
     StatTile,
     StatValue,
     Telemetry,
+    ThemeColours,
 )
 
 __version__ = "0.6.0"
 __all__ = [
     "FLOURISHES", "MOTIONS", "SPRITE_MAX_PX", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard",
     "LoadedImage", "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView",
-    "StatTile", "StatValue", "Support", "Telemetry", "__version__", "detect", "load_image", "on_hard_exit",
-    "terminal_write",
+    "StatTile", "StatValue", "Support", "THEME", "Telemetry", "ThemeColours", "__version__", "detect", "load_image",
+    "on_hard_exit", "terminal_write",
 ]

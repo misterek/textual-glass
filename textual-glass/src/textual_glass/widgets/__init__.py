@@ -8,6 +8,7 @@ Textual (block-character meters, glyphs, rounded borders).
 * ``SelectList``: a keyboard list with a sliding selection pill; subclass it.
 * ``RingGauge``, ``Telemetry``, ``StatValue``, ``StatTile``, ``ProgressArc``,
   ``SpriteView``, ``InfoCard``: instruments.
+* ``THEME``: pass it to a setter's colour argument to go back to the theme's colour.
 * ``PixelWidget``, ``strip``, ``fit``, ``placeholder_parts``, ``Tween``: for
   writing your own (see ``textual_glass.widgets.base``).
 """
@@ -17,9 +18,11 @@ from .base import (
     DIM,
     FAINT,
     SOFT,
+    THEME,
     Part,
     PixelWidget,
     SelectList,
+    ThemeColours,
     Tween,
     ellipsize,
     fit,
@@ -34,7 +37,7 @@ from .instruments import BLOCKS, InfoCard, ProgressArc, RingGauge, SpriteView, S
 from .panel import GlassPanel
 
 __all__ = [
-    "BLOCKS", "BRIGHT", "DIM", "FAINT", "SOFT", "GlassImage", "GlassPanel", "InfoCard", "Part", "PixelWidget",
-    "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile", "StatValue", "Telemetry", "Tween",
-    "ellipsize", "fit", "hex_colour", "placeholder_parts", "strip", "text_meter", "tone",
+    "BLOCKS", "BRIGHT", "DIM", "FAINT", "SOFT", "THEME", "GlassImage", "GlassPanel", "InfoCard", "Part", "PixelWidget",
+    "ProgressArc", "RingGauge", "SelectList", "SpriteView", "StatTile", "StatValue", "Telemetry", "ThemeColours",
+    "Tween", "ellipsize", "fit", "hex_colour", "placeholder_parts", "strip", "text_meter", "tone",
 ]

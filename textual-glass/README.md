@@ -355,7 +355,7 @@ Glass only replaces **neutral** backgrounds: the screen, containers, table surfa
 
 ## Pixel widgets
 
-`textual_glass.widgets` (also exported from `textual_glass`) has widgets that draw pixels under their text with glass, and block characters and glyphs in the same cells without it, so the layout is identical in both modes. Colours are `"#rrggbb"` strings or `(r, g, b)` tuples; a `colors` pair is a gradient's two ends. Every colour defaults to the app's theme. Every constructor also takes `name`, `id` and `classes`.
+`textual_glass.widgets` (also exported from `textual_glass`) has widgets that draw pixels under their text with glass, and block characters and glyphs in the same cells without it, so the layout is identical in both modes. Colours are `"#rrggbb"` strings or `(r, g, b)` tuples; in a setter, `None` keeps the colour and `THEME` (`from textual_glass import THEME`) goes back to the theme's, as if the widget had been made with `None`, so a theme change recolours it again; a `colors` pair is a gradient's two ends. Every colour defaults to the app's theme. Every constructor also takes `name`, `id` and `classes`.
 
 | Widget | Constructor | Update it with | Shows; without glass |
 | --- | --- | --- | --- |

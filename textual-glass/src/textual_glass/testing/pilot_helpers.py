@@ -59,6 +59,12 @@ async def settle(app: Any, pilot: Any, rounds: int = 8) -> None:
 
 
 async def start(app: Any, pilot: Any) -> None:
+    """Turn glass on as in Ghostty, then wait until idle.
+
+    Marks the terminal as supported and calls ``app.glass.activate(force=True)``.
+    A plain test doesn't call this: Textual's ``run_test`` keeps glass off, so
+    use :func:`settle` or :func:`idle` there.
+    """
     app.glass.support = Support(True, "test")
     app.glass.activate(force=True)
     await idle(app, pilot)
