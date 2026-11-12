@@ -155,6 +155,106 @@ async def test_at_the_hung_limit_a_source_waits_for_a_fetch_to_return() -> None:
         assert gate.calls == 3 and app.snapshot is not None and app.snapshot.item("HG:3") is not None
 
 
+# -- poll(key): after the app wrote something a source reads ---------------------------------
+
+
+class Reader:
+    """A source that reads ``value`` (a file the app writes) as its fetch starts.
+    A fetch that starts while ``hold`` is set then waits for ``release``: one that
+    read just before the app wrote."""
+
+    def __init__(self, key: str = "RD", timeout: float = 5.0) -> None:
+        self.key, self.name, self.interval, self.timeout = key, key, 60.0, timeout
+        self.value = "old"
+        self.hold, self.release = threading.Event(), threading.Event()
+        self.reads: list[str] = []
+        self.starts: list[float] = []
+
+    def fetch(self) -> SourceData:
+        value, held = self.value, self.hold.is_set()
+        self.starts.append(time.monotonic())
+        self.reads.append(value)
+        if held:
+            self.release.wait(10)  # bounded, so a failing test leaves no thread behind for long
+        return SourceData(attention=[AttentionItem(f"{self.key}:file", self.key, 5, "review", value)])
+
+
+def title(app: OrbitalApp, key: str = "RD:file") -> str | None:
+    """What the app's snapshot holds for the reader's record."""
+    item = app.snapshot.item(key) if app.snapshot is not None else None
+    return item.title if item is not None else None
+
+
+async def test_poll_fetches_one_source_now_and_again_after_a_fetch_that_read_before_a_write() -> None:
+    reader, other = Reader(), Quick("QK", interval=60)
+    app = Board(reader, other)
+    async with app.run_test():
+        await until(lambda: app.fetches == 2, what="the first fetches")
+        app.poll("RD")  # nothing running: now, whatever its interval
+        await until(lambda: app.fetches == 3, what="the poll")
+        assert reader.reads == ["old", "old"] and other.calls == 1, "that source only"
+        reader.hold.set()
+        app.poll("RD")
+        await until(lambda: len(reader.reads) == 3, what="a fetch in flight")
+        reader.value = "new"  # the app writes, after that fetch read
+        app.poll("RD")
+        app.poll("RD")
+        await asyncio.sleep(0.2)
+        assert len(reader.reads) == 3, "no second fetch beside the running one"
+        reader.hold.clear()
+        reader.release.set()
+        await until(lambda: title(app) == "new", what="the write")
+        await asyncio.sleep(0.2)
+        assert reader.reads == ["old", "old", "old", "new"], "one fresh fetch, as soon as the running one ended"
+        next_poll = app.store.status("RD").next_poll
+        assert next_poll is not None and next_poll > now() + timedelta(seconds=50), "then its interval again"
+        with pytest.raises(KeyError, match="no source 'XX'; the sources are 'RD', 'QK'"):
+            app.poll("XX")
+        assert not app.errors
+
+
+async def test_poll_during_a_fetch_that_times_out_fetches_again_at_once() -> None:
+    reader = Reader(timeout=0.3)
+    reader.hold.set()  # the first fetch reads, then hangs
+    app = Board(reader)
+    async with app.run_test():
+        await until(lambda: reader.reads, what="the first fetch")
+        reader.value = "new"
+        reader.hold.clear()
+        app.poll("RD")
+        await until(lambda: title(app) == "new", what="the write")
+        gap = reader.starts[1] - reader.starts[0]
+        assert 0.3 <= gap < 3.0, f"after the deadline, not after the backoff (120 s): {gap}"
+        status = app.store.status("RD")
+        assert status.error is None and status.failures == 0, "the fresh fetch was good"
+        reader.release.set()  # the hung one returns, late: ignored
+        await asyncio.sleep(0.2)
+        assert reader.reads == ["old", "new"] and title(app) == "new"
+        assert not app.errors
+
+
+async def test_poll_at_the_hung_limit_fetches_when_a_hung_fetch_returns() -> None:
+    reader = Reader(timeout=0.2)
+    reader.hold.set()  # every fetch hangs
+    app = Board(reader)
+    async with app.run_test():
+        await until(lambda: reader.reads, what="the first fetch")
+        app.poll("RD")  # in flight: a fresh fetch at its deadline
+        await until(lambda: len(reader.reads) == 2, what="the fetch after the deadline")
+        app.poll("RD")
+        await until(lambda: "paused" in (app.store.status("RD").error or ""), what="the hung limit")
+        app.poll("RD")  # paused: no third thread (rule 25)
+        await asyncio.sleep(0.3)
+        assert len(reader.reads) == app.HUNG_LIMIT == 2 and app.store.status("RD").next_poll is None
+        reader.value = "new"
+        reader.hold.clear()
+        reader.release.set()  # the hung fetches return, late
+        await until(lambda: title(app) == "new", what="the write")
+        await asyncio.sleep(0.2)
+        assert reader.reads == ["old", "old", "new"] and app.store.status("RD").error is None
+        assert not app.errors
+
+
 async def test_a_fetch_that_raises_system_exit_fails_and_polls_again() -> None:
     exits = Quick("EX")
     exits.error = SystemExit(2)
@@ -419,6 +519,92 @@ async def test_errors_from_thread_callbacks_and_the_snapshot_are_reported(monkey
         app.poll_all()
         await until(lambda: app.errors[-1].where == "Store.snapshot", what="a report")
         await until(lambda: len(app.badges) > badges, what="the badge")
+
+
+# -- health and payloads reach the pages ------------------------------------------------------
+
+
+class Errors(Page):
+    """A page that shows each source's error."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard: list[tuple[str | None, ...]] = []
+
+    def set_statuses(self, statuses: tuple[SourceStatus, ...], at: datetime | None = None) -> None:
+        self.heard.append(tuple(s.error for s in statuses))
+
+
+class OnePage(Board):
+    def compose(self) -> ComposeResult:
+        yield Errors()
+        yield Fine()
+
+
+async def test_pages_hear_when_a_failing_source_s_error_changes() -> None:
+    flaky = Quick("FL", interval=60)
+    flaky.error = RuntimeError("HTTP 503")
+    app = OnePage(flaky, Quick("QK", interval=60))
+    async with app.run_test():
+        page = app.query_one(Errors)
+        await until(lambda: app.fetches == 2, what="the first fetches")
+        assert page.heard[-1] == ("HTTP 503", None)
+        heard = len(page.heard)
+        app.poll("FL")  # red again, with the same error
+        await until(lambda: app.store.status("FL").failures == 2, what="the second failure")
+        app._on_minute()
+        assert len(page.heard) == heard, "the same health and the same error send nothing (rule 9)"
+        flaky.error = RuntimeError("HTTP 401")
+        app.poll("FL")
+        await until(lambda: len(page.heard) == heard + 1, what="the new error")
+        assert page.heard[-1] == ("HTTP 401", None), "still red, with another error: the pages hear"
+        flaky.error = None
+        app.poll("FL")
+        await until(lambda: len(page.heard) == heard + 2, what="the source back")
+        assert page.heard[-1] == (None, None) and not app.errors
+
+
+class Document:
+    """One large structured document a source hands its pages. Comparing or
+    hashing it by value would be a bug: a new one is told by identity."""
+
+    def __init__(self, rows: int = 5000) -> None:
+        self.rows = tuple(range(rows))
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("a payload was compared by value")
+
+    def __hash__(self) -> int:
+        raise AssertionError("a payload was hashed")
+
+
+async def test_a_payload_reaches_the_pages_and_changes_by_identity() -> None:
+    first = Document()
+    db = Quick("DB", SourceData(payload=first), interval=60)
+    app = OnePage(db)
+    async with app.run_test():
+        page = app.query_one(Fine)
+        await until(lambda: page.got, what="the first snapshot")
+        assert page.got[-1].payload("DB") is first and list(page.got[-1].payloads) == ["DB"]
+        app.poll("DB")  # the same object again
+        await until(lambda: app.fetches == 2, what="the second fetch")
+        assert len(page.got) == len(app.delivered) == 1, "nothing changed: no redraw"
+        second = Document()  # the same rows, a new object
+        db.data = SourceData(payload=second)
+        app.poll("DB")
+        await until(lambda: len(page.got) == 2, what="the new payload")
+        assert page.got[-1].payload("DB") is second
+        db.data = SourceData(attention=[])  # no payload this time: the last one stays
+        app.poll("DB")
+        await until(lambda: app.fetches == 4, what="a fetch without one")
+        assert len(page.got) == 2 and app.snapshot is not None and app.snapshot.payload("DB") is second
+        db.error = RuntimeError("HTTP 503")
+        app.poll("DB")
+        await until(lambda: app.store.status("DB").error, what="a failure")
+        assert len(page.got) == 2 and app.snapshot.payload("DB") is second, "a failure keeps it"
+        app.snooze_item("nothing")  # republished: the payload goes with it
+        assert len(page.got) == 3 and page.got[-1].payload("DB") is second
+        assert not app.errors, "never compared or hashed by value"
 
 
 # -- closing resolved alerts (O10) -----------------------------------------------------------

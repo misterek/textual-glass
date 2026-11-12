@@ -9,7 +9,8 @@ The records are generic. An app keeps its own typed record in ``data`` (on
 in equality, so a change in it is a content change, and the library never looks
 inside it. Read it back typed in your rules and views (``cast(MyRecord, item.data)``).
 Plain numbers for gauges (a disk's fill, a queue depth) travel as named
-:class:`Metrics` instead (``snapshot.metric("disk")``).
+:class:`Metrics` instead (``snapshot.metric("disk")``), and one large document
+per source as its payload (``snapshot.payload("XX")``).
 
 Source keys are short strings: ``CC`` Claude Code and ``GH`` GitHub have names
 and colours by default; any other key works too.
@@ -21,6 +22,7 @@ from collections.abc import Container, Hashable, Iterable, Iterator, Mapping, Se
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
+from types import MappingProxyType
 
 # --------------------------------------------------------------------- sources
 
@@ -460,6 +462,11 @@ class Snapshot:
 
     ``metrics`` merges every source's metrics in source order (a later source's
     value wins for a name two sources share, so give them distinct names).
+
+    ``payloads`` maps a source's key to the payload it last reported (read one
+    with :meth:`payload`): a read-only mapping that takes no part in equality,
+    hashing or the repr, so a large document is never compared by value. The
+    store tells a new payload by identity (``Store.content_version``).
     """
 
     taken_at: datetime
@@ -472,14 +479,22 @@ class Snapshot:
     done: tuple[DoneTask, ...] = ()
     sources: tuple[SourceStatus, ...] = ()
     metrics: Mapping[str, float] = field(default_factory=Metrics)
+    payloads: Mapping[str, object] = field(default_factory=dict, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.metrics, Metrics):  # a plain dict is copied into a read-only, hashable one
             object.__setattr__(self, "metrics", Metrics(self.metrics))
+        if not isinstance(self.payloads, MappingProxyType):  # a plain dict is copied into a read-only one
+            object.__setattr__(self, "payloads", MappingProxyType(dict(self.payloads)))
 
     def metric(self, name: str, default: float = 0.0) -> float:
         """A metric's value, or ``default`` when no source reports it."""
         return self.metrics.get(name, default)
+
+    def payload(self, key: str, default: object = None) -> object:
+        """Source ``key``'s payload, or ``default`` when it has reported none.
+        Read it back typed: ``cast(MyDocument, snapshot.payload("XX"))``."""
+        return self.payloads.get(key, default)
 
     @property
     def needs_attention(self) -> tuple[AttentionItem, ...]:

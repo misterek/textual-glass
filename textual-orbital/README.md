@@ -231,7 +231,52 @@ if __name__ == "__main__":
     DiskBoard(StaticProvider([Disk()])).run()
 ```
 
-`Snapshot` is everything merged from every source: `taken_at`; `entities, attention, track, events, goals, tasks, done, sources` (tuples; attention sorted by score, then age); and `metrics`. `taken_at` is when it was taken: the end of the fetch it was merged after, or the moment items were snoozed or woken or the date changed (see [The app](#the-app)). Widgets take their "now" from it. A snapshot has `needs_attention` and `be_aware`, lookups `entity(id)`, `track_item(key)`, `item(key)` and `metric(name, default=0.0)`, and `week(on=None)`: this week's `WeekStats`, counted from the events by `kind`, or with `on` (a `date`) the week that holds it:
+**One large document per source.** A page whose data is one big structured document (thousands of rows, read by filters on the page) gets it as its source's payload: `SourceData(payload=document)`, read with `snapshot.payload("IN")` (None, or the `default` you pass, until that source has reported one). The library never looks inside a payload, and never compares or hashes it: one that is not the same object as the source's last payload is a content change (`snapshot_changed` runs), and the same object again is not. As with the other fields, `None` keeps the last one, and so does a failing fetch. It is not a record: `SourceStatus.items` doesn't count it, and the store's checks (naive datetimes, duplicate keys) don't reach inside it. So return the same object while nothing changed, and never change one you returned: build a new one, because pages read it on the app thread while the next fetch runs in its own ([AGENTS.md](AGENTS.md#wiring-real-sources)).
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+
+from textual.app import ComposeResult
+from textual.widgets import Static
+
+from textual_orbital import Page, Snapshot, SourceData
+
+
+@dataclass(frozen=True)
+class Inventory:
+    rows: tuple[tuple[str, ...], ...]  # host, role, rack
+
+
+class InventorySource:
+    key, name, interval = "IN", "Inventory", 60.0
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._cached: tuple[float, Inventory] | None = None  # (the file's mtime, its document)
+
+    def fetch(self) -> SourceData:
+        mtime = self.path.stat().st_mtime
+        if self._cached is None or self._cached[0] != mtime:  # read only when the file changed
+            rows = tuple(tuple(line.split(",")) for line in self.path.read_text().splitlines())
+            self._cached = (mtime, Inventory(rows))  # a new document, built whole, in one assignment
+        return SourceData(payload=self._cached[1])  # the same object while nothing changed: no redraw
+
+
+class InventoryPage(Page):
+    role = "web"  # the page's filter
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="hosts")
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        inventory = cast("Inventory | None", snapshot.payload("IN"))
+        hosts = [row for row in inventory.rows if row[1] == self.role] if inventory else []
+        self.query_one("#hosts", Static).update(f"{len(hosts)} {self.role} hosts")
+```
+
+`Snapshot` is everything merged from every source: `taken_at`; `entities, attention, track, events, goals, tasks, done, sources` (tuples; attention sorted by score, then age); `metrics`; and `payloads`, a read-only mapping of source key to payload that takes no part in equality, hashing or the repr. `taken_at` is when it was taken: the end of the fetch it was merged after, or the moment items were snoozed or woken or the date changed (see [The app](#the-app)). Widgets take their "now" from it. A snapshot has `needs_attention` and `be_aware`, lookups `entity(id)`, `track_item(key)`, `item(key)`, `metric(name, default=0.0)` and `payload(key, default=None)`, and `week(on=None)`: this week's `WeekStats`, counted from the events by `kind`, or with `on` (a `date`) the week that holds it:
 
 - `start` is the week's Monday (a `date`). `days` (the week, from Monday) and `previous` (the same weekdays the week before) are tuples of `DayCount(day, counts)`: the `date`, and a dict of event counts by kind.
 - `total(kind)`, `previous_total(kind)` (last week over the same weekdays so far), `delta(kind)`, `series(kind)` and `previous_series(kind)` (one count per day), `events` (this week's, newest first) and `elapsed` (days so far, today included).
@@ -259,13 +304,13 @@ provider = StaticProvider([BuildAgents()])
 - A **source** is any object with `key`, `name`, `interval` and `fetch() -> SourceData` (the `Source` protocol; no base class). Each fetch runs in a daemon thread of its own, so it may block on a subprocess or HTTP. The `key` is the source's badge: queues and tables show two characters of it (`EventLog` three), so `"GIT"` shows as `GI`.
 - **`fetch()` must set its own timeouts** on every network call and subprocess (`timeout=` on `subprocess.run` and on HTTP requests). A thread can't be stopped: a call with no timeout whose socket died while the laptop slept keeps its thread for good.
 - **Deadline.** A source may have a `timeout` attribute in seconds; without one it is `max(2 * interval, 10)` (`fetch_timeout(source)`). A fetch past its deadline turns the source red ("timed out after 20 s"), and its late result is ignored. A source with `OrbitalApp.HUNG_LIMIT` (2) such fetches still running stops polling until one returns, and says so in its error. So a new fetch may start while a hung one is still blocked: keep `fetch()` safe to run twice at once.
-- **Schedule.** The next fetch starts `interval` seconds after the last one ended. While a source fails (timeouts included), the wait doubles with each failure in a row, up to 15 minutes (or `interval`, if longer), and a good fetch resets it: `poll_delay(interval, failures)`. `app.poll_all()` fetches every source now, whatever the wait. The status's `next_poll` says when.
-- **`SourceData(entities, attention, track, events, goals, tasks, done, metrics)`**: each field you set *replaces* that source's previous value for that field. `None` means "this source doesn't report this", and `[]` (`{}` for `metrics`) means "it reports none". Sources never see each other's data; the store concatenates them (and merges the metrics).
+- **Schedule.** The next fetch starts `interval` seconds after the last one ended. While a source fails (timeouts included), the wait doubles with each failure in a row, up to 15 minutes (or `interval`, if longer), and a good fetch resets it: `poll_delay(interval, failures)`. `app.poll(key)` fetches one source now, whatever the wait (say, right after your app wrote a file it reads), and `app.poll_all()` every source. The status's `next_poll` says when.
+- **`SourceData(entities, attention, track, events, goals, tasks, done, metrics, payload)`**: each field you set *replaces* that source's previous value for that field. `None` means "this source doesn't report this", and `[]` (`{}` for `metrics`) means "it reports none". Sources never see each other's data; the store concatenates them (and merges the metrics). A `payload` is one document of the source's own, kept per source as it is ([the data model](#the-data-model)).
 - **Errors:** raise. The source turns red, the first line of the exception is the reason on `h`, and its last good data stays on screen. Anything raised counts, `SystemExit` included (`"SystemExit: 2"`).
 - **Keys are unique across sources** (attention and track `key`, entity `id`): snoozes, `item()` and jumps use the bare key. Prefix them with the source key (`"GH:412"`). A fetch with a key that another source's current data already has fails, as "duplicate key '412' (also from GH): prefix keys with the source".
 - **Timestamps are timezone-aware.** A fetch with a naive `datetime` in any record fails, as "naive datetime in AttentionItem.since"; nothing is coerced. (Your own record in `data` is not checked.)
 - A **provider** is anything with `sources()`; `StaticProvider(sources)` is a list.
-- **`Store`** keeps each source's latest data and merges it into a `Snapshot`. Its `content_version` changes only when the merged content changes (a metric's value included), so a fetch that returns equal data costs nothing downstream. `apply(key, data, at, fetch_ms)` returns False when it failed the source instead (a naive datetime or a duplicate key); `fail(key, error, at)`, `schedule(key, at)`, `status(key)` and `statuses()` keep the statuses.
+- **`Store`** keeps each source's latest data and merges it into a `Snapshot`. Its `content_version` changes only when the merged content changes (a metric's value included, and a payload that is a new object), so a fetch that returns equal data costs nothing downstream. `apply(key, data, at, fetch_ms)` returns False when it failed the source instead (a naive datetime or a duplicate key); `fail(key, error, at)`, `schedule(key, at)`, `status(key)` and `statuses()` keep the statuses.
 - **`timed_fetch(source)`** runs one fetch and returns `(data, error, milliseconds)`: test a source without the UI.
 
 The rules for writing real sources (stable keys, "since" timestamps, `stage_since`) are in [`AGENTS.md`](AGENTS.md#wiring-real-sources).
@@ -300,7 +345,7 @@ It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It d
 | Hook (override) | Called | Default |
 | --- | --- | --- |
 | `snapshot_changed(snapshot)` | the merged content changed; items were snoozed, woken or came back by themselves; or the date changed (on the minute tick, so `week()` rolls over on Monday). The last three pass the same content taken now. | `update_snapshot(snapshot)` on every widget that has it (your `Page`s); one that raises is reported and the others still get it |
-| `health_changed(statuses, at)` | a source went fresh, stale or failing | `set_statuses(statuses, at)` on every widget that has it (`SourceHealth`) |
+| `health_changed(statuses, at)` | a source went fresh, stale or failing, or a failing source's error changed ("HTTP 503", then "HTTP 401"); the same health and the same errors call nothing | `set_statuses(statuses, at)` on every widget that has it (`SourceHealth`, or a page that shows the errors) |
 | `minute_tick(at)` | every minute boundary | `minute_tick(at)` on every widget that has it, on every screen: each `Page` (which ticks its own widgets) and the header's `Clock`. |
 | `badge_changed(text, waiting)` | the attention badge changed ("◉ 2 waiting", or None) | nothing (pass `text` to `Brand.set_badge` here) |
 | `show_detail(record)` | `jump_to` found the record an alert points at | nothing (push a `DetailScreen` here) |
@@ -309,7 +354,7 @@ It registers the `ORBITAL` and `ORBITAL_NAVY` themes and selects `orbital`. It d
 | Method or attribute | What it does |
 | --- | --- |
 | `snapshot`, `store` | `snapshot` is the latest `Snapshot` (None until the first fetch). Every fetch replaces it, taken at that fetch's end, even when the content is unchanged (then `snapshot_changed` doesn't run). `store` is the `Store` (`store.statuses()`). |
-| `poll_all()` | Fetch every source now, including those waiting out a backoff. |
+| `poll(key)`, `poll_all()` | Fetch source `key` now, or every source, including those waiting out a backoff. Call `poll(key)` right after your app wrote something that source reads (a record saved to a file): if its fetch is running, which may have read before the write, no second one starts beside it; a fresh one starts as soon as it ends or times out (once, however often you asked), so the write is always seen. A source paused on hung fetches (`HUNG_LIMIT`) fetches as soon as one returns. A key no source has raises `KeyError`. |
 | `report_error(where, error)`, `errors` | Report an exception caught on the app thread: logged with its traceback (the `textual_orbital` logger), kept in `errors` (the last `ERRORS_KEPT`, 20, oldest first; the same error once, with a count) and shown in a toast at most every `ERROR_TOAST_SPACING` (30) seconds. The app reports what its hooks, rules, pages and thread callbacks raise; call it for your own. Show `errors` with `SourcesScreen(statuses, errors=app.errors)`. |
 | `snooze_item(key, duration=None)`, `unsnooze(key)`, `wake_items()`, `visible_items(items)` | Hide an attention item for `ITEM_SNOOZE` (an hour); bring one back (False if it wasn't snoozed) or all of them (returns how many); filter a list. Pages filter with `Page.snoozed()`. |
 | `snoozed`, `alert_queue.snoozed` | What is snoozed: attention item keys, and alert keys, each mapped to when it comes back. With `snooze_file`, both survive a restart, and a snoozed alert raised again at startup (a `WaitingRule` alert, say) stays quiet until its snooze ends. |
@@ -558,8 +603,8 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 
 | File | Checks |
 | --- | --- |
-| `tests/test_units.py` | Source health, week stats (this week and a past week whole), stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve, snoozes restored from a file), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
-| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, `fetch` (a thread, its deadline, a late result dropped, errors handed back, `then` in the app's context), backoff and `poll_all`, error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, lazy detail values (placeholders, errors and deadlines in place, dropped after the popup closed), toasts moving off a closing popup and telling the app however they go, `finish_alert` leaving a covered popup alone, alert styles checked, snapshots re-stamped by snoozing and on a new day, snoozes kept in a file across a restart (no popup at launch for a snoozed wait, ended ones dropped, broken files reported and never fatal, atomic writes), the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
+| `tests/test_units.py` | Source health, week stats (this week and a past week whole), stuck items, `data` in equality, snapshot lookups, `queue_load`, the store's merging and versioning (metrics included), payloads (kept per source, a new object a change and the same one not, never compared, hashed, printed or counted, not checked inside, kept on a failure), its rejection of naive datetimes and duplicate keys, item and failure counts, rules running after every fetch on a re-stamped snapshot, `timed_fetch` errors (`BaseException` included), `poll_delay` and `fetch_timeout`, the alert queue (order, dedupe, snooze, resolve, snoozes restored from a file), rules alerting on transitions and not on the baseline, `WaitingRule`, custom rules, notification escapes, spacing and tmux passthrough, the bounded `sent` log, the title badge, theme helpers and presets, minute-resolution ages, the demo world's script and churn, and no shadowed Textual attributes. |
+| `tests/test_app.py` | `OrbitalApp` headless over fake sources: fetch deadlines, late results ignored, the hung limit, `SystemExit` in a fetch, a fetch thread that dies, the poll schedule from the end of a fetch, `fetch` (a thread, its deadline, a late result dropped, errors handed back, `then` in the app's context), backoff and `poll_all`, `poll(key)` (one source now; a fetch in flight that read before a write is followed by a fresh one when it ends, times out, or a hung fetch returns at the hung limit), pages hearing a failing source's new error and nothing for the same one, payloads reaching the pages by identity (kept on a failure and on a republish), error reports from steps, pages, rules, thread callbacks and the snapshot (with the toast throttle), closing a resolved alert under another popup or twice, lazy detail values (placeholders, errors and deadlines in place, dropped after the popup closed), toasts moving off a closing popup and telling the app however they go, `finish_alert` leaving a covered popup alone, alert styles checked, snapshots re-stamped by snoozing and on a new day, snoozes kept in a file across a restart (no popup at launch for a snoozed wait, ended ones dropped, broken files reported and never fatal, atomic writes), the minute tick re-arming, opening links off the UI thread with `open_hosts`, and the health screen's next try and errors. |
 | `tests/test_replay.py` | `WeekReplay` with glass forced on and the scenes on a fake clock: it plays when its page shows, its caption follows the cues, the tally ends the show, it holds in silence (equal data and the minute tick included), new data while it holds or plays, replay and a new look, a resize or a new theme putting the summary back, hidden then shown, glass going off and on, minimal motion, an empty week; the text rundown with stock Textual and with glass off; kinds mapped to ships and the others counted; hours since the local Monday (a Sunday night, both DST changes, other zones); the console's Replay page with and without glass. |
 | `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row and listing what is snoozed, stepping through past weeks (held and fetched), a release's run log loaded lazily in its detail, toast alerts (popups kept for Claude, one toast at a time with "+N more", the float layer, no focus or keys, snooze and dismiss, timeouts, resolving, a click to jump, moving over a popup and back, without glass), detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the queue's `RowsLeft`, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), and no error reports. |
 | `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, a toast's float image placed and deleted, every alert kind with OSC 777 notifications, notifications through tmux passthrough, quitting with a hung fetch (`tests/hung_app.py`), and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
