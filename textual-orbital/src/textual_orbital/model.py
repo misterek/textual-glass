@@ -332,7 +332,11 @@ def week_stats(events: Sequence[Event], today: date) -> WeekStats:
 
 @dataclass(frozen=True)
 class Goal:
-    """A larger piece of work that tasks belong to (an epic, a milestone)."""
+    """A larger piece of work that tasks belong to (an epic, a milestone).
+
+    ``source`` is the key of the source that reported it (empty: none).
+    ``data`` is the app's own frozen record; compared, never read by the library.
+    """
 
     id: str
     name: str
@@ -340,11 +344,18 @@ class Goal:
     progress: float = 0.0  # 0..1
     url: str | None = None
     due: date | None = None
+    source: str = ""
+    data: Hashable | None = None
 
 
 @dataclass(frozen=True)
 class Task:
-    """A task in progress. ``group`` is the list it lives in ("Big Work"...)."""
+    """A task in progress. ``group`` is the list it lives in ("Big Work"...).
+
+    ``source`` is the key of the source that reported it: when set, ``TaskBoard``
+    shows it as a badge. ``data`` is the app's own frozen record; compared, never
+    read by the library.
+    """
 
     id: str
     title: str
@@ -354,15 +365,22 @@ class Task:
     status_since: datetime | None = None
     url: str | None = None
     goal_id: str | None = None
+    source: str = ""
+    data: Hashable | None = None
 
 
 @dataclass(frozen=True)
 class DoneTask:
+    """A finished task. ``source`` (when set, ``DoneList`` shows it as a badge) and
+    ``data`` work as on :class:`Task`."""
+
     id: str
     title: str
     done_at: datetime
     status: str = "done"
     url: str | None = None
+    source: str = ""
+    data: Hashable | None = None
 
 
 # ----------------------------------------------------------------------- alerts
