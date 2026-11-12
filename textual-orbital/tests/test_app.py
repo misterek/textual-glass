@@ -30,6 +30,7 @@ from textual_orbital import (
     ErrorReport,
     HeaderStrip,
     Health,
+    Lazy,
     OrbitalApp,
     Page,
     Snapshot,
@@ -378,6 +379,42 @@ async def test_lazy_detail_values_load_in_threads_and_show_errors_in_place() -> 
         hung.set()
         await asyncio.sleep(0.1)
         assert "too late" not in detail_text(screen), "a late value is dropped"
+
+
+async def test_a_lazy_value_keeps_its_own_deadline() -> None:
+    """``Lazy(load, timeout)`` gives a field or the body a deadline of its own; a bare
+    callable keeps ``LOAD_TIMEOUT``."""
+    class Impatient(DetailScreen):
+        LOAD_TIMEOUT = 0.3
+
+    gate = threading.Event()
+
+    def summary() -> str:
+        gate.wait(5)
+        return "a long summary"
+
+    def hung() -> str:
+        gate.wait(5)
+        return "never shown"
+
+    app = Board(Quick("QK", interval=60))
+    async with app.run_test(size=(90, 28)) as pilot:
+        screen = Impatient("PR 412", fields=[("summary", Lazy(summary, timeout=5.0)), ("checks", hung),
+                                             ("tight", Lazy(hung, timeout=0.2))],
+                           body=Lazy(lambda: "the body", timeout=1.0))
+        app.push_screen(screen)
+        await pilot.pause()
+        assert detail_text(screen).count("loading…") >= 3, "placeholders until they return"
+        await until(lambda: "timed out after 0.3 s" in detail_text(screen), what="the bare callable's deadline")
+        text = detail_text(screen)
+        assert "✕ TimeoutError: timed out after 0.2 s" in text, "its own, shorter deadline"
+        assert "the body" in text and "a long summary" not in text and "loading…" in text, "still waiting"
+        gate.set()
+        await until(lambda: "a long summary" in detail_text(screen), what="the value past LOAD_TIMEOUT")
+        await asyncio.sleep(0.1)
+        assert "never shown" not in detail_text(screen), "late values are dropped"
+        assert {e.where for e in app.errors} == {"Impatient checks", "Impatient tight"}
+    assert Lazy(summary).timeout is None, "without one, the popup's LOAD_TIMEOUT"
 
 
 async def test_a_lazy_value_that_returns_after_the_popup_closed_is_dropped() -> None:

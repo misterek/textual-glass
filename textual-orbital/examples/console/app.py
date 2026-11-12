@@ -12,10 +12,11 @@ Run it from the repository root, in Ghostty::
     uv run python textual-orbital/examples/console/app.py --provider mydata:make_provider
 
 Keys: 1-5 pages, j/k or arrows to move, Enter for details, Tab between panels,
-o to open in the browser, s to snooze, z for what is snoozed, h for source
-health, t for a test alert, m to switch alerts between popups and toasts, ?
-for help, q to quit. While a toast shows, s snoozes it and esc dismisses it.
-On the Replay page, p plays the week again and l draws it in the next look.
+o to open in the browser, s to snooze, z for what is snoozed, n for a new task
+(it shows on the Board page), h for source health, t for a test alert, m to
+switch alerts between popups and toasts, ? for help, q to quit. While a toast
+shows, s snoozes it and esc dismisses it. On the Replay page, p plays the week
+again and l draws it in the next look.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ from textual_orbital import (  # noqa: E402
     KeyBar,
     OrbitalApp,
     Page,
+    PromptModal,
     Provider,
     SourceHealth,
     SourcesScreen,
@@ -88,10 +90,10 @@ WHY_COLORS.update({"incident": PALETTE["red"], "fix release": PALETTE["red"], "a
 ALERT_KINDS = ("waiting", RELEASE_FAILED, INCIDENT)
 
 HELP_KEYS = [  # at most 14 lines: a taller dialog covers the beacons at 90x28
-    ("1-5", "switch page"),
+    ("1-5 tab", "page / next panel"),
     ("j k ↑ ↓", "move in a list"),
     ("← →", "beacons, dots"),
-    ("tab", "next panel"),
+    ("n", "new task (board)"),
     ("enter", "details (alert: jump)"),
     ("o", "open in browser"),
     ("s", "snooze (1h; alert 10m)"),
@@ -135,6 +137,7 @@ class MissionConsole(OrbitalApp):
         Binding("question_mark", "help", show=False),
         Binding("t", "test_alert", show=False),
         Binding("m", "alert_style", show=False),
+        Binding("n", "new_task", show=False),
         Binding("escape", "dismiss_toast", show=False),
     ]
 
@@ -250,6 +253,23 @@ class MissionConsole(OrbitalApp):
         self.notify("Alerts show as toasts (Claude waiting: still a popup)" if self.alert_style == "toast"
                     else "Alerts show as popups", timeout=3)
 
+    def action_new_task(self) -> None:
+        """n: a prompt for a new task, added to the demo world (the Board page shows it)."""
+        add = getattr(self.provider, "add_task", None)
+        if not callable(add):
+            self.notify("This provider takes no new tasks", timeout=2)
+            return
+        # A real tracker is a slow call: it goes through fetch, off the app thread, with a deadline.
+        self.push_screen(PromptModal("NEW TASK", "what needs doing?"),
+                         lambda text: self.fetch(add, text, then=self._task_added) if text else None)
+
+    def _task_added(self, task: Task | None, error: BaseException | None) -> None:
+        if error is not None or task is None:
+            self.report_error("new task", error or ValueError("no task came back"))
+            return
+        self.poll("TT")  # the source the board's tasks come from: fetched now, so it shows at once
+        self.notify(f"Added {task.id} to the board (4): {task.title}", timeout=3)
+
     def action_refresh(self) -> None:
         self.poll_all()
         self.notify("Refreshing every source", timeout=2)
@@ -358,8 +378,7 @@ class MissionConsole(OrbitalApp):
                                                             ("link", record.url or "–")], url=record.url, kind="DONE")
         else:
             return
-        url = getattr(record, "url", None)
-        self.push_screen(screen, lambda result: self.open_link(url) if result == "open" else None)
+        self.push_screen(screen, lambda result: self.open_link(screen.url) if result == "open" else None)
 
 
 def load_provider(spec: str) -> Provider:

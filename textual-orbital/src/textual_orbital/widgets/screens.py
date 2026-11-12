@@ -1,5 +1,5 @@
-"""Popups: the incoming-transmission alert, detail views, help and source health,
-and the alert toast.
+"""Popups: the incoming-transmission alert, detail views, a one-line prompt,
+help and source health, and the alert toast.
 
 The popups are ``ModalScreen``\\ s. With glass, the screen below stays visible:
 a scrim dims its glass, glass's line filter dims its text, and the dialog is a
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from typing import Any, ClassVar
@@ -21,11 +22,12 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Size
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from textual_glass import GlassImage, GlassPanel, LoadedImage, SpriteView
 from textual_glass.sprites import beacon_frames
@@ -353,26 +355,78 @@ class AlertToast(GlassPanel):
 
 # ==================================================================== detail ==
 
-#: A detail value: text, or a zero-argument callable that returns it (a slow lookup).
-Value = Text | str | Callable[[], Text | str]
+
+@dataclass(frozen=True)
+class Lazy:
+    """A detail value that loads when the popup opens, with a deadline of its own:
+    ``("summary", Lazy(lambda: summarize(key), timeout=60.0))``. A bare
+    zero-argument callable is a lazy value with ``DetailScreen.LOAD_TIMEOUT``.
+
+    Args:
+        load: Called in a daemon thread; returns the text to show.
+        timeout: Seconds it may take before it shows as timed out (None: the
+            popup's ``LOAD_TIMEOUT``, as for a bare callable).
+    """
+
+    load: Callable[[], Text | str]
+    timeout: float | None = None
+
+
+#: A detail value: text, or a slow lookup that returns it: a zero-argument callable or a :class:`Lazy`.
+Value = Text | str | Callable[[], Text | str] | Lazy
+
+
+def _lazy(value: Value, timeout: float) -> tuple[Callable[[], Text | str], float] | None:
+    """``(load, deadline)`` for a lazy value (``timeout`` for a bare callable), None for text."""
+    if isinstance(value, Lazy):
+        return value.load, timeout if value.timeout is None else value.timeout
+    if callable(value):
+        return value, timeout
+    return None
+
+
+class _DetailBody(VerticalScroll, can_focus=False):
+    """The detail's body: as tall as its text, up to the room the fields leave
+    above it; past that it scrolls. It takes no focus (the popup's keys scroll
+    it), so the popup's focus is what it was without it."""
+
+    #: The fewest lines a long body gets, even when the fields need the room.
+    MIN_LINES: ClassVar[int] = 3
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        height = super().get_content_height(container, viewport, width)
+        for main in self.screen.query("#detail-main"):
+            # The rows the fields take at the width the popup gives them (beside the visual, or not).
+            fields = max((p.region.bottom for p in main.arrange(Size(width, 0)).placements
+                          if p.widget.id == "detail-fields"), default=0)
+            return min(height, max(container.height - fields, self.MIN_LINES))
+        return height
 
 
 class DetailScreen(OrbitalModal):
     """A large popup for one record: a title, a subtitle, label/value fields, an
     optional visual (any widget) and a body text. ``o`` opens ``url``.
 
-    A field's value, or the body, may be a zero-argument callable for a slow
-    lookup (linked pull requests, comments). When the popup opens, each runs in
-    a daemon thread of its own with a deadline of ``LOAD_TIMEOUT`` seconds
-    (``OrbitalApp.fetch``, so the app must be an ``OrbitalApp``); ``LOADING``
+    The body is as tall as its text, up to the room the fields leave, and
+    scrolls past that: ``↑`` ``↓`` (``k`` ``j``) and ``page up`` ``page down``
+    (the arrows and ``j`` ``k`` go to a focused visual first, such as a
+    ``Track``), or the mouse wheel. :meth:`set_head` changes the title,
+    subtitle and link after it opened.
+
+    A field's value, or the body, may be a slow lookup (linked pull requests,
+    comments): a zero-argument callable, or a :class:`Lazy` with a deadline of
+    its own. When the popup opens, each runs in a daemon thread of its own with
+    its deadline (``LOAD_TIMEOUT`` seconds for a bare callable), through
+    ``OrbitalApp.fetch``, so the app must be an ``OrbitalApp``; ``LOADING``
     shows until it returns. An error, or the deadline, shows in its place and
     goes to ``OrbitalApp.report_error``. A value that returns after the popup
     closed is dropped.
 
-    Dismisses with ``"open"`` (o) or None (escape).
+    Dismisses with ``"open"`` (o, only with a url) or None (escape). Open
+    :attr:`url` in the dismiss callback: :meth:`set_head` may have changed it.
     """
 
-    #: Seconds a lazy value may take before it shows as timed out.
+    #: Seconds a lazy value given as a bare callable may take before it shows as timed out.
     LOAD_TIMEOUT: ClassVar[float] = 10.0
     #: What a lazy value shows until it returns.
     LOADING: ClassVar[str] = "loading…"
@@ -380,16 +434,22 @@ class DetailScreen(OrbitalModal):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape,backspace,q", "close", "back", show=False),
         Binding("o", "open", "open", show=False),
+        Binding("up,k", "scroll_body(-1)", show=False),
+        Binding("down,j", "scroll_body(1)", show=False),
+        Binding("pageup", "page_body(-1)", show=False),
+        Binding("pagedown", "page_body(1)", show=False),
     ]
 
     DEFAULT_CSS = """
     DetailScreen #detail { width: 92%; height: 90%; max-width: 120; }
     DetailScreen #detail-head { height: auto; margin: 0 0 1 0; }
+    DetailScreen #detail-lower { height: 1fr; }
     DetailScreen #detail-main { height: 1fr; }
-    DetailScreen #detail-fields { width: 1fr; height: 1fr; }
+    DetailScreen #detail-fields { width: 1fr; height: auto; }
     DetailScreen #detail-visual { width: 1fr; height: 1fr; margin: 0 0 0 2; }
     DetailScreen.-narrow #detail-visual { display: none; }
-    DetailScreen #detail-body { height: auto; max-height: 8; margin: 1 0 0 0; }
+    DetailScreen #detail-scroll { height: auto; margin: 1 0 0 0; scrollbar-size-vertical: 1; }
+    DetailScreen #detail-body { height: auto; }
     """
 
     def __init__(self, title: str, subtitle: Text | str = "", fields: Sequence[tuple[str, Value]] = (),
@@ -406,52 +466,74 @@ class DetailScreen(OrbitalModal):
         self.kind = kind
 
     def compose(self) -> ComposeResult:
+        with GlassPanel(title=f"◆ {self.kind}", accent=self.accent, accent_2=PALETTE["accent_2"], dialog=True,
+                        id="detail"):
+            yield Static(self._head(), id="detail-head")
+            with Vertical(id="detail-lower"):
+                with Horizontal(id="detail-main"):
+                    yield Static(self._fields_text(), id="detail-fields")
+                    if self.visual is not None:
+                        with Vertical(id="detail-visual"):
+                            yield self.visual
+                if self.body:
+                    with _DetailBody(id="detail-scroll"):
+                        yield Static(self._text(self.body, PALETTE["text_soft"]), id="detail-body")
+            yield Static(self._hint(), classes="dialog-hint")
+
+    def _head(self) -> Text:
         head = Text(self.title_text, style=f"bold {PALETTE['text_bright']}")
         if self.subtitle:
             head.append("\n")
             head.append_text(self.subtitle if isinstance(self.subtitle, Text)
                              else Text(self.subtitle, style=PALETTE["text_soft"]))
-        with GlassPanel(title=f"◆ {self.kind}", accent=self.accent, accent_2=PALETTE["accent_2"], dialog=True,
-                        id="detail"):
-            yield Static(head, id="detail-head")
-            with Horizontal(id="detail-main"):
-                yield Static(self._fields_text(), id="detail-fields")
-                if self.visual is not None:
-                    with Vertical(id="detail-visual"):
-                        yield self.visual
-            if self.body:
-                yield Static(self._text(self.body, PALETTE["text_soft"]), id="detail-body")
-            pairs = [("esc", "back")]
-            if self.url:
-                pairs.insert(0, ("o", "open in browser"))
-            yield Static(hint(*pairs), classes="dialog-hint")
+        return head
+
+    def _hint(self) -> Text:
+        pairs = [("esc", "back")]
+        if self.url:
+            pairs.insert(0, ("o", "open in browser"))
+        return hint(*pairs)
+
+    def set_head(self, title: str | None = None, subtitle: Text | str | None = None,
+                 url: str | None = None) -> None:
+        """Change the head after the popup opened (a record that loads lazily);
+        None keeps what is there, ``subtitle=""`` drops the subtitle and
+        ``url=""`` the link. The hint line offers ``o`` only with a link."""
+        if title is not None:
+            self.title_text = title
+        if subtitle is not None:
+            self.subtitle = subtitle
+        if url is not None:
+            self.url = url or None
+        for head in self.query("#detail-head").results(Static):  # none before compose, which reads the above
+            head.update(self._head())
+        for line in self.query(".dialog-hint").results(Static):
+            line.update(self._hint())
 
     def _text(self, value: Value, style: str) -> Text:
-        if callable(value):
+        if _lazy(value, self.LOAD_TIMEOUT) is not None:
             return Text(self.LOADING, style=f"italic {PALETTE['text_dim']}")
         return value if isinstance(value, Text) else Text(str(value), style=style)
 
     def _fields_text(self) -> Text:
         out = Text()
         label_w = max((len(k) for k, _ in self.fields), default=0) + 2
-        for key, value in self.fields:
+        for i, (key, value) in enumerate(self.fields):
+            out.append("\n" if i else "")  # no newline after the last: a long body gets that row
             out.append(f"{key.upper():<{label_w}}", style=PALETTE["text_faint"])
             out.append_text(self._text(value, PALETTE["text"]))
-            out.append("\n")
         return out
 
     def on_mount(self) -> None:
-        lazy: list[tuple[int | None, Callable[[], Text | str]]] = [
-            (i, value) for i, (_, value) in enumerate(self.fields) if callable(value)]
-        if callable(self.body):
-            lazy.append((None, self.body))
-        if not lazy:
+        values: list[tuple[int | None, Value]] = [*enumerate(v for _, v in self.fields), (None, self.body)]
+        loads = [(index, lazy) for index, value in values if (lazy := _lazy(value, self.LOAD_TIMEOUT)) is not None]
+        if not loads:
             return
         fetch = getattr(self.app, "fetch", None)
         if fetch is None:
             raise TypeError("DetailScreen: lazy values need an OrbitalApp (app.fetch)")
-        for index, load in lazy:
-            fetch(load, then=partial(self._loaded, index), timeout=self.LOAD_TIMEOUT)
+        for index, (load, timeout) in loads:
+            fetch(load, then=partial(self._loaded, index), timeout=timeout)
 
     def _loaded(self, index: int | None, value: Text | str | None, error: BaseException | None) -> None:
         """A lazy value is back (on the app thread): show it, or its error."""
@@ -472,6 +554,8 @@ class DetailScreen(OrbitalModal):
         else:
             self.fields[index] = (label, shown)
             self.query_one("#detail-fields", Static).update(self._fields_text())
+            for body in self.query("#detail-scroll"):
+                body.refresh(layout=True)  # the room the fields leave it changed
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -479,6 +563,66 @@ class DetailScreen(OrbitalModal):
     def action_open(self) -> None:
         if self.url:
             self.dismiss("open")
+
+    def action_scroll_body(self, lines: int) -> None:
+        for body in self.query("#detail-scroll").results(VerticalScroll):
+            body.scroll_relative(y=lines, animate=False)
+
+    def action_page_body(self, pages: int) -> None:
+        for body in self.query("#detail-scroll").results(VerticalScroll):
+            if pages < 0:
+                body.scroll_page_up(animate=False)
+            else:
+                body.scroll_page_down(animate=False)
+
+
+# ==================================================================== prompt ==
+
+
+class PromptModal(OrbitalModal):
+    """A one-line prompt: a glass dialog around Textual's stock ``Input``,
+    focused when it opens.
+
+    Dismisses with the text, surrounding whitespace stripped, on enter (None
+    when nothing is left), or with None on escape. The input takes printable
+    keys before the app's bindings, even ``priority=True`` ones (a ``q`` that
+    quits from anywhere types a q).
+
+    Args:
+        title: The dialog's title ("NEW TASK").
+        placeholder: Shown while the input is empty.
+        value: The text it starts with.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "cancel", show=False)]
+
+    DEFAULT_CSS = """
+    PromptModal #prompt { width: 64; height: auto; }
+    PromptModal.-narrow #prompt { width: 96%; }
+    PromptModal #prompt-input { margin: 1 0; }
+    """
+
+    def __init__(self, title: str, placeholder: str = "", value: str = "") -> None:
+        super().__init__()
+        self.title_text = title
+        self.placeholder = placeholder
+        self.value = value
+
+    def compose(self) -> ComposeResult:
+        with GlassPanel(title=f"▸ {self.title_text}", accent=PALETTE["accent"], accent_2=PALETTE["accent_2"],
+                        dialog=True, id="prompt"):
+            yield Input(self.value, self.placeholder, id="prompt-input")
+            yield Static(hint(("⏎", "save"), ("esc", "cancel")), classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#prompt-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(event.value.strip() or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # ====================================================================== help ==

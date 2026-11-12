@@ -193,6 +193,7 @@ class DemoWorld:
             DoneTask("TT-2071", "Document the DNS runbook", t - 5 * D, "done", f"{TICKETS}/TT-2071"),
         ]
         self.failing: dict[str, str] = {}
+        self.added = 0  # tasks added with add_task
         self.script: list[tuple[float, Callable[[], object]]] = sorted([
             (25, lambda: self._session("rate-limit-middleware", EntityState.WAITING, "plan ready for review",
                                        "Plan: 5 files, 180 lines. Approve to continue?")),
@@ -310,6 +311,17 @@ class DemoWorld:
             kind = rng.choice(["merged", "reviewed", "ticket closed"])
             title, where = rng.choice(_TICKET_POOL if kind == "ticket closed" else _PR_POOL)
             self.events.append(Event(now(), kind, "TT" if kind == "ticket closed" else "GH", title, where))
+
+    # -- new tasks ------------------------------------------------------------------------
+
+    def add_task(self, title: str) -> Task:
+        """A new task, ready to start, at the end of the small tasks (the console's ``n``)."""
+        with self.lock:
+            task = Task(f"TT-{3001 + self.added}", title, "you", "ready", "Small tasks", now(),
+                        f"{TICKETS}/TT-{3001 + self.added}")
+            self.added += 1
+            self.tasks.append(task)
+        return task
 
     # -- history, on demand --------------------------------------------------------------
 
@@ -474,3 +486,7 @@ class DemoProvider:
     def release_log(self, key: str) -> str:
         """A release's pipeline run: the console's release detail loads it lazily."""
         return self.world.release_log(key)
+
+    def add_task(self, title: str) -> Task:
+        """A new task in the demo world: the console's ``n`` adds it through ``OrbitalApp.fetch``."""
+        return self.world.add_task(title)
