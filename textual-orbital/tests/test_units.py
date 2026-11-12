@@ -214,6 +214,51 @@ def test_store_merges_metrics_and_versions_their_changes() -> None:
     assert Snapshot(T0, metrics={"x": 1.0}) == Snapshot(T0, metrics={"x": 1.0}) and hash(Snapshot(T0, metrics={}))
 
 
+class Document:
+    """A source's payload: one large document. The library may never compare or hash it."""
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("a payload was compared by value")
+
+    def __hash__(self) -> int:
+        raise AssertionError("a payload was hashed")
+
+
+def test_store_keeps_a_payload_per_source_and_versions_it_by_identity() -> None:
+    doc, other = Document(), Document()
+    db = Src("DB", SourceData(payload=doc))
+    gh = Src("GH", SourceData(attention=[AttentionItem("g", "GH", 5, "review", "x")]))
+    store = Store([db, gh])
+    assert store.apply("GH", gh.fetch(), T0)
+    v = store.content_version
+    assert store.apply("DB", db.fetch(), T0)
+    assert store.content_version == v + 1, "a payload is content"
+    snap = store.snapshot(T0)
+    assert snap.payload("DB") is doc and snap.payload("GH") is None and snap.payload("GH", "none") == "none"
+    assert list(snap.payloads) == ["DB"] and store.status("DB").items == 0, "not a record: not counted"
+    with pytest.raises(TypeError):
+        snap.payloads["DB"] = other  # type: ignore[index]
+    assert snap == store.snapshot(T0) and hash(snap) == hash(store.snapshot(T0)), "never compared or hashed"
+    assert "payload" not in repr(snap) and "payload" not in repr(db.fetch()), "nor printed"
+    v = store.content_version
+    store.apply("DB", SourceData(payload=doc), T0)
+    store.apply("DB", SourceData(track=[]), T0)
+    assert store.content_version == v and store.snapshot(T0).payload("DB") is doc, "the same object, or None, keeps"
+    store.apply("DB", SourceData(payload=other), T0)
+    assert store.content_version == v + 1 and store.snapshot(T0).payload("DB") is other, "a new object is a change"
+    store.fail("DB", "HTTP 502", T0)
+    assert store.snapshot(T0).payload("DB") is other, "a failing source keeps it"
+    inside = [AttentionItem("g", "DB", 5, "review", "y", since=datetime(2026, 10, 27, 12))]  # naive, and GH's key
+    assert store.apply("DB", SourceData(payload=inside), T0), "the store's checks don't look inside a payload"
+    naive = SourceData(events=[Event(datetime(2026, 10, 27, 12), "merged", "DB", "z")], payload=doc)
+    assert not store.apply("DB", naive, T0) and store.snapshot(T0).payload("DB") is inside, "rejected with its fetch"
+    assert hash(store.snapshot(T0)), "hashable with an unhashable payload"
+    own = {"DB": doc}
+    made = Snapshot(T0, payloads=own)
+    own["DB"] = other
+    assert made.payload("DB") is doc and replace(made, taken_at=T0).payload("DB") is doc, "copied, and kept"
+
+
 async def test_rules_run_after_every_fetch_and_every_publish_restamps_the_snapshot() -> None:
     """Rules see a fresh snapshot after every fetch, changed or not, taken at that fetch.
     ``app.snapshot`` is re-stamped too (O5), but the pages only get it when the content changed."""

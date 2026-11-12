@@ -32,7 +32,7 @@ In an orbital app the data flows like this:
 
 1. Each `Source.fetch()` runs in a daemon thread of its own, with a deadline (`Source.timeout`). The next fetch is scheduled an interval after it ends, and later while the source fails (rule 25).
 2. The result comes back to the app thread (`OrbitalApp.call_from_worker`), and `Store.apply` (or `Store.fail`) merges it. `Store.apply` fails the source instead when its data has a naive datetime or a key another source uses (rule 27).
-3. Every fetch re-stamps `app.snapshot` with its time. If the merged content changed, `OrbitalApp.snapshot_changed(snapshot)` runs. By default it calls `update_snapshot(snapshot)` on every widget that has one (each `Page`). Health changes go to `set_statuses`, and the minute tick goes to `minute_tick`.
+3. Every fetch re-stamps `app.snapshot` with its time. If the merged content changed, `OrbitalApp.snapshot_changed(snapshot)` runs. By default it calls `update_snapshot(snapshot)` on every widget that has one (each `Page`). Health changes (a failing source's new error included) go to `set_statuses`, and the minute tick goes to `minute_tick`.
 4. After every fetch, whether it changed anything, failed or timed out, the alert rules run on that snapshot (not on the minute tick), and new alerts are queued and shown.
 5. The pages call setters on the widgets (`set_items`, `set_entities`...).
 6. Textual renders the text. At the end of that frame, glass's engine collects the pixel items, compares them with what the terminal holds, and sends only the changes.

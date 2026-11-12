@@ -20,7 +20,8 @@ reason shows on ``h``) and its last good data stays on screen. A fetch that
 takes longer than its deadline (:func:`fetch_timeout`) turns the source red
 too, and its late result is ignored. A field left as ``None`` in
 :class:`SourceData` means "this source doesn't report that"; an empty list
-(or ``{}`` for ``metrics``) means "it reports none".
+(or ``{}`` for ``metrics``) means "it reports none". A ``payload`` is one
+document of the source's own, handed to its pages as it is.
 
 :meth:`Store.apply` rejects data that would break the merged snapshot, and
 fails that source instead: a naive ``datetime`` in any record, or a key (an
@@ -48,6 +49,15 @@ class SourceData:
     ``metrics`` are named numbers for gauges (``{"disk": 0.42}``). Round each
     to what the screen shows: a change in any value is a content change, so
     noise in the last digits would redraw the dashboard on every fetch.
+
+    ``payload`` is one document the source hands to its pages as it is (a large
+    structured one, thousands of rows read by filters on a page), read with
+    ``snapshot.payload(key)``. It changes by identity: an object that is not
+    the source's last payload is a content change, the same object again is
+    not, and the library never compares, hashes or looks inside it. So return
+    the same object while nothing changed, and never mutate one you returned:
+    build a new one, because pages read it on the app thread while the next
+    fetch runs in its own.
     """
 
     entities: Sequence[Entity] | None = None
@@ -58,14 +68,15 @@ class SourceData:
     tasks: Sequence[Task] | None = None
     done: Sequence[DoneTask] | None = None
     metrics: Mapping[str, float] | None = None
+    payload: object | None = field(default=None, compare=False, repr=False)
 
     def count(self) -> int:
-        """How many records this fetch returned (every field but ``metrics``)."""
+        """How many records this fetch returned (every field but ``metrics`` and ``payload``)."""
         return sum(len(getattr(self, name) or ()) for name in RECORD_FIELDS)
 
 
-#: The fields of :class:`SourceData` that hold records (all but ``metrics``).
-RECORD_FIELDS = tuple(name for name in SourceData.__dataclass_fields__ if name != "metrics")
+#: The fields of :class:`SourceData` that hold records (all but ``metrics`` and ``payload``).
+RECORD_FIELDS = tuple(name for name in SourceData.__dataclass_fields__ if name not in ("metrics", "payload"))
 #: The fields whose records must have keys unique across sources, and the key attribute.
 KEYED_FIELDS = (("entities", "id"), ("attention", "key"), ("track", "key"))
 
@@ -146,7 +157,8 @@ class Store:
     """Keeps each source's latest data and merges it into one :class:`Snapshot`.
 
     ``content_version`` changes only when the merged content changes, so a
-    poll that returns the same data costs nothing downstream.
+    poll that returns the same data costs nothing downstream. Records and
+    metrics are compared by value, a payload by identity only.
     """
 
     def __init__(self, sources: Sequence[Source]) -> None:
@@ -178,6 +190,7 @@ class Store:
         if problem is not None:
             self.fail(key, problem, at)
             return False
+        new_payload = data.payload is not None and data.payload is not entry.data.payload  # never by value
         merged = SourceData(**{name: (getattr(data, name) if getattr(data, name) is not None
                                       else getattr(entry.data, name))
                                for name in SourceData.__dataclass_fields__})
@@ -185,12 +198,12 @@ class Store:
         entry.fetch_ms = fetch_ms
         entry.status = replace(self.status(key), last_ok=at, last_attempt=at, error=None, items=data.count(),
                                failures=0)
-        self._recompute()
+        self._recompute(new_payload)
         return True
 
     def fail(self, key: str, error: str, at: datetime | None = None) -> None:
         """Source ``key`` failed (or timed out): it turns red with ``error`` and
-        keeps its last good data."""
+        keeps its last good data, its payload included."""
         status = self.status(key)
         self._entries[key].status = replace(status, last_attempt=at or now(), error=error,
                                             failures=status.failures + 1)
@@ -241,9 +254,11 @@ class Store:
         return (*(tuple(getattr(data, name) or ()) for name in RECORD_FIELDS),
                 tuple(sorted((data.metrics or {}).items())))
 
-    def _recompute(self) -> None:
+    def _recompute(self, new_payload: bool = False) -> None:
+        """Bump ``content_version`` if the merged records or metrics changed, or
+        a source sent a new payload (told by identity: payloads are not in the key)."""
         content = self._content_key(self._gather())
-        if content != self._content:
+        if new_payload or content != self._content:
             self._content = content
             self.content_version += 1
 
@@ -261,6 +276,7 @@ class Store:
             done=tuple(data.done or ()),
             sources=self.statuses(),
             metrics=Metrics(data.metrics or {}),
+            payloads={key: e.data.payload for key, e in self._entries.items() if e.data.payload is not None},
         )
 
 
@@ -270,7 +286,7 @@ _DATETIME_FIELDS: dict[type, tuple[str, ...]] = {}
 def naive_datetime(data: SourceData) -> str | None:
     """The first naive ``datetime`` in any record of ``data``, as a reason
     ("naive datetime in AttentionItem.since"), or None. Every dataclass field of
-    every record is checked; ``data`` (the app's own record) is not."""
+    every record is checked; ``data`` (the app's own record) and the payload are not."""
     for name in RECORD_FIELDS:
         for record in getattr(data, name) or ():
             kind = type(record)

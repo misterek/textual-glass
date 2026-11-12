@@ -16,7 +16,8 @@ need:
 
 :meth:`OrbitalApp.fetch` runs a one-off call with parameters (a past week, a
 record's comments) the same way as a source's fetch: a daemon thread, a
-deadline, the result back on the app thread.
+deadline, the result back on the app thread. :meth:`OrbitalApp.poll` fetches
+one source now, after the app wrote something it reads.
 
 Cost model: each fetch runs in a daemon thread of its own, and the next one is
 scheduled an interval after it ends (longer while the source fails). A fetch
@@ -124,6 +125,7 @@ class _Poll:
     token: int = 0  # the newest fetch's token; a result with an older one is late
     running: bool = False  # the fetch with ``token`` is in flight
     hung: int = 0  # fetches that timed out and haven't returned yet
+    again: bool = False  # poll() asked while a fetch ran: start a fresh one when it ends
     timer: Timer | None = None  # the next fetch
     deadline: Timer | None = None  # the deadline of the fetch in flight
 
@@ -205,7 +207,7 @@ class OrbitalApp(Glass, App[None]):
         self.errors: deque[ErrorReport] = deque(maxlen=self.ERRORS_KEPT)
         self._orbital_published = -1
         self._orbital_day: date | None = None  # the date of the last snapshot the pages got
-        self._orbital_health: tuple[Health, ...] = ()
+        self._orbital_health: tuple[tuple[Health, str | None], ...] = ()  # each source's health and error
         self._orbital_loop: asyncio.AbstractEventLoop | None = None
         self._orbital_context = contextvars.copy_context()
         self._orbital_closed = False
@@ -237,7 +239,7 @@ class OrbitalApp(Glass, App[None]):
         # immediate: a toast moves before a popped screen is removed with it on
         self.screen_change_signal.subscribe(self, self._screen_changed, immediate=True)
         for key in self._orbital_polls:
-            self._poll(key)
+            self._start_fetch(key)
         self._arm_minute()
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
@@ -331,12 +333,33 @@ class OrbitalApp(Glass, App[None]):
 
     # -- polling -------------------------------------------------------------------------
 
-    def poll_all(self) -> None:
-        """Fetch every source now, failing ones too (their backoff is skipped)."""
-        for key in self._orbital_polls:
-            self._poll(key)
+    def poll(self, key: str) -> None:
+        """Fetch source ``key`` now, skipping its backoff: call it right after the
+        app wrote something the source reads (a record saved to a file).
 
-    def _poll(self, key: str) -> None:
+        If a fetch of it is running, it may have read before the write, so no
+        second one starts beside it: a fresh fetch starts as soon as it ends or
+        times out, however often this was called meanwhile. A source paused at
+        ``HUNG_LIMIT`` fetches as soon as a hung fetch returns (rule 25). Either
+        way, a fetch that starts after this call sees the write.
+
+        Raises KeyError for a key no source has. Call it on the app thread (from
+        another thread, through :meth:`call_from_worker`)."""
+        poll = self._orbital_polls.get(key)
+        if poll is None:
+            known = ", ".join(map(repr, self._orbital_polls)) or "none"
+            raise KeyError(f"no source {key!r}; the sources are {known}")
+        if poll.running:
+            poll.again = True  # see _schedule
+        else:
+            self._start_fetch(key)
+
+    def poll_all(self) -> None:
+        """:meth:`poll` every source: fetch each now, failing ones too (their backoff is skipped)."""
+        for key in self._orbital_polls:
+            self.poll(key)
+
+    def _start_fetch(self, key: str) -> None:
         """Start a fetch of source ``key`` in a daemon thread of its own, with a deadline."""
         poll = self._orbital_polls[key]
         if self._orbital_closed or self._orbital_loop is None or poll.running:
@@ -346,6 +369,7 @@ class OrbitalApp(Glass, App[None]):
             poll.timer = None
         if poll.hung >= self.HUNG_LIMIT:
             return  # until a hung fetch returns (see _fetched)
+        poll.again = False  # this fetch starts after any write poll() was told of
         poll.token += 1
         token, source = poll.token, poll.source
 
@@ -385,7 +409,7 @@ class OrbitalApp(Glass, App[None]):
         if not poll.running or token != poll.token:  # a fetch that timed out came back: ignore it
             poll.hung = max(0, poll.hung - 1)
             if poll.timer is None and not poll.running:  # paused at HUNG_LIMIT: go on
-                self._poll(key)
+                self._start_fetch(key)
             return
         poll.running = False
         if poll.deadline is not None:
@@ -411,13 +435,20 @@ class OrbitalApp(Glass, App[None]):
         self._publish(at)
 
     def _schedule(self, poll: _Poll, at: datetime) -> None:
-        """The next fetch, an interval after this one ended; longer while it fails (O8)."""
+        """The next fetch, an interval after this one ended; longer while it fails
+        (O8). At once if :meth:`poll` asked while this one ran (it may have read
+        before the write); none while paused at ``HUNG_LIMIT``."""
         key = poll.source.key
         if poll.hung >= self.HUNG_LIMIT:
-            self.store.schedule(key, None)
+            self.store.schedule(key, None)  # the fetch that starts when a hung one returns sees any write
+            return
+        if poll.again:
+            self.store.schedule(key, at)
+            self._start_fetch(key)
             return
         delay = poll_delay(poll.interval, self.store.status(key).failures)
-        poll.timer = self.set_timer(delay, lambda: self._attempt("poll", self._poll, key), name=f"poll-{key}")
+        poll.timer = self.set_timer(delay, lambda: self._attempt("poll", self._start_fetch, key),
+                                    name=f"poll-{key}")
         self.store.schedule(key, at + timedelta(seconds=delay))
 
     # -- one-off fetches -----------------------------------------------------------------
@@ -510,7 +541,8 @@ class OrbitalApp(Glass, App[None]):
             self._deliver(self.snapshot)
 
     def _check_health(self, statuses: tuple[SourceStatus, ...], at: datetime) -> None:
-        health = tuple(s.health(at) for s in statuses)
+        """``health_changed`` when a source's health or error changed, and only then (rule 9)."""
+        health = tuple((s.health(at), s.error) for s in statuses)
         if health != self._orbital_health:
             self._orbital_health = health
             self.health_changed(statuses, at)
@@ -531,8 +563,10 @@ class OrbitalApp(Glass, App[None]):
         self._each_widget("update_snapshot", snapshot)
 
     def health_changed(self, statuses: tuple[SourceStatus, ...], at: datetime) -> None:
-        """A source went fresh, stale or failing. By default every widget with
-        ``set_statuses`` gets the statuses."""
+        """A source went fresh, stale or failing, or a failing source's error
+        changed ("HTTP 503", then "HTTP 401"). The same health and the same
+        errors call nothing. By default every widget with ``set_statuses``
+        gets the statuses."""
         self._each_widget("set_statuses", statuses, at)
 
     def minute_tick(self, at: datetime) -> None:
