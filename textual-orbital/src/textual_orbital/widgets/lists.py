@@ -210,9 +210,20 @@ def task_color(status: str) -> str:
     return TASK_COLORS.get(status.lower(), PALETTE["text_soft"])
 
 
+def source_badge(source: str) -> list[Part]:
+    """The two-letter source badge and a space after it, or nothing when ``source`` is empty."""
+    return [(source.ljust(2)[:2], f"bold {source_color(source)}"), (" ", "")] if source else []
+
+
 class TaskBoard(SelectList[Any]):
     """Tasks in progress grouped by list ("Projects", "Ongoing"...). The meter
-    shows days in the current status (a full meter is a month)."""
+    shows days in the current status (a full meter is a month). A task with a
+    ``source`` shows its badge before the title.
+
+    Override :meth:`task_parts` to add a column of your own after the title."""
+
+    #: The title keeps at least this many cells before :meth:`task_parts` takes room.
+    TITLE_MIN = 8
 
     def __init__(self, *, id: str | None = None, classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
@@ -249,6 +260,12 @@ class TaskBoard(SelectList[Any]):
     def days(self, task: Task) -> int:
         return max(0, (self.at - task.status_since).days) if task.status_since else 0
 
+    def task_parts(self, task: Task, width: int) -> list[Part]:
+        """Parts to draw right after the title (an id, a count...), in glass and plain
+        modes alike; the default is none. ``width`` is the row's width. The text is
+        cut to leave the title ``TITLE_MIN`` cells, so it never overflows the row."""
+        return []
+
     def render_row(self, row: Any, line: int, width: int, selected: bool) -> list[Part]:
         if isinstance(row, Section):
             return [(f"{row.label} {row.count}", f"bold {row.color}")]
@@ -259,12 +276,19 @@ class TaskBoard(SelectList[Any]):
         if meter_w and not self.glass_on:
             filled = max(1, round(min(1.0, self.days(task) / 30) * (meter_w - 1)))
             meter = ("▰" * filled + "▱" * (meter_w - 1 - filled) + " ", colour)
-        parts: list[Part] = [("  " if self.glass_on else "● ", colour),
-                             (task.title, f"bold {PALETTE['text_bright']}" if selected else PALETTE["text"])]
+        head: list[Part] = [("  " if self.glass_on else "● ", colour), *source_badge(task.source)]
+        title: Part = (task.title, f"bold {PALETTE['text_bright']}" if selected else PALETTE["text"])
+        tail: list[Part] = []
         if width >= 56:
-            parts.append((f" {ellipsize(task.assignee, 7):<7}", PALETTE["text_dim"]))
-        parts += [(f" {task.status:<11}", colour), (" ", ""), meter, (f"{self.days(task):>3}d", PALETTE["text_soft"])]
-        return fit(parts, width, 1)
+            tail.append((f" {ellipsize(task.assignee, 7):<7}", PALETTE["text_dim"]))
+        tail += [(f" {task.status:<11}", colour), (" ", ""), meter, (f"{self.days(task):>3}d", PALETTE["text_soft"])]
+        room = width - sum(len(t) for t, _ in (*head, *tail)) - min(len(task.title), self.TITLE_MIN)
+        extra: list[Part] = []
+        for text, style in self.task_parts(task, width):
+            text = text[:max(0, room)]
+            room -= len(text)
+            extra.append((text, style))
+        return fit([*head, title, *extra, *tail], width, len(head))
 
     def row_pixels(self, row: Any, rect: FRect, selected: bool, ctx: PixelContext) -> Iterable[Item]:
         x, y, w, _ = rect
@@ -353,6 +377,6 @@ class DoneList(SelectList[DoneTask]):
     def render_row(self, row: DoneTask, line: int, width: int, selected: bool) -> list[Part]:
         when = row.done_at.astimezone()
         colour = task_color(row.status)
-        return fit([(f"{when:%b} {when.day:<2} ", PALETTE["text_soft"]), ("✓ ", colour),
+        return fit([(f"{when:%b} {when.day:<2} ", PALETTE["text_soft"]), ("✓ ", colour), *source_badge(row.source),
                     (row.title, f"bold {PALETTE['text_bright']}" if selected else PALETTE["text"]),
-                    (f" {row.status}", colour)], width, 2)
+                    (f" {row.status}", colour)], width, 2 + len(source_badge(row.source)))

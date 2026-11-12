@@ -797,3 +797,15 @@ async def test_the_header_clock_ticks_outside_the_pages() -> None:
         clock.text = "--:--"
         app.minute_tick(T0)
         assert clock.text != "--:--", "OrbitalApp.minute_tick ticked the header's clock"
+
+
+def test_store_checks_tasks_and_goals_too() -> None:
+    from textual_orbital.model import DoneTask, Goal, Task
+
+    naive = datetime(2026, 10, 27, 12, 0)
+    store = Store([Src("TT", SourceData())])
+    for data, reason in [(SourceData(tasks=[Task("t", "x", status_since=naive)]), "Task.status_since"),
+                         (SourceData(done=[DoneTask("d", "x", naive)]), "DoneTask.done_at")]:
+        assert not store.apply("TT", data, T0) and reason in (store.status("TT").error or "")
+    own = SourceData(tasks=[Task("t", "x", source="TT", data=("naive", naive))], goals=[Goal("g", "x", data=naive)])
+    assert store.apply("TT", own, T0), "source and data are never checked"

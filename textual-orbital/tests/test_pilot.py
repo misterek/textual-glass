@@ -35,11 +35,16 @@ from textual_orbital import (
     BeaconRow,
     Brand,
     DetailScreen,
+    DoneList,
+    DoneTask,
     EntityState,
     Event,
     EventLog,
+    HeaderStrip,
     PriorityList,
     SourceData,
+    Task,
+    TaskBoard,
     Track,
     TrackHealth,
     TrackItem,
@@ -869,3 +874,71 @@ async def test_alert_hint_offers_open_only_with_a_link(url: str | None) -> None:
             await pilot.press("o")
             await pilot.pause()
             assert isinstance(app.screen, AlertScreen), "o does nothing without a link"
+
+
+class Boards(App[None]):
+    def compose(self) -> ComposeResult:
+        yield TaskBoard()
+        yield DoneList()
+
+
+class IdBoard(TaskBoard):
+    def task_parts(self, task: Task, width: int) -> list[Any]:
+        return [(f" #{task.id}", "bold")]
+
+
+class GradientBrand(Brand):
+    def callsign_parts(self) -> list[Any]:
+        return [(ch, f"bold #{40 + 20 * i:02x}80ff") for i, ch in enumerate(self.callsign)]
+
+
+class GradientStrip(HeaderStrip):
+    BRAND = GradientBrand
+
+
+@pytest.mark.parametrize("glass", [False, True])
+async def test_task_rows_show_a_source_badge_and_the_apps_own_column(
+        glass: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(TaskBoard, "glass_on", property(lambda self: glass))
+    monkeypatch.setattr(DoneList, "glass_on", property(lambda self: glass))
+    t = now()
+    plain, tagged = Task("7", "write the plan", "ann", status_since=t), Task("8", "ship it", "bo", source="XX")
+    app = Boards()
+    async with app.run_test(size=(80, 20)):
+        board, done = app.query_one(TaskBoard), app.query_one(DoneList)
+        for width in (80, 56, 30):
+            rows = ["".join(x for x, _ in board.render_row(r, 0, width, False)) for r in (plain, tagged)]
+            assert [len(r) for r in rows] == [width, width]
+            assert "XX" not in rows[0] and "#" not in rows[0]
+        assert "XX ship it" in "".join(x for x, _ in board.render_row(tagged, 0, 80, False))
+        done_rows = [DoneTask("d", "closed", t), DoneTask("e", "closed", t, source="XX")]
+        text = ["".join(x for x, _ in done.render_row(r, 0, 40, False)) for r in done_rows]
+        assert [len(x) for x in text] == [40, 40] and "XX " in text[1] and "XX" not in text[0]
+        board.__class__ = IdBoard  # a subclass's column
+        for width in (80, 30, 24):
+            row = "".join(x for x, _ in board.render_row(tagged, 0, width, False))
+            assert len(row) == width
+        wide = "".join(x for x, _ in board.render_row(tagged, 0, 80, False))
+        assert wide.index("ship it") < wide.index(" #8 bo "), "after the title, before the assignee"
+
+
+async def test_the_callsign_takes_styled_parts_and_the_header_takes_a_brand() -> None:
+    class Strips(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Brand("ORBITAL", ["one"], id="plain")
+            yield GradientBrand("ORBITAL", ["one"], id="grad")
+            yield GradientStrip("ORBITAL", ["one"])
+
+    app = Strips()
+    async with app.run_test(size=(60, 6)) as pilot:
+        await pilot.pause()
+        plain, grad = app.query_one("#plain", Brand), app.query_one("#grad", Brand)
+        for width in (60, 14):
+            plain.styles.width = grad.styles.width = width
+            await pilot.pause()
+            assert plain.render_line(0).text == grad.render_line(0).text
+            assert plain.render_line(0).cell_length == grad.render_line(0).cell_length == width
+            colours = {seg.style.color for seg in grad.render_line(0) if seg.text in set("ORBITAL")}
+            assert len(colours) > 3 if width == 60 else not colours, "the gradient, until the callsign is dropped"
+        assert isinstance(app.query_one(GradientStrip).brand, GradientBrand)
+        assert type(HeaderStrip().brand) is Brand

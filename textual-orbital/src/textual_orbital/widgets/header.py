@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import datetime
+from typing import ClassVar
 
 from textual import events
 from textual.containers import Horizontal
@@ -114,6 +115,12 @@ class Brand(PixelWidget):
             self.badge = badge
             self.refresh()
 
+    def callsign_parts(self) -> list[Part]:
+        """The callsign as styled parts (default: one bold part). Override it for a
+        gradient or other styling. The parts' text must add up to ``self.callsign``:
+        its width is what the layout reserves."""
+        return [(self.callsign, f"bold {PALETTE['text_bright']}")]
+
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         if y:
@@ -126,7 +133,7 @@ class Brand(PixelWidget):
         for variant in range(4):  # everything, short tab names, only the current tab named, no callsign
             parts: list[Part] = [("◉ ", acc)]
             if variant < 2:
-                parts += [(self.callsign, f"bold {bright}"), ("  ", "")]
+                parts += [*self.callsign_parts(), ("  ", "")]
             for i, page in enumerate(self.pages):
                 current = i == self.current
                 if variant == 0 or (variant < 3 and current):
@@ -141,8 +148,9 @@ class Brand(PixelWidget):
                 parts.append(("  " if variant < 2 else " ", ""))
             if sum(len(t) for t, _ in parts) + badge_w <= width:
                 return strip(parts + badge, width)
-        name = self.pages[self.current].upper() if self.pages else self.callsign
-        return strip([("◉ ", acc), (name, f"bold {bright}"), *badge], width)
+        if self.pages:
+            return strip([("◉ ", acc), (self.pages[self.current].upper(), f"bold {bright}"), *badge], width)
+        return strip([("◉ ", acc), *self.callsign_parts(), *badge], width)
 
 
 class Clock(PixelWidget):
@@ -186,9 +194,12 @@ class HeaderStrip(PixelMixin, Horizontal):
     #: Below this width the source health dots drop their keys.
     COMPACT_BELOW = 84
 
+    #: The class of ``self.brand``: a :class:`Brand` subclass (a gradient callsign, say).
+    BRAND: ClassVar[type[Brand]] = Brand
+
     def __init__(self, callsign: str = "ORBITAL", pages: Sequence[str] = (), *, id: str | None = None) -> None:
         super().__init__(id=id)
-        self.brand = Brand(callsign, pages)
+        self.brand = self.BRAND(callsign, pages)
         self.health = SourceHealth()
         self.clock = Clock()
 
