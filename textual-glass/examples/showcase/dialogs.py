@@ -124,7 +124,7 @@ class ServiceScreen(ModalScreen[None]):
         table.border_title = "Recent deploys"
         t = self.tones
         table.add_columns("Version", "When", "By", "Result")
-        people = ("dana", "sam", "priya", "lee", "Claude Code", "alex")
+        people = ("dana", "ravi", "priya", "lee", "Claude Code", "kim")
         for k, version in enumerate(history(self.service.version, 8)):
             result = Text("reverted", style=t.text_error) if k == 3 else Text("shipped", style=t.text_success)
             table.add_row(Text(version, style="bold"), f"{k * 2 + 1}d ago", people[k % len(people)], result)

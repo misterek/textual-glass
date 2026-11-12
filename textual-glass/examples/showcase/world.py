@@ -105,11 +105,11 @@ class Incident:
 
 
 INCIDENTS: tuple[Incident, ...] = (
-    Incident("INC-231", 1, "search", "Search returns 503 for a third of queries", "14m", "sam"),
+    Incident("INC-231", 1, "search", "Search returns 503 for a third of queries", "14m", "ravi"),
     Incident("INC-230", 2, "checkout", "p95 above 800 ms on checkout", "38m", "priya"),
     Incident("INC-229", 3, "media", "Thumbnail queue backlog", "1h", "lee"),
     Incident("INC-226", 3, "notify", "Duplicate push notifications on Android", "3h", "dana"),
-    Incident("INC-224", 4, "reports", "CSV export drops the last row", "1d", "alex"),
+    Incident("INC-224", 4, "reports", "CSV export drops the last row", "1d", "kim"),
     Incident("INC-221", 4, "profile", "Avatar upload is slow on large files", "2d", "jo"),
 )
 
@@ -180,7 +180,7 @@ ACTIVITY: tuple[tuple[str, str, str, str], ...] = (
     ("13:52", "success", "github", "checks passed on #491 (14 of 14)"),
     ("13:58", "primary", "deploy", "ledger v0.9.0 canary at 3 of 5 regions"),
     ("14:03", "error", "monitor", "search shard 3 stopped answering"),
-    ("14:04", "error", "pager", "INC-231 opened, sam is on it"),
+    ("14:04", "error", "pager", "INC-231 opened, ravi is on it"),
     ("14:09", "muted", "deploy", "search v1.9.3 hotfix building on staging"),
     ("14:12", "waiting", "claude", "Claude Code is waiting: ship checkout v2.14.0?"),
 )

@@ -161,7 +161,7 @@ class AttentionItem:
         why: Short verb phrase: "review", "respond", "unblock"...
         title: What it is about.
         where: Repo, list or project.
-        detail: One line of context ("jdoe requested changes").
+        detail: One line of context ("dana requested changes").
         since: When it started needing attention (age is computed from it).
         section: ``"attention"`` or ``"aware"``.
         url: Opened by ``o``.
@@ -352,7 +352,7 @@ class Goal:
 
 @dataclass(frozen=True)
 class Task:
-    """A task in progress. ``group`` is the list it lives in ("Big Work"...).
+    """A task in progress. ``group`` is the list it lives in ("Projects"...).
 
     ``source`` is the key of the source that reported it: when set, ``TaskBoard``
     shows it as a badge. ``data`` is the app's own frozen record; compared, never

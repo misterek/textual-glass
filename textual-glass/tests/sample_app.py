@@ -105,7 +105,7 @@ class Sample(App):
         for i in range(60):
             label = f" {10 - i % 10:>2} "
             score = Text(label, style=f"bold white on {BADGE}") if i % 10 == 0 else Text(label)
-            table.add_row(score, f"Item number {i}", "infra-live")
+            table.add_row(score, f"Item number {i}", "example-repo")
         self.query_one(ProgressBar).update(progress=60)
         table.focus()
 

@@ -273,7 +273,7 @@ async def test_alert_queue_snooze_and_resolve(output: Output) -> None:
                 break
         assert not app.alert_queue.snoozed
         # a new wait pops up, and closes by itself when the wait is answered elsewhere
-        world(app)._session("rate-limit-middleware", EntityState.WAITING, "question", "Keep the old endpoint?")
+        world(app)._session("rate-limit-middleware", EntityState.WAITING, "question", "Keep both layouts?")
         app.poll_all()
         for _ in range(40):
             await asyncio.sleep(0.05)

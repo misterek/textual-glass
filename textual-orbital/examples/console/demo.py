@@ -102,9 +102,9 @@ class DemoWorld:
             Entity("search-reindex-job", "search-reindex-job", "search", EntityState.WORKING, t - 4 * M, "",
                    "Profiling the batch indexer", "claude://session/search-reindex-job"),
             Entity("runbook-cleanup", "runbook-cleanup", "ops-docs", EntityState.IDLE, t - 70 * M, "",
-                   "Finished: 9 runbooks updated", "claude://session/runbook-cleanup"),
+                   "Finished: 9 help pages updated", "claude://session/runbook-cleanup"),
             Entity("dependency-bumps", "dependency-bumps", "web-shell", EntityState.ERROR, t - 9 * M,
-                   "API rate limited", "GitHub API returned 403 (secondary rate limit)",
+                   "Hit the API rate limit", "GitHub API returned 429 (too many requests)",
                    "claude://session/dependency-bumps"),
         ):
             self.sessions[s.id] = s
@@ -150,15 +150,15 @@ class DemoWorld:
                           "platform team", t - 9 * H, "aware", f"{ORG}/build-images/pull/77"),
             AttentionItem("im-disk", "IM", 5, "disk 81%", "db-replica-3 data volume", "prod-eu", "grows 2% a day",
                           t - 4 * D, "aware", f"{MONITOR}/hosts/db-replica-3"),
-            AttentionItem("TT-2185", "TT", 4, "closed", "Move cron jobs to the scheduler", "Platform", "done · jules",
+            AttentionItem("TT-2185", "TT", 4, "closed", "Move cron jobs to the scheduler", "Platform", "done · mei",
                           t - 11 * H, "aware", f"{TICKETS}/TT-2185"),
             AttentionItem("im-cert", "IM", 4, "cert expires", "api.example.com certificate", "edge", "in 12 days",
                           t - 2 * D, "aware", f"{MONITOR}/certs/api"),
             AttentionItem("gh-pr-203", "GH", 3, "bot review", "Update the test runner to 9.4", "web-shell",
                           "deps-bot", t - 2 * H, "aware", f"{ORG}/web-shell/pull/203"),
-            AttentionItem("ss-12", "SS", 3, "outdated", "14 dependencies behind", "payments-api", "2 major",
+            AttentionItem("ss-12", "SS", 3, "outdated", "Base image 3 releases behind", "payments-api", "2 fixes",
                           t - 6 * D, "aware", f"{SCANNER}/12"),
-            AttentionItem("ss-4", "SS", 2, "secret", "Test token in a fixture", "web-shell", "revoked",
+            AttentionItem("ss-4", "SS", 2, "license", "Copyleft licence in a dev dependency", "web-shell", "dev only",
                           t - 30 * D, "aware", f"{SCANNER}/4"),
         )}
         #: The first day the sources report events for: the Monday two weeks before this one.
@@ -175,22 +175,23 @@ class DemoWorld:
                  f"{TICKETS}/TT-2101", "G-2"),
             Task("TT-2102", "Search ranking experiment", "Mei", "in progress", "Projects", t - 12 * D,
                  f"{TICKETS}/TT-2102", "G-3"),
-            Task("TT-2150", "Weekly patching", "Jules", "in progress", "Ongoing", t - 31 * D, f"{TICKETS}/TT-2150"),
-            Task("TT-2151", "Dependency update triage", "Dana", "in progress", "Ongoing", t - 45 * D,
+            Task("TT-2150", "Weekly release notes", "Jules", "in progress", "Ongoing", t - 31 * D,
+                 f"{TICKETS}/TT-2150"),
+            Task("TT-2151", "Triage the bug inbox", "Dana", "in progress", "Ongoing", t - 45 * D,
                  f"{TICKETS}/TT-2151"),
             Task("TT-2190", "Rotate the shared API keys", "Noor", "in review", "Small tasks", t - 2 * D,
                  f"{TICKETS}/TT-2190", "G-1"),
-            Task("TT-2193", "Budget alerts per team", "Jules", "in progress", "Small tasks", t - 4 * D,
+            Task("TT-2193", "Alerts for slow checkouts", "Jules", "in progress", "Small tasks", t - 4 * D,
                  f"{TICKETS}/TT-2193", "G-4"),
-            Task("TT-2196", "Remove unused service accounts", "Omar", "blocked", "Small tasks", t - 6 * D,
+            Task("TT-2196", "Remove unused feature flags", "Omar", "blocked", "Small tasks", t - 6 * D,
                  f"{TICKETS}/TT-2196", "G-1"),
         ]
         self.done = [
             DoneTask("TT-2088", "Retire the old status page", t - 2 * H, "done", f"{TICKETS}/TT-2088"),
             DoneTask("TT-2084", "Enable audit logs in staging", t - D, "done", f"{TICKETS}/TT-2084"),
-            DoneTask("TT-2080", "Standardize log retention", t - 2 * D, "closed", f"{TICKETS}/TT-2080"),
-            DoneTask("TT-2077", "Rightsize the staging database", t - 3 * D, "done", f"{TICKETS}/TT-2077"),
-            DoneTask("TT-2071", "Document the DNS runbook", t - 5 * D, "done", f"{TICKETS}/TT-2071"),
+            DoneTask("TT-2080", "Unify the error pages", t - 2 * D, "closed", f"{TICKETS}/TT-2080"),
+            DoneTask("TT-2077", "Speed up the product image cache", t - 3 * D, "done", f"{TICKETS}/TT-2077"),
+            DoneTask("TT-2071", "Document the release checklist", t - 5 * D, "done", f"{TICKETS}/TT-2071"),
         ]
         self.failing: dict[str, str] = {}
         self.added = 0  # tasks added with add_task
@@ -267,9 +268,9 @@ class DemoWorld:
                 self._session(s.id, EntityState.WORKING, "", "Continuing")
             elif s.state is EntityState.WORKING:
                 reason, detail = rng.choice([
-                    ("permission prompt", "Wants to run: kubectl rollout restart deploy/api"),
-                    ("question", "Keep the old endpoint for a week?"),
-                    ("plan ready for review", "Plan: 3 files, 96 lines. Approve to continue?"),
+                    ("permission prompt", "Wants to run: make deploy-preview"),
+                    ("question", "Keep both page layouts behind a flag?"),
+                    ("plan ready for review", "Plan: 4 files, 120 lines. Approve to continue?"),
                 ])
                 self._session(s.id, EntityState.WAITING, reason, detail)
             else:
