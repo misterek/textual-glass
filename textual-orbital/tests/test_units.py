@@ -764,11 +764,20 @@ def test_app_and_widgets_add_no_attribute_textual_has() -> None:
     instance = set(vars(console.MissionConsole(DemoProvider(dynamics=False)))) - set(vars(Bare()))
     assert instance and not {n for n in instance if hasattr(App, n)}, instance
 
+    from textual_orbital import now
+    from textual_orbital.boards import PanelSpec
+    from textual_orbital.boards import page as BP
+    from textual_orbital.boards import widgets as BW
+
+    spec = PanelSpec(id="3f9a0c1e", board="main", title="t", kind="stat", added_at=now(), cmd="echo 1")
     widgets = [W.BeaconRow(), W.PriorityList(), W.Track(("A", "B")), W.TrackTable(("A",)), W.TaskBoard(),
                W.EventLog(), W.DoneList(), W.HeaderStrip(), W.Brand(), W.Clock(), W.KeyBar(), W.SourceHealth(),
-               W.Page(), W.AlertToast(Alert("k", "waiting", "t")), W.WeekReplay()]
+               W.Page(), W.AlertToast(Alert("k", "waiting", "t")), W.WeekReplay(),
+               BP.BoardsPage(), BP.BoardRow(), BP.EmptyState(), BP.PanelGrid(), BW.PanelView(spec), BW.PanelInfo(spec),
+               BW.PanelMessage(), BW.PanelErrorLine(), BW.StatRange(), *(body() for body in BW.BODIES.values())]
     screens = [W.AlertScreen(Alert("k", "waiting", "t")), W.DetailScreen("t"), W.HelpScreen([]),
-               W.SourcesScreen([]), W.PromptModal("t", "p", "v")]
+               W.SourcesScreen([]), W.PromptModal("t", "p", "v"), BP.ConfirmRemove("t"),
+               BP.PanelScreen(spec, None, None)]
     plain_widget, plain_screen = set(vars(Widget())), set(vars(ModalScreen()))
     for obj, base, plain in [*((w, Widget, plain_widget) for w in widgets),
                              *((s, ModalScreen, plain_screen) for s in screens)]:

@@ -103,6 +103,12 @@ The rules behind the alerts: the library's `WaitingRule`, plus `ReleaseFailedRul
 uv run python textual-orbital/examples/bridge/app.py
 ```
 
+**Boards** (`examples/boards/`) is a third: panels that agents and scripts add to a folder (graphs, numbers, gauges, bars, tables, text, each fed by a shell command), on one page ([Boards](#boards) below; its [README](examples/boards/README.md)).
+
+```sh
+uv run python textual-orbital/examples/boards/app.py --demo
+```
+
 ### The pages
 
 **1 · Console**, the default, built for a corner window. Claude Code beacons; the needs-attention queue; gauges (LOAD: the queue's load, PAGES: InfraMonitor items, RELEASES: the share of moving releases that are healthy); the release track. At 140x45 it adds a SELECTED card for the highlighted row; under 80 columns the side column folds into a one-line track summary.
@@ -568,6 +574,183 @@ Switch with `app.theme = "orbital-navy"` (or the command palette's "Change theme
 
 Helpers: `beacon_view(state, colour, glyph="◉")` (a big beacon as a `SpriteView`, for a detail view), `hint(("esc", "close"), ...)` (key hints as Rich text), `state_text(entity, at)`, `status_word(item)`, `order_entities(entities)`, `signal_glyphs(score, colour)`, `task_color(status)`, and the colour tables `STATE_COLORS`, `STATE_GLYPHS`, `HEALTH_COLORS` (track health), `HEALTH_WORDS`, `TASK_COLORS`. The generic instruments (`GlassPanel`, `RingGauge`, `ProgressArc`, `StatTile`, `InfoCard`, `SelectList`...) come from `textual_glass`.
 
+## Boards
+
+`textual_orbital.boards` puts panels on a dashboard that agents and scripts add while it runs: a Claude Code session in a project adds a graph of the latency it is chasing, a cron job adds the size of a backup, and you remove them when you are done, or they expire. Each panel is a shell command whose output is read by its format, shown as a line graph, a big number, a gauge, bars, a table or text. The app reads a folder of panel files, runs each command on its schedule, lays the panels out on a page, and lets you arrange and remove them. The library has no CLI and no agent integration of its own: an app gives agents a front door ([Security](#security) says why and how).
+
+| | |
+| --- | --- |
+| ![The demo's main board at 90x28](docs/screenshots/90x28_boards.png) | ![The demo's incident board at 90x28](docs/screenshots/90x28_boards-incident.png) |
+| The main board: a graph, a stat, a gauge, bars, a table, and a panel whose command fails | `]`: the second board, with a panel that expires in a few minutes and inline notes |
+| ![A panel full screen at 90x28](docs/screenshots/90x28_boards-panel.png) | ![The main board at 140x45](docs/screenshots/140x45_boards.png) |
+| `enter`: the panel full screen, its command and when it last ran | 140x45: the same board, more room for each panel |
+
+```sh
+uv run python textual-orbital/examples/boards/app.py --demo      # two boards of made-up data, in a temporary folder
+```
+
+### The folder and its files
+
+```
+$BOARDS_DIR (default ~/.cache/boards)
+  main/
+    3f9a0c1e.json        one panel
+    a1b2c3d4.json
+  incident-db/
+    77e01f2a.json
+```
+
+- A **board** is a folder of panels. It exists while it has panels: removing its last panel removes the folder. Names are lowercase letters, digits and dashes, up to 32 (`BOARD_RE`); the default board is `main`.
+- A **panel** is `<id>.json`, the object `PanelSpec.to_json()` writes; the id is 8 random hex digits (`Store.new_id()`). A file that can't be read (bad JSON, a field that is wrong, an id that isn't its file name) is skipped, left on disk and listed in `Store.problems`; it never stops the others.
+- **Writes are atomic**: a hidden `.<id>.json.tmp` in the same folder, then a rename, so a reader never sees half a panel. Readers skip names that start with `.`.
+- **Many writers at once** (several agents, the app): adding a panel only creates a file and removing one only deletes one, so they never conflict. An add with a `key`, and `arrange`, take an exclusive lock on `<root>/.lock` for their read and write; nothing else locks.
+- **Keys**: an add with a `key` replaces the live panel with that key on that board. The replacement keeps the old id, `added_at` and place on the board, and its size unless the add sets one, and gets `updated_at`; an agent that adds its panel again doesn't undo your arranging, and the page runs it again at once.
+- **Expiry**: a panel with `expires_at` is deleted by whoever lists the panels after that time, the app included. Its footer counts down (`1h20m left`).
+
+| Field | What it is |
+| --- | --- |
+| `id`, `board`, `title`, `kind` | Required. `kind` is `timeseries`, `stat`, `gauge`, `bars`, `table` or `text` (`KINDS`). |
+| `added_at` | Required; ISO 8601 with a time zone (`Z` is fine). Panels on a board are in this order unless moved. |
+| `cmd` or `data` | Exactly one: a shell command, or inline data (any JSON value, read like a command's JSON output). |
+| `cwd` | The folder `cmd` runs in (the app's own when it is missing or gone). |
+| `unit` | `ms`, `%`, `req/s`...: after values and in the footer. |
+| `every`, `window`, `timeout` | Seconds: between runs (30), of history a graph shows (900), one run may take (20). |
+| `ymin`, `ymax` | The value scale; `ymax` is also a gauge's full scale (default 100) and the bars' top. |
+| `columns` | A table's columns, by name in any case, in this order (default all). |
+| `key` | The adder's own name for the panel: the same key on the same board replaces it. |
+| `added_by` | Who added it (an agent's project folder, say): shown in the footer. |
+| `expires_at` | When it goes; none: it stays until removed. |
+| `size`, `position` | Set by arranging on the page (`auto`, `small`, `medium`, `large`; a place on the board). |
+| `updated_at`, `format` | Set by the store: when a key replaced it; the file format's version (1). |
+
+```json
+{"format": 1, "id": "3f9a0c1e", "board": "main", "title": "Disk", "kind": "gauge", "unit": "%", "ymax": 100,
+ "cmd": "df -k / | awk 'NR==2 {print 100*$3/$2}'", "every": 60, "added_at": "2026-11-17T12:00:00+00:00",
+ "added_by": "infra", "expires_at": "2026-11-17T14:00:00+00:00"}
+```
+
+`Store(root=None)` (default `$BOARDS_DIR`, or `~/.cache/boards`) has `panels(board=None)` (the live panels, by board then place), `boards()` (`(name, count)`), `get(id)`, `add(spec)` (returns what it wrote), `new_id()`, `remove(id)`, `remove_board(board)`, `arrange(id, size=None, position=None)` and `signature()` (every panel file's name, time and size: cheap to compare).
+
+### Output formats
+
+A command's output (or inline `data`) is read into a `Frame` by `formats.parse`, which tries, in this order:
+
+1. **JSON**, when the output is an object, a list, or one object per line:
+   - a metrics query API's JSON (Prometheus-style JSON: `{"status": "success", "data": {"resultType": ..., "result": [...]}}`), its `data` or a bare list of series: `matrix` results are series with their history, `vector` results one reading per series (a row per series for a `table`), `scalar` one reading. A series is named by the labels that tell it from the others (`a`, or `a, api`), or its `__name__`, or its only label. NaN and infinite values are gaps; at most 8 series (`MAX_SERIES`); `"status": "error"` is an error;
+   - a list of objects, objects one per line, or `{"items": [...]}`: a table, nested fields as `a.b` columns;
+   - a number: one reading; an object of `name: number`: one reading per name.
+2. **One number**, a unit after it allowed: `42`, `4.2 ms`, `99%`, `1,234 req/s`.
+3. **`label number` lines**: one reading per label, in order (`api 212`, `web 180`).
+4. **Text in columns under a header**, as `ps`, `df` and `docker ps` print: a column ends where every line has a space, so `Up 2 hours` stays one value; tab-separated works too. A table.
+5. **Anything else** is text.
+
+`kind: "text"` keeps any output as text, and `kind: "table"` reads only JSON and columns. Single readings build their own history: each run adds a point per series, kept for `window` seconds (`accumulate`), so a command that prints one number still draws a graph. `guess_kind(frame)` says which kind shows a frame best, and `describe(frame)` says what it holds in one line (`3 series, 240 points, last 212 ms`), for an app's CLI to print after it checked a command.
+
+| Kind | Shows |
+| --- | --- |
+| `timeseries` | glass's `LineChart` of every series over the panel's `window`; one series has its newest value in the title. |
+| `stat` | The first series' newest value, big, with its lowest and highest values, and a sparkline of its history once it has two points. |
+| `gauge` | A ring: the newest value from `ymin` (0) to `ymax` (100), "of 500" under it unless the unit is `%` on 0 to 100. |
+| `bars` | A row per series, biggest first: its name, a glowing meter and its value. |
+| `table` | The rows under their header, columns fitted to the width (dropped from the right, long values cut in the middle, status columns never cut), status words coloured (`Running` green, `Pending` amber, `Failed` red), `+3 more` for the rows that don't fit. |
+| `text` | The last lines that fit. |
+
+Every kind shows `loading…` before its first run, the frame's note (what the command said on stderr, or `nothing`) for empty output, and an error as its last good data dimmed, the error in red on the bottom line, a red border and `✕` in the title. The footer says who added it, the unit and the time left (`checkout-api · ms · 1h59m left`), at minute resolution.
+
+### How commands run
+
+`run(spec)` runs one panel and returns its `Frame`, or raises `PanelError` with one line for the person or agent who wrote the command:
+
+- `/bin/sh -c cmd` in the panel's `cwd`, with stdin from `/dev/null`, in a process group of its own that is killed after `timeout` seconds ("timed out after 20s").
+- The environment is the app's own plus the panel's window:
+
+  | Variable | Value |
+  | --- | --- |
+  | `PANEL_START`, `PANEL_END` | The window, unix seconds: `now - window` to now. |
+  | `PANEL_START_ISO`, `PANEL_END_ISO` | The same in ISO 8601 UTC (`2026-11-17T12:00:00Z`). |
+  | `PANEL_STEP` | Seconds between points for a range query: `window / 240`, rounded, at least 15. |
+  | `PANEL_WINDOW` | The window as a duration: `15m`. |
+
+- A non-zero exit is an error: the last line the command wrote to stderr, or "exited with status 2". Output that can't be read is an error that says why ("no column 'AGE'; the columns are NAME, STATUS"). Empty output with exit 0 is no error: an empty frame with stderr's last line as its note.
+
+On the page, each `cmd` panel runs when it appears, then `every` seconds after each run ends, through `OrbitalApp.fetch`: a daemon thread with a deadline of `timeout` plus 5 seconds (rule 25 in [`../AGENTS.md`](../AGENTS.md)). A panel runs once at a time, on every board, also while another board shows; a `data` panel is read once. A run whose panel has gone, or was replaced meanwhile, is dropped. A run that gives the same data as the last one (NaN included) redraws nothing and sends nothing (rule 9).
+
+### `BoardsSource` and `BoardsPage`
+
+```python
+from textual.app import ComposeResult
+
+from textual_orbital import HeaderStrip, KeyBar, OrbitalApp, StaticProvider
+from textual_orbital.boards import BoardsPage, BoardsSource, PanelSpec, Store
+
+
+class Panels(OrbitalApp):
+    BINDINGS = [("q", "quit", "quit")]
+
+    def __init__(self) -> None:
+        self.boards = Store()  # not "store": that is OrbitalApp's own
+        super().__init__(StaticProvider([BoardsSource(self.boards, key="BD")]))
+
+    def compose(self) -> ComposeResult:
+        yield HeaderStrip("PANELS")
+        yield BoardsPage(source_key="BD", remove=self.remove_panel, arrange=self.boards.arrange, id="boards")
+        yield KeyBar(BoardsPage.KEYS)
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self.query_one(BoardsPage).focus_default)
+
+    def remove_panel(self, spec: PanelSpec) -> None:
+        self.boards.remove(spec.id)
+
+
+if __name__ == "__main__":
+    Panels().run()
+```
+
+- `BoardsSource(store, key="BD", name="Boards", interval=2.0)` is a source like any other: its payload (`snapshot.payload(key)`) is the live panels, a tuple of `PanelSpec`. It reads only the folder's file names, times and sizes while nothing changed, and hands back the same tuple, so an idle board costs nothing downstream. It never fails for a bad panel file (those are in `store.problems`; the example shows their count in the key bar), only when the folder can't be read.
+- `BoardsPage(source_key="BD", runner=run, remove=None, arrange=None, empty_hint=EMPTY_HINT)` is a `Page`: it reads the payload in `update_snapshot`, runs the panels, and shows the current board. `remove(spec)` deletes a panel for good (without it, `x` says it can't); `arrange(panel_id, size=..., position=...)` saves the user's arranging (`Store.arrange` fits); `runner` is the function that runs a panel, in a thread; `empty_hint` is the line under "No panels yet". After a remove or an arrange the page lays out at once and calls `app.poll(source_key)`.
+- `PanelView(spec)` is one panel by itself (`set_frame(frame, error=None)`, `tick(at)`), for a page of your own; `BODIES` maps each kind to its body widget.
+
+### Keys, layout and arranging
+
+| Key | Action |
+| --- | --- |
+| `[` `]` | The previous and next board (the row at the top names them with their panel counts and failing panels: `◆ main 6 ✕1`) |
+| arrows, `tab` | Move between panels; the focused one's border lights up |
+| `enter` | The panel full screen: a big version, its command, when it last ran (`esc` back, `r` run it now) |
+| `+` `-` | Grow and shrink the panel: small, medium, large |
+| `<` `>` | Move it earlier and later on its board |
+| `x` | Remove it, after `Remove "p95 latency"? y / n` |
+| `r` | Run it now |
+
+Nobody places panels by coordinates: agents can't see the screen, several add panels without knowing about each other, and the window may be 90x28 or 140x45. The page lays the board out from each panel's size (`layout.plan`, a pure function):
+
+- **Size**: `small`, `medium` or `large`; `auto` takes the kind's own: `stat` and `gauge` small, the others medium.
+- **Width**, on a grid of 12 units: under 70 columns every panel spans the page; from 70, small 4, medium 6, large 12; from 140, small 3.
+- **Rows**: panels go in order, row by row, a panel that doesn't fit what is left starting a new row; each row's leftover units are shared among its panels, so every row is full and a lone panel fills the page.
+- **Height**: each kind has a minimum (stat 6, gauge 8, timeseries 9, text 6, bars 2 plus a row per series, tables 3 plus up to 5 rows; large panels 3 more). Spare height goes to the rows by their biggest panel: medium 1 share, large 2, small none. When the minimums don't fit, the page scrolls.
+
+Arranging is saved in the panel's file (`size`, and `position` between its new neighbours), so every viewer agrees, and it never runs the command again.
+
+### Security
+
+**A panel's command runs with the app's privileges, so the folder is the trust boundary: whoever can write it can run commands as you.** The store creates the folder and each board folder with mode `0700` and each panel file `0600`. It doesn't change a folder that already exists: keep yours private, and don't point `$BOARDS_DIR` at a shared or synced folder.
+
+Agents should reach the folder through a front door the app provides: a small CLI whose commands the agent runs in its own shell, so the agent's permission prompt shows what will run (`myapp panels add --title Disk --cmd "df -k / | ..."`), rather than writing panel files with its file tools, where the prompt shows a JSON file. The CLI's `add` runs the command once in the agent's folder (`run`), refuses it with the error if it fails, and only then writes the panel. Apps typically give agents such a CLI and a Claude Code skill that says when a panel helps and how to add, replace and remove one; this library ships neither. What the CLI's `add` comes down to:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from textual_orbital.boards import PanelSpec, Store, describe, run
+
+store, now = Store(), datetime.now(timezone.utc)
+spec = PanelSpec(id=store.new_id(), board="main", title="Disk", kind="gauge", unit="%", ymax=100.0,
+                 cmd="df -k / | awk 'NR==2 {print 100*$3/$2}'", cwd="/", every=60.0, key="disk",
+                 added_by="infra", added_at=now, expires_at=now + timedelta(hours=2))
+print(describe(run(spec), spec.unit))  # "1 reading: 42%"; raises PanelError with one line if it fails
+store.add(spec)                        # the running app shows it within a couple of seconds
+```
+
 ## Costs
 
 Measured on Mission Console with `--static --notify off`, in a real pty through `textual_glass.testing.harness` (9x19 px cells), counting the bytes written between steps:
@@ -670,8 +853,15 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 | `tests/test_pilot.py` | Mission Console with glass forced on: the scene, idle silence, partial edits for cursor moves, every page, beacon sprites, alert layers and dimming, the queue's snooze and resolve, alerts following the demo dynamics, snoozing a row and listing what is snoozed, stepping through past weeks (held and fetched), a release's run log loaded lazily in its detail, a new task from the prompt (`n`) on the board at once, toast alerts (popups kept for Claude, one toast at a time with "+N more", the float layer, no focus or keys, snooze and dismiss, timeouts, resolving, a click to jump, moving over a popup and back, without glass), detail, help and sources popups, the breakpoints at three sizes, the plain fallback, ages, sprites dimming under popups, page switches in the same frame, alert pictures loaded on demand, the widgets with another app's stages and event kinds, two-line queue rows, the queue's `RowsLeft`, the track's caption, the brand's badge, the alert's hint line, the key bar's "updated" time (the last good fetch), a long detail body scrolling by keys with glass's thumb in the dialog (and a short one as before), `DetailScreen.set_head`, `PromptModal` with and without glass, task rows with a source badge and an app's own column (`task_parts`), a styled callsign and a `HeaderStrip` with its own `Brand`, and no error reports. |
 | `tests/test_pty.py` | The console in a real pty, replayed through pyte and the kitty model: protocol hygiene, layers, every cell background default (also under popups, placeholders included), zero idle traffic, idle CPU under 2 %, every page's panels, the alert's scrim, dialog and picture, a resize, three window sizes, a toast's float image placed and deleted, every alert kind with OSC 777 notifications, notifications through tmux passthrough, quitting with a hung fetch (`tests/hung_app.py`), and the fallbacks (`--plain`, `TEXTUAL_GLASS=off`, a terminal that never answers). |
 | `tests/test_sounds.py` | `textual_orbital.sounds` without an app: packs (names and objects, volumes, notes ignored, every kind of broken one named), each player's volume flag, the environment's off switch, volumes multiplied, cooldowns per group unless the new cue matters more, one sound per window, mute and quiet hours over midnight, two at once, loops (stopped, muted, a failing file), stopping everything, and a player that can't start or a file it can't play, reported once. Never a real player. |
+| `tests/test_boards_model.py` | Boards' panel file format: every field written and read back, `Z` times, bad fields and files refused, durations, frames and their equality, history folded from single readings and aged out by the window. |
+| `tests/test_boards_store.py` | The folder: one private file per panel in its board's folder, ids, order, atomic writes (a failed one leaves the old file whole), expiry, replacing by key (keeping its place and the user's arranging), arranging without undoing a replace, empty boards removed, unreadable files skipped and named, the signature, several processes and threads writing at once; `BoardsSource` handing back the same tuple while nothing changed, noticing an expiry, and failing only for a folder it can't read. |
+| `tests/test_boards_formats.py` | Every output format (a metrics query API's JSON in all its shapes, JSON tables, numbers, `label number` lines, text in columns from `ps`, `df` and `docker ps`, tab-separated text), picking columns, `guess_kind` and `describe`. |
+| `tests/test_boards_runner.py` | A panel's command: its window in the environment, its folder (or the current one when it is gone), empty stdin, the deadline killing its process group, errors in one line, empty output with stderr's note, inline data, kinds steering the reading. |
+| `tests/test_boards_layout.py` | `plan`: sizes from the kind, spans by width, rows always full, heights by kind and weight, scrolling, order kept; moving up and down to the panel that overlaps most; `reposition`. |
+| `tests/test_boards_widgets.py` | Every kind in every state (loading, data, error with and without data, empty) with and without glass, a failing panel's data dimmed and its recovery, equal data redrawing nothing, the footer at minute resolution, rows that don't fit, tables fitted to the width with status words coloured, gauges and bars, a shape the kind can't draw. |
+| `tests/test_boards_page.py` | `BoardsPage` in a running `OrbitalApp`: the empty state, the grid following the plan and scrolling to the focused panel, panels appearing, running on their schedule (also on another board) and going, replaced panels running again, results for gone or replaced panels dropped, history from single readings, the board row and its keys, moving between panels, the payload, removing (and a remove that fails), the full view, arranging saved at once (and a folder read from before the write not undoing it), every kind with glass, and an idle page sending nothing. |
 | `tests/test_version.py` | `__version__` matches `pyproject.toml`. |
-| `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; `no_sound`, an autouse fixture that sets `TEXTUAL_ORBITAL_SOUND=off` and fails a test that starts a real sound player; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |
+| `tests/conftest.py` | The `output` fixture; `no_browser`, an autouse fixture that replaces `webbrowser.open` so no test can open the real browser; `no_sound`, an autouse fixture that sets `TEXTUAL_ORBITAL_SOUND=off` and fails a test that starts a real sound player; `boards_dir`, which points `$BOARDS_DIR` at a fresh temporary folder in every test; and `outside_tmux`, which clears `TMUX` and `STY` so the suite runs the same from a shell inside tmux. |
 
 ## Limitations
 
@@ -681,5 +871,6 @@ uv run python textual-orbital/tests/screenshots.py     # regenerate docs/screens
 - **Notifications** were checked only against Ghostty's source. The window title is cleared on exit, not restored: Ghostty 1.4 has no title pop.
 - A finite-play GIF below a popup plays its run again after the popup closes.
 - **Sounds** were heard through `afplay` on macOS. The Linux players (`pw-play`, `paplay`, `aplay`) are untested, and Windows has none: there an app stays silent.
+- **Boards** need a POSIX system (`/bin/sh`, process groups, `fcntl` locks): macOS and Linux. The folder is local, so panels added on another machine don't show.
 - Kitty, tmux and screen are untested. Under tmux or screen, glass is off. In herdr, glass works with a few settings, but nothing the terminal animates moves (see [Running as a herdr plugin](#running-as-a-herdr-plugin)). Under tmux, notifications go through passthrough (checked only in a recorded byte stream); under screen they are off.
 - Glass uses private Textual API (see [textual-glass's Limitations](../textual-glass/README.md#limitations)); both packages pin `textual>=8.2,<9`.

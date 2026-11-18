@@ -1,10 +1,10 @@
 # Working on textual-orbital
 
-Read [`README.md`](README.md) first: it says what orbital does and documents its public API. The rules that keep it working in Ghostty (rules 9, 13 and 20 matter most for dashboards), the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything. This file has a complete walkthrough for building a dashboard, the rules for wiring real sources, how to add a week-in-review page, how to add a widget or a rule to the library, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
+Read [`README.md`](README.md) first: it says what orbital does and documents its public API. The rules that keep it working in Ghostty (rules 9, 13 and 20 matter most for dashboards), the layer table and the test harness are in [`../AGENTS.md`](../AGENTS.md); read them before changing anything. This file has a complete walkthrough for building a dashboard, the rules for wiring real sources, how to add a week-in-review page or a boards page, how to add a widget or a rule to the library, and the tests. Everything here was learned against Ghostty 1.4 and Textual 8.2.8.
 
 ## Where things live
 
-Modules in `src/textual_orbital/` (everything public is exported from `textual_orbital`):
+Modules in `src/textual_orbital/` (everything public is exported from `textual_orbital`, apart from boards, which is exported from `textual_orbital.boards`):
 
 | Module | What it does |
 | --- | --- |
@@ -22,6 +22,14 @@ Modules in `src/textual_orbital/` (everything public is exported from `textual_o
 | `widgets/page.py` | `Page`. |
 | `widgets/replay.py` | `WeekReplay` (the week in review over glass's space scene, or a text rundown), `ReplayWeek`, `SHIPS`, `SHIP_CLASSES`, `week_hours`. |
 | `widgets/screens.py` | `OrbitalModal`, `AlertScreen`, `AlertToast`, `DetailScreen` (lazy values and `Lazy`, a body that scrolls, `set_head`), `PromptModal`, `HelpScreen`, `SourcesScreen`, `LEGEND`, `beacon_view`, `hint`. |
+| `boards/model.py` | Boards (README, "Boards"): `PanelSpec` (one panel file: `to_json`, `from_json`, `changed_at`, `order_key`), `Frame`, `Series`, `Table`, `accumulate`, `parse_duration`, `fmt_duration`, `KINDS`, `SIZES`, `BOARD_RE`, `ID_RE`, `SpecError`. |
+| `boards/store.py` | `Store`: the folder of boards: list (deleting expired panels), add (atomic, a key replaces under a lock), `arrange`, remove, `signature`; `default_root` (`$BOARDS_DIR`). |
+| `boards/formats.py` | Command output to a `Frame`: `parse`, `parse_data`, `parse_columns`, `series_names`; `guess_kind`, `describe`, `fmt_number`. |
+| `boards/runner.py` | `run(spec)`: a panel's command under `/bin/sh` with its window in the environment (`panel_env`), its folder and a deadline that kills its process group; `PanelError`, one line. |
+| `boards/source.py` | `BoardsSource`: the live panels as a payload, the same tuple while nothing changed. |
+| `boards/layout.py` | `plan(needs, width, height)`: the page's 12-unit grid from each panel's size, rows always full, heights by kind; `need`, `step_size`, `reposition`. A pure function. |
+| `boards/widgets.py` | `PanelView` (a `GlassPanel`: title, body, footer, the loading, error and empty states) and a body per kind (`BODIES`), `status_colour`, `fit_columns`, `fmt_value`. |
+| `boards/page.py` | `BoardsPage` (runs the panels through `OrbitalApp.fetch`, the board row, the layout, the keys, arranging), `PanelScreen`, `ConfirmRemove`, `EmptyState`, `BoardRow`. |
 
 Elsewhere in `textual-orbital/`:
 
@@ -31,8 +39,9 @@ Elsewhere in `textual-orbital/`:
 | `examples/console/pages.py`, `console.tcss` | Its five pages and their layouts per breakpoint; the Week page steps through past weeks (`[` `]`) with `Snapshot.week(on)` and `OrbitalApp.fetch`; the Replay page plays the week in review (`p` again, `l` the next look). |
 | `examples/console/rules.py` | `ReleaseFailedRule` and `IncidentRule`: app rules that read the demo's own record from `data`; `NeedsYouRule`, the library's `WaitingRule` with its alerts kept popups (`style="modal"`). |
 | `examples/console/demo.py` | `DemoProvider`: five demo sources over one scripted world, `history(first, last)`, a slow call for older weeks, and `add_task(title)` for the console's `n`. Only for the demo and the tests; don't import it from real code. |
+| `examples/boards/` | Boards with made-up data: `BoardsPage` over a folder seeded with every kind (`--demo`), its own `README.md` and `tests/` (in the workspace's `testpaths`). It imports its package as `boards` (its `tests/conftest.py` puts it on the path). |
 | `examples/bridge/` | The bridge: Claude Code and Codex sessions as crew on a starship bridge, from a hook of its own (`bridge/hook.py`). Self-contained so it can be copied out: its own `README.md`, `PACKS.md` (the crew) and `tests/` (in the workspace's `testpaths`). It imports the package as `bridge` (its `tests/conftest.py` puts it on the path). |
-| `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_sounds.py` (`Sounds` and `SoundPack`), `test_pilot.py`, `test_replay.py` (`WeekReplay`), `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser`, `no_sound` and `outside_tmux` fixtures), `screenshots.py`. |
+| `tests/` | `test_units.py`, `test_app.py` (`OrbitalApp` over fake sources), `test_sounds.py` (`Sounds` and `SoundPack`), `test_pilot.py`, `test_replay.py` (`WeekReplay`), `test_boards_*.py` (boards, module by module; the formats and runner tests run the boards example's `boards/feed.py`), `test_pty.py`, `hung_app.py` (a dashboard whose source never returns, for the pty), `conftest.py` (the `output`, `no_browser`, `no_sound`, `boards_dir` and `outside_tmux` fixtures), `screenshots.py`. |
 
 ## Build a dashboard
 
@@ -912,6 +921,71 @@ async def test_without_glass_it_is_a_table() -> None:
 ```
 
 Run `uv run pytest tests/test_replay.py`, then look at it in Ghostty: open the page, let the show run to its summary, press `p` and `l`.
+
+## Add a boards page to your dashboard
+
+A boards page shows panels that agents and scripts add to a folder: each a shell command whose output becomes a graph, a number, a gauge, bars, a table or text ([README](README.md#boards)). In CI Board from the walkthrough, it is a third page next to the other two.
+
+**1. The folder and the source.** One `Store` for the app, and a `BoardsSource` in the provider next to your other sources:
+
+```python
+from textual_orbital import StaticProvider
+from textual_orbital.boards import BoardsSource, Store
+
+BOARDS = Store()  # $BOARDS_DIR, or ~/.cache/boards
+
+
+def make_provider() -> StaticProvider:
+    return StaticProvider([PipelineSource("pipelines.json"), BoardsSource(BOARDS, key="BD")])
+```
+
+**2. The page.** `BoardsPage` runs the panels itself; give it the store's `remove` and `arrange` so `x` and `+` `-` `<` `>` work:
+
+```python
+from textual_orbital.boards import BoardsPage
+
+
+class PanelsPage(BoardsPage):
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(source_key="BD", remove=lambda spec: BOARDS.remove(spec.id), arrange=BOARDS.arrange, id=id)
+```
+
+Add `("panels", "Panels", PanelsPage)` to `PAGES` and `("3", "page(2)", "panels")` to `BINDINGS`. The page binds `[` `]`, the arrows, `tab`, `enter`, `+` `-` `<` `>`, `x` and `r` while it has focus, and its `KEYS` lists them for the key bar; an app binding of the same key loses to the page there. Add the keys to your `HelpScreen`. It needs no CSS (`height: 1fr`), and `Page.minute_tick` counts down each panel's time left.
+
+**3. A front door for agents.** Don't have agents write panel files with their file tools: a panel's command runs as you, and an edit's permission prompt shows a JSON file, not the command. Give your app a small CLI (`ci-board panels add --title ... --cmd ...`) that runs the command once with `run(spec)`, prints `describe(frame)` or the `PanelError`, and only then calls `BOARDS.add(spec)`; `list` and `remove` round it off. An agent runs it in its own shell, so its permission prompt shows the command. A Claude Code skill that says when a panel helps and how to call the CLI makes every session know it. The README's [Security](README.md#security) section has the `add` in a few lines.
+
+**4. The tests.** The page in Textual's pilot, with panels handed to it directly: inline `data` panels run no process. Use the `output` fixture from step 6 of the walkthrough, and a `boards_dir` fixture like `tests/conftest.py`'s so no test touches your real folder:
+
+```python
+from datetime import datetime, timezone
+
+from textual.app import ComposeResult
+
+from textual_orbital import OrbitalApp, StaticProvider
+from textual_orbital.boards import BoardsPage, PanelSpec
+
+
+class Host(OrbitalApp):
+    def compose(self) -> ComposeResult:
+        yield BoardsPage(id="boards")
+
+
+async def test_a_panel_shows_its_data() -> None:
+    app = Host(StaticProvider([]))
+    async with app.run_test(size=(90, 28)) as pilot:
+        page = app.query_one(BoardsPage)
+        page.set_panels([PanelSpec(id="3f9a0c1e", board="main", title="Queue", kind="bars",
+                                   data={"email": 3, "search": 5}, added_at=datetime.now(timezone.utc))])
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if page.views() and page.views()[0].frame is not None:
+                break
+        view = page.views()[0]
+        assert view.frame is not None and [s.name for s in view.frame.series] == ["email", "search"]
+        assert not app.errors
+```
+
+The library's own tests (`tests/test_boards_page.py`) and the example's (`examples/boards/tests/`) go further: glass forced on, a real pty, a folder written to while the app runs.
 
 ## Adding a widget
 

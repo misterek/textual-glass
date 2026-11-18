@@ -11,7 +11,7 @@
         def pixel_items(self, ctx: PixelContext): ...
 
 Ready-made widgets with pixels (``GlassPanel``, ``SelectList``, ``RingGauge``,
-``Telemetry``, ``StatTile``, ``ProgressArc``, ``SpriteView``...) live in
+``Telemetry``, ``LineChart``, ``StatTile``, ``ProgressArc``, ``SpriteView``...) live in
 ``textual_glass.widgets``. ``app.glass.flourish(name, at=widget)`` plays a short
 celestial animation when something happens; ``FLOURISHES`` lists the kinds.
 ``app.glass.play_scene(make, at=widget)`` plays a longer show of moving pictures
@@ -33,6 +33,7 @@ from .widgets import (
     GlassImage,
     GlassPanel,
     InfoCard,
+    LineChart,
     PixelWidget,
     ProgressArc,
     RingGauge,
@@ -47,7 +48,7 @@ from .widgets import (
 __version__ = "0.7.0"
 __all__ = [
     "FLOURISHES", "MOTIONS", "SPRITE_MAX_PX", "Glass", "GlassEngine", "GlassImage", "GlassPanel", "InfoCard",
-    "LoadedImage", "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList", "SpriteView",
-    "StatTile", "StatValue", "Support", "THEME", "Telemetry", "ThemeColours", "__version__", "detect", "load_image",
-    "on_hard_exit", "terminal_write",
+    "LineChart", "LoadedImage", "PixelContext", "PixelMixin", "PixelWidget", "ProgressArc", "RingGauge", "SelectList",
+    "SpriteView", "StatTile", "StatValue", "Support", "THEME", "Telemetry", "ThemeColours", "__version__", "detect",
+    "load_image", "on_hard_exit", "terminal_write",
 ]

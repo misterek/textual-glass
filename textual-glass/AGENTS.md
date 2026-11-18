@@ -14,7 +14,7 @@ Modules in `src/textual_glass/`:
 | `hard_exit.py` | `on_hard_exit(key, data)`: escape sequences written to the terminal on SIGTERM, SIGHUP or an unclean interpreter exit (rule 24). No Textual imports; works with glass on or off. |
 | `scene.py` | Reads the widget tree and computed styles and builds the items for each visible screen: CSS chrome (panels, sheets, table chrome, pills, an `Input`'s caret and selection, footer badges, bars, scrollbars) and every `PixelMixin` widget's `pixel_items(ctx)` in the same walk. `PixelMixin` (whose `render_lines` reports the sprites a widget's lines show), `PixelContext`, `Tweens`, and `rules_for` (which colours the filter owns). |
 | `render.py` | The drawing model, no Textual imports: `Grid` (cells to layer pixels), `Canvas`, the `Item` base class (`bbox`, `draw`, `window`, `diff_boxes`, `dynamic`, `edge`), `paint`, `to_u8`, colour and shape helpers. |
-| `items.py` | Every item, no Textual imports. Stock chrome: `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Pill`, `Caret`, `Selection`, `Badge`, `Progress`, `Thumb`. Instruments: `HeaderBar`, `Rule`, `Ring`, `Signal`, `Meter`, `Area`, `Bars`, `Lane`, `Dot`, `Spine`. |
+| `items.py` | Every item, no Textual imports. Stock chrome: `Panel`, `Surface`, `HeaderStrip`, `Rows`, `Pill`, `Caret`, `Selection`, `Badge`, `Progress`, `Thumb`. Instruments: `HeaderBar`, `Rule`, `Ring`, `Signal`, `Meter`, `Area`, `Bars`, `Lane`, `Dot`, `Spine`, `Lines` (`LineChart`'s). |
 | `sprites.py` | Frame makers, no Textual imports: scrims (`solid`, `solid_frames`), `beacon_frames`, `pulse_frames`, the `full` motion effects (`halo_frames`, `glint_frames`, `shimmer_frames`), `radial_mask`, `edge_fade`, `dim_frame`. |
 | `backdrop.py` | The backdrop painters, no Textual imports: `gradient` and `nebula`; `draw` picks one by `palette.backdrop`. |
 | `palette.py` | `Palette.from_app`: the theme's colours and glass's theme variables as RGB; colour helpers (`mix`, `lighten`, `hue_shift`, `border_pair`, `hex_of`, `rgb`). |
@@ -33,6 +33,7 @@ Modules in `src/textual_glass/`:
 | `widgets/base.py` | `PixelWidget`, `SelectList`, `Tween`, and the text helpers `strip`, `fit`, `placeholder_parts`, `text_meter`, `tone`, `ellipsize`, `hex_colour`. |
 | `widgets/panel.py` | `GlassPanel`. |
 | `widgets/instruments.py` | `RingGauge`, `Telemetry`, `StatValue`, `StatTile`, `ProgressArc`, `SpriteView`, `InfoCard`. |
+| `widgets/chart.py` | `LineChart` (glowing lines over time, braille without glass) and what it is made of: `scale_for` and `nice_ceil` (round scales), `round_in` and `short_number` (labels), `time_ticks`, `series_colours`, `MAX_LINES`. |
 | `widgets/image.py` | `GlassImage`: placeholders with glass, half blocks without; `cache_key`; the dimmed gapless frame. |
 | `testing/harness.py` | The pty runner and replay (`run_app`, `Step`, `replay_steps`, `Replay`, `graphics_in`). |
 | `testing/kitty_emu.py` | `KittyModel`, a model of Ghostty 1.4's kitty graphics rules (given the cell size, it records an `X` or `Y` offset at or beyond it as a mistake; also a source rectangle off the image; a delete with `p` takes only that placement), and `composite`, which draws the approximate PNGs (placements at their own pixels and source rectangles included). |
@@ -45,6 +46,7 @@ Elsewhere in `textual-glass/`:
 | `tests/sample_app.py` | A small stock app with a `RingGauge`, a `SpriteView`, a `GlassImage`, a modal and two "pages". The pilot tests use it; run it with `uv run python tests/sample_app.py`. |
 | `tests/test_*.py`, `tests/conftest.py` | See [Tests](#tests). `conftest.py` has the `output` fixture. |
 | `tests/screenshots.py` | Writes `docs/screenshots/` from the showcase. |
+| `tests/test_chart.py` | `LineChart` by itself: rows and labels, gaps, the braille fallback, scales, time labels, colours, equal data sending nothing. |
 | `tests/test_flourishes.py` | Every flourish kind by itself: the rule 17 border check, the limits, determinism, `about` and palette roles, no Textual imports, the stage's geometry; and `_draw.Light`'s windows and packing. |
 | `tests/test_flourish_pilot.py` | `flourish()` in a running app, with test kinds, and the demo playing every real kind. |
 | `tests/flourish_sheet.py` | Contact sheets and GIFs of the kinds, with their frame counts, render times and upload sizes. |

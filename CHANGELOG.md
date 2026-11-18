@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Boards: panels that agents and scripts add to a folder while a dashboard runs, each a shell command shown as a graph, a number, a gauge, bars, a table or text; and glass's line chart, which draws the graphs. Nothing changes for an app that doesn't use them. At release, orbital needs the glass release with `LineChart`: raise its `textual-glass` pin then (it is still `>=0.7` here, where the workspace builds both from source).
+
+### textual-glass
+
+- **`LineChart`**: numbers over time as glowing lines. `set_series(series, start=, end=, unit="", ymin=None, ymax=None, colors=None)` takes up to eight `(name, points)` pairs of `(unix seconds, value)`, NaN for a gap. Each series is a line in its own colour from the theme (`series_colours`), the newest point a bright dot, with a soft fill under the first; 2 or 3 short value labels on the left with the unit (`1.2k`, `350`), time along the bottom back from `now` (`-15m`), and a legend of names and last values when there is more than one series. The scale runs from 0 (or below the data when it dips under 0) to a round number a little over the top, unless `ymin` and `ymax` say otherwise. Equal data, NaN included, redraws nothing, and it never redraws on a clock. Without glass the same lines are braille dots in the same cells.
+- A new item, **`Lines`**, draws them; it passes the rule 16 edge test with every other item. `textual_glass.widgets` also exports the chart's helpers: `series_colours`, `short_number`, `scale_for`, `nice_ceil`, `round_in`, `time_ticks`, `MAX_LINES`.
+- The showcase's view 2 draws a service's p95 latency over the last 12 hours with `LineChart`, in the detail panel (it was a `Telemetry` area chart, still shown in the REQUESTS / MIN tile).
+
+### textual-orbital
+
+- **Boards** (`textual_orbital.boards`; README, "Boards"). A panel is one JSON file (`PanelSpec`) in a board's folder under `$BOARDS_DIR` (default `~/.cache/boards`): a title, a kind, and a shell command or inline data. `Store` writes them atomically, replaces a panel by its `key` under a lock, deletes expired ones, skips and names files it can't read, and keeps the user's arranging. The output formats (`parse`): a metrics query API's JSON (Prometheus-style JSON: matrix, vector and scalar results), JSON lists and objects as tables or readings, one number with a unit, `label number` lines, text in columns as `ps`, `df` and `docker ps` print it, and text. `run(spec)` runs a command under `/bin/sh` in its folder, with its time window in `PANEL_START`, `PANEL_END`, `PANEL_STEP` and `PANEL_WINDOW`, and kills its process group at its deadline; every error is one line.
+- `BoardsSource`, a source whose payload is the live panels (the same tuple while nothing changed, so an idle board costs nothing), and `BoardsPage`: a row of boards, the current board's panels laid out by size on a 12-unit grid (`layout.plan`: every row full, spare height to the bigger panels, scrolling when the minimums don't fit), each panel run on its schedule through `OrbitalApp.fetch`, single readings building a history, a failing panel keeping its last good data dimmed. Keys: `[` `]` board, arrows and `tab`, `enter` full screen, `+` `-` size, `<` `>` order (both saved in the panel's file), `x` remove (after a confirmation, with a small flourish), `r` run now.
+- Security: a panel's command runs as you, so the folder is the trust boundary (`0700`). The README says how an app gives agents a front door: a small CLI they run in their own shell, so their permission prompt shows the command, and a Claude Code skill. The library ships neither.
+- A third example, **`examples/boards/`**: the boards page over a folder seeded with every kind (`--demo`), with its own README and tests (a pty tour, idle silence, plain mode, and panels written and removed through `Store` while the app runs), wired into the workspace's pytest, ruff and mypy.
+- `AGENTS.md` has a new recipe: "Add a boards page to your dashboard". The test suites point `$BOARDS_DIR` at a temporary folder (`boards_dir`).
+
 ## textual-orbital 0.5.0 (2026-11-12)
 
 Sound cues from a pack of your own: a dashboard that plays a short sound when something happens, and the bridge example's crew with sounds of their own. The library ships no sounds, and an app without a pack is unchanged. textual-glass stays 0.7.0.

@@ -4,8 +4,8 @@
   OptionList, ProgressBars, Markdown, a RichLog). With glass they get pixel chrome for
   free; the code doesn't know glass exists.
 * ``PixelView``: the same world on textual-glass's own widgets (``GlassPanel``,
-  ``SelectList``, ``RingGauge``, ``Telemetry``, ``StatTile``, ``ProgressArc``,
-  ``SpriteView``, ``InfoCard``), which add pixels under their text and fall
+  ``SelectList``, ``RingGauge``, ``LineChart``, ``StatTile`` (with ``Telemetry``),
+  ``ProgressArc``, ``SpriteView``, ``InfoCard``), which add pixels under their text and fall
   back to block characters and glyphs without glass.
 """
 
@@ -47,6 +47,7 @@ from textual_glass.sprites import beacon_frames
 from textual_glass.widgets import (
     GlassPanel,
     InfoCard,
+    LineChart,
     Part,
     ProgressArc,
     RingGauge,
@@ -54,13 +55,14 @@ from textual_glass.widgets import (
     SpriteView,
     StatTile,
     StatValue,
-    Telemetry,
     ellipsize,
     text_meter,
     tone,
 )
 
 WIDE = 70  # a list or table this wide shows the extra columns
+LATENCY_HOURS = 12  # Service.latency covers the last 12 hours
+LATENCY_END = 1_800_000_000.0  # a fixed "now" for the latency chart, so time passing never redraws it
 
 
 def fmt_ms(ms: int) -> str:
@@ -385,7 +387,7 @@ class PixelView(View):
                     yield SpriteView(*beacon("paused", Tones({})), id="beacon")  # show() picks the real one
                     yield InfoCard(id="card")
                 yield StatValue(versus="vs 12 h ago", id="detail-stat")
-                yield Telemetry(mode="area", id="detail-chart")
+                yield LineChart(id="detail-chart")
         with Horizontal(id="px-bottom"):
             yield StatTile("DEPLOYS", versus="vs last week", id="tile-deploys")
             yield StatTile("REQUESTS / MIN", mode="area", versus="vs 12 h ago", id="tile-requests")
@@ -477,5 +479,8 @@ class PixelView(View):
             stat.set(f"p95 {fmt_ms(s.p95)}", delta, better="down", color=text_colour)
         else:
             stat.set("p95 –", None, color=tones.muted)
-        chart = (colour, tones.foreground) if s.p95 else (tones.muted, tones.muted)
-        self.query_one(Telemetry).set_series(s.latency, colors=chart)
+        # 12 hours ending at a fixed moment: the labels say "-12h ... now", and the clock never redraws it (rule 9).
+        step = LATENCY_HOURS * 3600 / max(1, len(s.latency) - 1)
+        points = [(LATENCY_END - (len(s.latency) - 1 - k) * step, float(v)) for k, v in enumerate(s.latency)]
+        self.query_one(LineChart).set_series([("p95", points)], start=LATENCY_END - LATENCY_HOURS * 3600,
+                                             end=LATENCY_END, unit="ms", colors=[colour if s.p95 else tones.muted])

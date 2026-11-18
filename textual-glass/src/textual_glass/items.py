@@ -5,7 +5,7 @@ chrome first (the CSS scene builds these): ``Panel``, ``Surface``,
 ``HeaderStrip``, ``Rows``, ``Pill``, ``Caret``, ``Selection``,
 ``Badge``, ``Progress``, ``Thumb``. Then
 instruments for custom widgets: ``HeaderBar``, ``Rule``, ``Ring``, ``Signal``,
-``Meter``, ``Area``, ``Bars``, ``Lane``, ``Dot``, ``Spine``.
+``Meter``, ``Area``, ``Bars``, ``Lane``, ``Dot``, ``Spine``, ``Lines``.
 
 **An item's light must end inside its own bounding box.** A glow that is still
 faintly lit at the box is cut off there, and the cut shows as a lighter
@@ -21,6 +21,7 @@ Colours are ``RGB`` tuples or ``"#rrggbb"`` strings.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -1094,3 +1095,169 @@ class Spine(Item):
         grad = col(self.c1) * (1 - t) + col(self.c2) * t
         fade = smoothstep(self.y1 * g.sy, (self.y1 - 2) * g.sy, ys) * (ys >= self.y0 * g.sy)
         c.over(view, grad, np.clip(0.9 - np.abs(xs - self.x * g.sx), 0, 1) * 0.35 * fade)
+
+
+#: A run of a line: ``(u, v)`` points, both 0 to 1, with no gap in it.
+Run = tuple[tuple[float, float], ...]
+_ToPx = Callable[[float], float]
+
+
+def _ys_band(ys: Array, low: float, high: float) -> slice:
+    """The rows of a window whose pixel centres lie in ``[low, high]``."""
+    column = ys[:, 0]
+    start = int(np.searchsorted(column, low, side="left"))
+    stop = int(np.searchsorted(column, high, side="right"))
+    return slice(start, stop)
+
+
+@dataclass(frozen=True)
+class Lines(Item):
+    """Lines over time (``LineChart``): a glowing line per series, the newest point of each a bright dot, a soft
+    fill under the first series, faint guides and time ticks.
+
+    ``series`` holds each series' runs of points (a gap between runs), every point ``(u, v)`` with ``u`` 0 to 1
+    across the rect (0 the oldest) and ``v`` 0 to 1 up it; values outside are drawn at the edge. The data spans
+    from the centre of the rect's top row to the centre of its bottom row (where the labels sit), and from a third
+    of a cell in from the left to most of a cell in from the right (room for the newest point's glow). ``colors``
+    are the lines' colours, in order (repeated when there are fewer). ``guides`` are faint dashed lines at those
+    ``v``; ``base`` is where the fill ends, with a brighter baseline; ``ticks`` are small marks under the baseline
+    at those ``u``.
+    """
+
+    dynamic: ClassVar[bool] = True
+
+    rect: FRect
+    series: tuple[tuple[Run, ...], ...]
+    colors: tuple[Colour, ...]
+    fill: bool = True
+    guides: tuple[float, ...] = ()
+    base: float = 0.0
+    ticks: tuple[float, ...] = ()
+    ident: str = ""
+    depth: int = 0
+    clip: FRect | None = None
+
+    def bbox(self, g: Grid) -> Box:
+        return g.box(self.rect, 1.0, 0.5)
+
+    def frame(self, g: Grid) -> tuple[float, float, float, float]:
+        """The data's pixel span: left, right, top, bottom."""
+        x, y, w, h = self.rect
+        left, right = (x + 0.3) * g.sx, (x + max(w - 0.7, 0.4)) * g.sx
+        if h >= 2:
+            top, bottom = (y + 0.5) * g.sy, (y + h - 0.5) * g.sy
+        else:
+            top, bottom = (y + 0.15) * g.sy, (y + max(h, 0.3) - 0.15) * g.sy
+        return left, right, top, bottom
+
+    def draw(self, c: Canvas, g: Grid) -> None:
+        win = self.window(c, g)
+        if win is None:
+            return
+        view, xs, ys = win
+        left, right, top, bottom = self.frame(g)
+        sx, sy = g.sx, g.sy
+
+        def px(u: float) -> float:
+            return left + (right - left) * min(1.0, max(0.0, u))
+
+        def py(v: float) -> float:
+            return bottom - (bottom - top) * min(1.0, max(0.0, v))
+
+        inside = ((xs >= left - 0.5) & (xs <= right + 0.5)).astype(F32)
+        dash = ((xs // max(2.0, sx * 0.5)) % 2 == 0).astype(F32)
+        for v in self.guides:
+            gy = py(v)
+            c.over(view, WHITE, np.clip(1 - np.abs(ys - gy), 0, 1) * dash * inside * 0.07)
+        base_y = py(self.base)
+        c.over(view, WHITE, np.clip(1 - np.abs(ys - base_y), 0, 1) * inside * 0.16)
+        for u in self.ticks:
+            tx = px(u)
+            mark = np.clip(1.0 - np.abs(xs - tx), 0, 1) * ((ys >= base_y) & (ys <= base_y + 0.22 * sy))
+            c.over(view, WHITE, mark * 0.28)
+
+        colours = [col(self.colors[k % len(self.colors)]) for k in range(len(self.series))] if self.colors else []
+        if not colours:
+            return
+        if self.fill and self.series:
+            for run in self.series[0]:
+                self._fill(c, view, xs, ys, run, px, py, base_y, colours[0], left, right)
+        lw = max(1.2, 0.09 * sy)
+        for k in reversed(range(len(self.series))):  # the first series on top
+            colour = colours[k]
+            for run in self.series[k]:
+                self._line(c, view, xs, ys, run, px, py, colour, lw, sy, left, right, k == 0)
+        for k in reversed(range(len(self.series))):
+            runs = self.series[k]
+            if not runs or not runs[-1]:
+                continue
+            u, v = runs[-1][-1]
+            if -1e-6 <= u <= 1 + 1e-6:
+                self._dot(c, view, xs, ys, px(u), py(v), colours[k], sy, bright=k == 0)
+
+    @staticmethod
+    def _fill(c: Canvas, view: Array, xs: Array, ys: Array, run: Run, px: _ToPx, py: _ToPx, base_y: float,
+              colour: Array, left: float, right: float) -> None:
+        if len(run) < 2:
+            return
+        x_run = np.array([px(u) for u, _ in run], F32)
+        y_run = np.array([py(v) for _, v in run], F32)
+        x0, x1 = max(float(x_run[0]), left), min(float(x_run[-1]), right)
+        if x1 <= x0:
+            return
+        band = _ys_band(ys, min(float(np.min(y_run)), base_y) - 1, max(float(np.max(y_run)), base_y) + 1)
+        v_view, v_ys = view[band], ys[band]
+        if v_view.size == 0:
+            return
+        line = np.interp(xs[0], x_run, y_run).astype(F32)[None, :]
+        span = np.maximum(np.abs(base_y - line), 1.0)
+        dist = np.abs(v_ys - line)
+        between = ((v_ys - line) * (base_y - line) >= 0) & (dist <= span)
+        cover = np.clip(dist + 0.5, 0, 1) * np.clip(span - dist + 0.5, 0, 1) * between
+        edge = np.clip(xs - x0 + 0.5, 0, 1) * np.clip(x1 - xs + 0.5, 0, 1)
+        t = np.clip(dist / span, 0, 1)
+        alpha = (0.3 * (1 - t) ** 1.8 + 0.035) * cover * edge
+        c.over(v_view, colour, alpha)
+
+    @staticmethod
+    def _line(c: Canvas, view: Array, xs: Array, ys: Array, run: Run, px: _ToPx, py: _ToPx, colour: Array,
+              lw: float, sy: float, left: float, right: float, first: bool) -> None:
+        x_run = np.array([px(u) for u, _ in run], F32)
+        y_run = np.array([py(v) for _, v in run], F32)
+        if len(run) == 1:
+            Lines._dot(c, view, xs, ys, float(x_run[0]), float(y_run[0]), colour, sy, bright=False, small=True)
+            return
+        reach = 0.36 * sy
+        band = _ys_band(ys, float(np.min(y_run)) - reach - 1, float(np.max(y_run)) + reach + 1)
+        v_view, v_ys = view[band], ys[band]
+        if v_view.size == 0:
+            return
+        x = xs[0]
+        mid = np.interp(x, x_run, y_run)
+        a = np.interp(x - 0.5, x_run, y_run)
+        b = np.interp(x + 0.5, x_run, y_run)
+        lo = np.minimum(np.minimum(a, b), mid).astype(F32)[None, :]
+        hi = np.maximum(np.maximum(a, b), mid).astype(F32)[None, :]
+        x0, x1 = max(float(x_run[0]), left), min(float(x_run[-1]), right)
+        cols = (np.clip(xs - x0 + 1.0, 0, 1) * np.clip(x1 + 1.0 - xs, 0, 1)).astype(F32)
+        d = np.maximum(0, np.maximum(lo - v_ys, v_ys - hi))
+        u = np.clip((xs - left) / max(1.0, right - left), 0, 1)
+        ramp = (0.62 + 0.38 * u) * cols  # older parts of the line a little dimmer
+        core = np.clip(lw / 2 + 0.5 - d, 0, 1) * ramp
+        glow = np.exp(-d / (0.13 * sy)) * smoothstep(reach, 0.1 * sy, d) * ramp * (0.5 if first else 0.38)
+        c.glow(v_view, colour, glow)
+        c.over(v_view, colour * 0.7 + 0.3, core)
+
+    @staticmethod
+    def _dot(c: Canvas, view: Array, xs: Array, ys: Array, cx: float, cy: float, colour: Array, sy: float,
+             bright: bool, small: bool = False) -> None:
+        r = (0.08 if small else 0.17 if bright else 0.13) * sy
+        reach = (0.26 if small else 0.42) * sy
+        band = _ys_band(ys, cy - reach - 1, cy + reach + 1)
+        v_view, v_ys = view[band], ys[band]
+        if v_view.size == 0:
+            return
+        d = np.sqrt((xs - cx) ** 2 + (v_ys - cy) ** 2)
+        falloff = smoothstep(reach, r + 0.08 * sy, d)
+        c.glow(v_view, colour, np.exp(-np.maximum(d - r, 0) / (0.12 * sy)) * falloff * (0.75 if bright else 0.55))
+        c.over(v_view, colour * 0.35 + 0.65 if not small else colour * 0.7 + 0.3, np.clip(r + 0.5 - d, 0, 1))

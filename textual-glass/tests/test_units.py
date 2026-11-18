@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import inspect
 import io
+import math
 import os
 import re
 import select
@@ -34,6 +35,7 @@ from textual_glass.items import (
     HeaderBar,
     HeaderStrip,
     Lane,
+    Lines,
     Meter,
     Panel,
     Pill,
@@ -365,6 +367,27 @@ def test_panel_diff_boxes_cover_every_changed_pixel(old: Panel, new: Panel, rgba
 
 # -- no light at the box edges (rule 16) --------------------------------------------------
 
+
+def _wave(n: int, phase: float, amp: float = 0.5, base: float = 0.5) -> tuple[tuple[float, float], ...]:
+    """A ``Lines`` run: ``n`` points across the rect, values kept to 0..1."""
+    return tuple((i / (n - 1), min(1.0, max(0.0, base + amp * math.sin(i / (n - 1) * 7 + phase)))) for i in range(n))
+
+
+#: ``Lines`` at the edges of its range: lines and fills reaching 0 and 1 at both ends, steep zigzags, gaps, lone
+#: points in the corners, a baseline above the bottom, eight series, a one-row and a two-row chart.
+LINES_SAMPLES: list[Item] = [
+    Lines((6, 3, 40, 10), ((((0.0, 1.0), (0.5, 0.0), (1.0, 1.0)),),), (CYAN,), guides=(1.0, 0.5, 0.0),
+          ticks=(0.0, 0.5)),
+    Lines((6, 3, 40, 10), ((((0.0, 0.0), (1.0, 0.0)),), (((0.0, 1.0), (1.0, 1.0)),)), (CYAN, VIOLET)),
+    Lines((6, 3, 40, 10), (tuple((tuple((i / 39, float(i % 2)) for i in range(40)),)),), ("#ffc24b",)),
+    Lines((6, 3, 40, 10), ((_wave(60, 0.0)[:20], _wave(60, 0.0)[25:]), (((0.0, 1.0),), ((1.0, 0.0),), ((1.0, 1.0),)),
+                           (_wave(60, 2.0),), (_wave(60, 4.0, 0.1, 0.95),)) + ((_wave(30, 1.0),),) * 4,
+          (CYAN, VIOLET, "#ffc24b"), guides=(1.0, 0.0)),
+    Lines((6, 3, 40, 10), ((((0.0, 0.0), (0.5, 1.0), (1.0, 0.0)),),), (CYAN,), base=0.5),
+    Lines((6, 3, 40, 1), ((((0.0, 1.0), (1.0, 0.0)),),), (CYAN,)),
+    Lines((6, 3, 12, 2), ((((0.0, 0.0), (1.0, 1.0)),), (((0.0, 1.0),),)), (CYAN, VIOLET)),
+]
+
 #: At least one of every item class, in the variants that draw the most light (focus, glows,
 #: trails, dialogs with shadows) and some that sit right at the ends of their range.
 EDGE_SAMPLES: list[Item] = [
@@ -402,6 +425,7 @@ EDGE_SAMPLES: list[Item] = [
     Dot(40, 15.5, "#ffc24b", trail=2.5), Dot(40, 17.5, "#ff6ec7", trail=1.0, ring=True), Dot(44, 17.5, "#6dffa8"),
     Dot(44, 19.5, "#6dffa8", hollow=True),
     Spine(30, 20, 25, CYAN, VIOLET),
+    *LINES_SAMPLES,
 ]
 
 

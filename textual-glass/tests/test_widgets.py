@@ -1,6 +1,7 @@
 """The generic widgets (``textual_glass.widgets``): the same layout with and
-without glass, the SelectList pill, GlassPanel titles and accents, clipping in
-scrolling containers, and the strip helper (rule 15).
+without glass (``LineChart`` too; ``test_chart.py`` has the rest of it), the
+SelectList pill, GlassPanel titles and accents, clipping in scrolling
+containers, and the strip helper (rule 15).
 
 Pilot runs headless, so glass is forced on with ``start`` and the engine's
 writes are captured by the ``output`` fixture.
@@ -39,6 +40,7 @@ from textual_glass.widgets import (
     BLOCKS,
     GlassPanel,
     InfoCard,
+    LineChart,
     Part,
     PixelWidget,
     ProgressArc,
@@ -56,6 +58,10 @@ from textual_glass.widgets import (
 SIZE = (100, 32)
 BEACON = "#ffc24b"
 DAYS = ("M", "T", "W", "T", "F", "S", "S")
+#: The line chart's window ends here (unix seconds): 15 minutes of points, every 15 s.
+T_END = 1_700_000_000.0
+LINES = [("api", [(T_END - 900 + 15 * i, 120 + 40 * math.sin(i / 6)) for i in range(61)]),
+         ("db", [(T_END - 900 + 15 * i, 60 + 20 * math.cos(i / 9)) for i in range(61)])]
 
 
 @dataclass(frozen=True)
@@ -112,6 +118,8 @@ class Board(App[None]):
             with GlassPanel(title="CARD", id="card-panel"):
                 yield StatValue(versus="vs last week", id="stat")
                 yield InfoCard(id="card")
+            with GlassPanel(title="LINES", id="lines-panel"):
+                yield LineChart(id="lines")
         with Horizontal(id="bottom"):
             yield StatTile("LANDED", versus="vs last week", id="landed")
             yield StatTile("LATENCY", mode="area", colors=("#6dffa8", "#38e1ff"), id="latency")
@@ -124,6 +132,7 @@ class Board(App[None]):
                                           "A body paragraph long enough to wrap across a few lines of the card.")
         self.query_one("#landed", StatTile).set(12, 3, [2, 4, 1, 0, 3, 1, 1], [3, 2, 2, 1, 2, 0, 0], DAYS, today=4)
         self.query_one("#latency", StatTile).set("38ms", -4, [5, 9, 4, 7, 12, 6, 8, 5], better="down")
+        self.query_one(LineChart).set_series(LINES, start=T_END - 900, end=T_END, unit="ms")
         self.query_one(Queue).focus()
 
     def on_select_list_highlighted(self, message: SelectList.Highlighted) -> None:
@@ -144,6 +153,7 @@ def _widgets(app: App[Any]) -> dict[str, Widget]:
         "beacon": app.query_one("#beacon"), "queue": app.query_one("#queue"), "stat": app.query_one("#stat"),
         "card": app.query_one("#card"), "landed": app.query_one("#landed", StatTile).chart,
         "landed-stat": app.query_one("#landed", StatTile).stat, "latency": app.query_one("#latency", StatTile).chart,
+        "lines": app.query_one("#lines"),
     }
 
 
@@ -208,6 +218,15 @@ async def test_every_widget_renders_in_both_modes_with_identical_layout(output: 
         assert isinstance(bars, R.Bars) and bars.ghost == (3, 2, 2, 1, 2, 0, 0) and bars.today == 4
         assert "░" in "".join(plain["landed"]), "the ghost series without glass"
         assert plain["landed"][-1] == glass["landed"][-1] and "M" in glass["landed"][-1], "the labels row"
+
+        def braille(lines: list[str]) -> bool:
+            return any("⠀" < ch <= "⣿" for line in lines for ch in line)
+
+        assert plain["lines"][0] == glass["lines"][0] and "● api" in glass["lines"][0], "the same legend"
+        assert plain["lines"][-1] == glass["lines"][-1] and glass["lines"][-1].rstrip().endswith("now"), "time axis"
+        assert braille(plain["lines"]) and not braille(glass["lines"]), "braille lines without glass, pixels with it"
+        chart = scene[f"lines:{id(widgets['lines'])}"]
+        assert isinstance(chart, R.Lines) and len(chart.series) == 2 and len(chart.colors) == 2
 
         assert "◉" in "".join(plain["beacon"]) and kitty.PLACEHOLDER not in "".join(plain["beacon"])
         assert kitty.PLACEHOLDER in "".join(glass["beacon"]), "the sprite's placeholder cells"
@@ -318,8 +337,8 @@ async def test_widget_items_draw_nothing_at_the_edge_of_their_box(output: Output
     async with app.run_test(size=SIZE) as pilot:
         await start(app, pilot)
         grid = app.glass.grid
-        items = [i for name, i in _scene(app).items() if re.match(r"(ring|arc|bars|area|pill|sig):", name)]
-    assert {type(i) for i in items} == {R.Ring, R.Bars, R.Area, R.Pill, R.Signal}
+        items = [i for name, i in _scene(app).items() if re.match(r"(ring|arc|bars|area|pill|sig|lines):", name)]
+    assert {type(i) for i in items} == {R.Ring, R.Bars, R.Area, R.Pill, R.Signal, R.Lines}
     for item in items:
         x0, y0, x1, y1 = item.bbox(grid)
         ox, oy = math.floor(x0) - 2, math.floor(y0) - 2
@@ -664,14 +683,14 @@ def test_widgets_add_no_attribute_textual_has() -> None:
     dunder = re.compile(r"^__.*__$")
     textual_made = set(vars(type("Plain", (Widget,), {})))
     classes = [W.PixelWidget, W.SelectList, W.RingGauge, W.Telemetry, W.StatValue, W.StatTile, W.ProgressArc,
-               W.SpriteView, W.InfoCard, W.GlassPanel]
+               W.SpriteView, W.InfoCard, W.GlassPanel, W.LineChart]
     for cls in classes:
         added = {n for n in set(vars(cls)) - textual_made - overrides if not dunder.match(n)}
         clashes = {n for n in added if hasattr(Widget, n)}
         assert not clashes, (cls.__name__, clashes)
     instances: list[Widget] = [
         W.SelectList(), W.RingGauge("x"), W.Telemetry(), W.StatValue(), W.StatTile("x"), W.ProgressArc(),
-        W.SpriteView(("k",), lambda w, h: ([], 0)), W.InfoCard(), W.GlassPanel(),
+        W.SpriteView(("k",), lambda w, h: ([], 0)), W.InfoCard(), W.GlassPanel(), W.LineChart(),
     ]
     plain = set(vars(Widget()))
     for widget in instances:

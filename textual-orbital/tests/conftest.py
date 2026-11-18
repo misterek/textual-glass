@@ -2,6 +2,7 @@ import os
 import sys
 import webbrowser
 from collections.abc import Iterator
+from pathlib import Path
 
 # The console example's modules (app, demo, pages, rules) import each other by
 # plain name. Drop same-named modules from elsewhere (another package's example
@@ -60,6 +61,15 @@ def outside_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
     (the notifier wraps its escapes when ``TMUX`` is set)."""
     for name in ("TMUX", "STY"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def boards_dir(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Never touch the user's boards folder: ``$BOARDS_DIR`` (the default ``textual_orbital.boards.Store``
+    folder) points at a fresh temporary one in every test."""
+    folder = tmp_path_factory.mktemp("boards")
+    monkeypatch.setenv("BOARDS_DIR", str(folder))
+    return folder
 
 
 @pytest.fixture
