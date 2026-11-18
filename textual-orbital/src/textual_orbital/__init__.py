@@ -91,7 +91,7 @@ from .widgets import (
     WeekReplay,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "AlertScreen", "AlertToast", "BeaconRow", "Brand", "Clock", "DetailScreen", "DoneList", "EventLog", "HeaderStrip",

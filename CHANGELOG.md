@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## textual-glass 0.8.0 and textual-orbital 0.6.0 (2026-11-18)
 
-Boards: panels that agents and scripts add to a folder while a dashboard runs, each a shell command shown as a graph, a number, a gauge, bars, a table or text; and glass's line chart, which draws the graphs. Nothing changes for an app that doesn't use them. At release, orbital needs the glass release with `LineChart`: raise its `textual-glass` pin then (it is still `>=0.7` here, where the workspace builds both from source).
+Boards: panels that agents and scripts add to a folder while a dashboard runs, each a shell command shown as a graph, a number, a gauge, bars, a table or text; and glass's line chart, which draws the graphs. Nothing changes for an app that doesn't use them. Upgrade both together: orbital 0.6 needs glass 0.8, which has `LineChart`.
 
 ### textual-glass
 
